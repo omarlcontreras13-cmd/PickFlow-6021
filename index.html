@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Build: 2026-05-26 19:34:30 -->
+<!-- Build: 2026-05-27 13:14:24 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -8,7 +8,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -219,7 +220,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
 </div>
 
 <div id="modal-container"></div>
-<input type="file" id="file-input" accept=".xlsx,.xls,.xlsb" style="display:none" onchange="handleFileImport(event)">
+<input type="file" id="file-input" accept=".xlsx,.xls,.xlsb" style="display:none" multiple onchange="handleFileImport(event)">
 
 <script>
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
@@ -297,6 +298,7 @@ function reResolveBUs() {
 }
 
 const GHOST_LOCATION = '23-GHOST-00';
+const CYCLE_COUNT_PATTERN = '-CC-'; // locations containing -CC- are Cycle Count
 const FIFO_ACCOUNTS = ['COVINGTON XDK','CBM','NORCROSS XDK','BLANK'];
 const FEFO_ACCOUNTS = ['SCI GAMES','HBH','CONWAY','LANET'];
 
@@ -691,24 +693,69 @@ function triggerImport() {
     showDashboard();
     return;
   }
+  // Inventory import supports multiple files; DIR/BU are single-file only
+  document.getElementById('file-input').multiple = (state.importMode === 'inventory');
   closeModal();
   document.getElementById('file-input').click();
 }
 
 function handleFileImport(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = function(ev) {
-    try {
-      const wb = XLSX.read(ev.target.result,{type:'binary',cellDates:true});
-      if (state.importMode==='dir') importDIR(wb);
-      else if (state.importMode==='bumap') importBUMap(wb);
-      else importInventory(wb, file.name);
-    } catch(err) { showAlert('Import failed: '+err.message,'danger'); }
-  };
-  reader.readAsBinaryString(file);
-  e.target.value='';
+  const files = Array.from(e.target.files||[]);
+  if (!files.length) return;
+  e.target.value = '';
+
+  // Single-file modes
+  if (state.importMode === 'dir' || state.importMode === 'bumap') {
+    const file = files[0];
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      try {
+        const wb = XLSX.read(ev.target.result,{type:'binary',cellDates:true});
+        if (state.importMode==='dir') importDIR(wb);
+        else importBUMap(wb);
+      } catch(err) { showAlert('Import failed: '+err.message,'danger'); }
+    };
+    reader.readAsBinaryString(file);
+    return;
+  }
+
+  // Inventory — process multiple files sequentially
+  let idx = 0;
+  const results = [];
+  function processNext() {
+    if (idx >= files.length) {
+      // All done — show summary
+      const total = results.reduce((s,r)=>s+r.added,0);
+      const customers = results.map(r=>r.customer).filter(Boolean).join(', ');
+      showAlert('✓ Imported '+files.length+' file'+(files.length>1?'s':'')+': '+total+' rolls. Customers: '+customers,'success');
+      // Save final inventory to Firebase
+      const compact = state.inventory.map(r=>({
+        ...r,
+        dateRecd: r.dateRecd ? r.dateRecd.getTime() : null,
+        expDate: r.expDate ? r.expDate.getTime() : null,
+        dirExpDate: r.dirExpDate ? r.dirExpDate.getTime() : null,
+      }));
+      db.ref('6021/inventory').set(compact).catch(()=>{});
+      updateImportStamp();
+      showDashboard();
+      return;
+    }
+    const file = files[idx++];
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      try {
+        const wb = XLSX.read(ev.target.result,{type:'binary',cellDates:true});
+        const result = importInventory(wb, file.name, true); // true = batch mode (skip Firebase save)
+        results.push(result||{added:0,customer:file.name});
+      } catch(err) {
+        results.push({added:0,customer:file.name,error:err.message});
+        showAlert('Error importing '+file.name+': '+err.message,'danger');
+      }
+      processNext();
+    };
+    reader.readAsBinaryString(file);
+  }
+  processNext();
 }
 
 function importBUMap(wb) {
@@ -844,7 +891,7 @@ function importDIR(wb) {
   closeModal();
 }
 
-function importInventory(wb, filename) {
+function importInventory(wb, filename, batchMode=false) {
   // Try Sheet1 first, then first sheet
   let ws = wb.Sheets['Sheet1'] || wb.Sheets[wb.SheetNames[0]];
   const allRows = XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
@@ -903,11 +950,16 @@ function importInventory(wb, filename) {
     if (!sku||!loc) continue;
 
     let status = statusIdx>=0 ? (r[statusIdx]||'').toString().trim().toUpperCase() : 'AVAILABLE';
-    // Any roll in a 23-QH location is automatically DAMAGED
+    // Any roll in a 23-QH location is marked DAMAGED (but still available to pick)
     if (loc.toUpperCase().includes('23-QH')) status = 'DAMAGED';
-    // Include AVAILABLE, DAMAGED, and GHOST; exclude anything else
-    const isGhost = loc.toUpperCase()===GHOST_LOCATION.toUpperCase() || status==='GHOST';
-    if (!isGhost && status && status!=='AVAILABLE' && status!=='DAMAGED') { skipped++; continue; }
+    // Ghost location → force GHOST status
+    if (loc.toUpperCase() === GHOST_LOCATION.toUpperCase()) status = 'GHOST';
+    // Cycle Count location → force CYCLE COUNT status (still available to pick)
+    if (loc.toUpperCase().includes(CYCLE_COUNT_PATTERN.toUpperCase())) status = 'CYCLE COUNT';
+    // Include AVAILABLE, DAMAGED, GHOST, CYCLE COUNT; exclude anything else
+    const isGhost = status === 'GHOST';
+    const isCycleCount = status === 'CYCLE COUNT';
+    if (!isGhost && !isCycleCount && status && status!=='AVAILABLE' && status!=='DAMAGED') { skipped++; continue; }
 
     const lot = (r[lotI]||'').toString().trim();
     const dateRecdRaw = dateRecdI>=0 ? r[dateRecdI] : null;
@@ -966,14 +1018,20 @@ function importInventory(wb, filename) {
     expDate: r.expDate ? r.expDate.getTime() : null,
     dirExpDate: r.dirExpDate ? r.dirExpDate.getTime() : null,
   }));
-  db.ref('6021/inventory').set(compact).catch(()=>{});
   state.lastImport = Date.now();
-  db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
   state.dataLoaded = true;
   enableAppButtons();
-  updateImportStamp();
-  showAlert(`✓ ${filename}: ${added} rolls imported for ${[...incomingCustomers].join(', ')}. Total inventory: ${state.inventory.length} rolls.`,'success');
-  showDashboard();
+
+  if (!batchMode) {
+    // Single file — save to Firebase immediately and notify
+    db.ref('6021/inventory').set(compact).catch(()=>{});
+    db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
+    updateImportStamp();
+    showAlert(`✓ ${filename}: ${added} rolls imported for ${[...incomingCustomers].join(', ')}. Total: ${state.inventory.length} rolls.`,'success');
+    showDashboard();
+  }
+  // Return result for batch aggregation
+  return { added, customer: [...incomingCustomers].join(', ') };
 }
 
 function parseDate(v) {
@@ -1286,7 +1344,7 @@ function renderSkuLinesSections(ticket, id) {
     html += '</div>';
 
     html += '<div style="overflow-x:auto"><table class="data-table" style="margin:0">';
-    html += '<thead><tr><th>RECV DATE</th><th>EXP DATE</th><th>LOT #</th><th>SKID ID</th><th>PRODUCT ID</th><th>LOCATION</th><th>INBOUND BOL</th><th style="text-align:center">PCS</th><th style="text-align:right">WEIGHT</th><th style="text-align:right">TONS</th><th></th></tr></thead>';
+    html += '<thead><tr><th>RECV DATE</th><th>EXP DATE</th><th>LOT #</th><th>SKID ID</th><th>PRODUCT ID</th><th>LOCATION</th><th>STATUS</th><th>INBOUND BOL</th><th style="text-align:center">PCS</th><th style="text-align:right">WEIGHT</th><th style="text-align:right">TONS</th><th></th></tr></thead>';
     html += '<tbody>';
 
     if (lineRolls.length===0) {
@@ -1301,6 +1359,10 @@ function renderSkuLinesSections(ticket, id) {
         html += '<td style="font-size:11px">' + (r.skidId||'—') + '</td>';
         html += '<td style="font-size:11px">' + (r.productId||'—') + '</td>';
         html += '<td style="font-weight:bold">' + (r.location||'—') + '</td>';
+        const _isPick = (r.pcsPending||0)>0;
+        const _statDisp = _isPick ? 'PICKED' : (r.status||'AVAILABLE');
+        const _statCol = _isPick?'var(--warning)':r.status==='DAMAGED'?'var(--danger)':r.status==='GHOST'?'var(--text2)':r.status==='CYCLE COUNT'?'var(--accent)':'var(--accent2)';
+        html += '<td style="font-weight:bold;color:'+_statCol+'">'+_statDisp+'</td>';
         html += '<td style="font-size:11px">' + (r.bol||'—') + '</td>';
         html += '<td style="text-align:center">1</td>';
         html += '<td style="text-align:right">' + (r.grossWt||0).toLocaleString() + '</td>';
@@ -1451,6 +1513,8 @@ function viewTicket(id) {
         const tokens = line.orderNum.toString().trim().toUpperCase().split(/\s+/).filter(Boolean);
         if (!tokens.some(t => p2.includes(t))) return false;
       }
+      if ((r.pcsPending||0) > 0) return false; // already picked
+      if ((r.status||'') === 'GHOST') return false; // ghost not available
       return true;
     }).length;
     const showZmo = true;
@@ -1588,6 +1652,8 @@ function openGroupedSelector(id, lineIdx) {
       const tokens = line.orderNum.toString().trim().toUpperCase().split(/\s+/).filter(Boolean);
       if (!tokens.some(t => p2.includes(t))) return false;
     }
+    if ((r.pcsPending||0) > 0) return false;
+    if ((r.status||'') === 'GHOST') return false; // ghost not available to pick
     return true;
   });
   console.log('Roll filter: customer='+ticket.customer+' bu='+line.bu+' sku='+line.sku+' zmo='+line.zmo+' orderNum='+line.orderNum+' → '+rolls.length+' rolls');
@@ -1660,7 +1726,7 @@ function openGroupedSelector(id, lineIdx) {
     const gWt = gr.reduce((s,r)=>s+(r.grossWt||0),0);
     const gTons = gr.reduce((s,r)=>s+(r.tons||0),0);
     const allChk = gr.every(r=>window._rollSelected.has(String(r.skidId)));
-    const grpOpen = gi===0;
+    const grpOpen = false; // all collapsed on initial view
     // Split date group into 40-roll chunks
     const chunks = [];
     for (let i=0; i<gr.length; i+=CHUNK) chunks.push(gr.slice(i,i+CHUNK));
@@ -1684,7 +1750,7 @@ function openGroupedSelector(id, lineIdx) {
       const cWt = ch.reduce((s,r)=>s+(r.grossWt||0),0);
       const cTons = ch.reduce((s,r)=>s+(r.tons||0),0);
       const cAllChk = ch.every(r=>window._rollSelected.has(String(r.skidId)));
-      const cOpen = ci===0 && grpOpen;
+      const cOpen = false; // all collapsed on initial view
       const cLabel = chunks.length>1 ? 'Rolls '+(gi*0+ci*CHUNK+1)+'&#8211;'+(ci*CHUNK+ch.length) : '';
       h += '<div style="border:1px solid var(--border);border-radius:6px;margin-bottom:6px;overflow:hidden">';
       h += '<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--bg,var(--surface2));cursor:pointer" data-cid="'+cId+'" onclick="toggleChunk(this.dataset.cid)">';
@@ -1698,7 +1764,7 @@ function openGroupedSelector(id, lineIdx) {
       h += '<div id="cbody-'+cId+'" style="display:'+(cOpen?'block':'none')+'">';
       h += '<table class="data-table" style="font-size:11px;margin:0"><thead><tr>';
       h += '<th><input type="checkbox"'+(cAllChk?' checked':'')+' data-cid="'+cId+'" onchange="chunkChk(this.dataset.cid,this.checked)"></th>';
-      h += '<th>'+(group==='FEFO'?'EXP DATE':'RECV DATE')+'</th><th>LOT #</th><th>SKID ID</th><th>PRODUCT ID</th><th>LOCATION</th><th>ZMO</th><th>STATUS</th><th style="text-align:right">WEIGHT</th><th style="text-align:right">TONS</th>';
+      h += '<th>'+(group==='FEFO'?'EXP DATE':'RECV DATE')+'</th><th>LOT #</th><th>SKID ID</th><th>PRODUCT ID</th><th>PRODUCT ID 2</th><th>LOCATION</th><th>ZMO</th><th>STATUS</th><th style="text-align:right">WEIGHT</th><th style="text-align:right">TONS</th>';
       h += '</tr></thead><tbody>';
       ch.forEach(r => {
         const chk = window._rollSelected.has(String(r.skidId));
@@ -1708,11 +1774,14 @@ function openGroupedSelector(id, lineIdx) {
         h += '<td><input type="checkbox" class="rchk"'+(chk?' checked':'')+' data-skid="'+r.skidId+'" onclick="event.stopPropagation()" onchange="toggleRollByChk(this)"></td>';
         h += '<td>'+dv+'</td><td style="font-size:10px">'+r.lot+'</td><td style="font-size:10px">'+r.skidId+'</td>';
         h += '<td style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+r.productId+'</td>';
+        h += '<td style="font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(r.prod2||'&mdash;')+'</td>';
         h += '<td style="font-weight:bold">'+r.location+'</td>';
         const rowZmo = r.zmo || (r.lot && state.dirData[r.lot] ? state.dirData[r.lot].zmo : '') || '&mdash;';
         h += '<td style="font-size:10px;color:var(--accent)">'+rowZmo+'</td>';
-        const statusColor = r.status==='DAMAGED'?'var(--danger)':r.status==='GHOST'?'var(--text2)':'var(--accent2)';
-    h += '<td style="color:'+statusColor+';font-weight:bold">'+r.status+'</td>';
+        const isPicked = (r.pcsPending||0) > 0;
+    const displayStatus = isPicked ? 'PICKED' : (r.status||'AVAILABLE');
+    const statusColor = isPicked ? 'var(--warning)' : r.status==='DAMAGED' ? 'var(--danger)' : r.status==='GHOST' ? 'var(--text2)' : r.status==='CYCLE COUNT' ? 'var(--accent)' : 'var(--accent2)';
+    h += '<td style="color:'+statusColor+';font-weight:bold">'+displayStatus+'</td>';
         h += '<td style="text-align:right">'+(r.grossWt||0).toLocaleString()+'</td>';
         h += '<td style="text-align:right">'+(r.tons||0).toFixed(1)+'</td></tr>';
       });
@@ -2253,20 +2322,21 @@ function exportPickTicketPDF(id, fromArchive=false) {
   // ── TABLE — segmented by SKU ─────────────────────────────────────────────
   // Col 0=RECV DATE, 1=EXP DATE, 2=PICKED(checkbox), 3=LOT#, 4=SKID ID,
   // 5=PRODUCT ID, 6=PRODUCT ID 2, 7=LOCATION, 8=INBOUND BOL, 9=SKIDS, 10=PCS, 11=WEIGHT, 12=TONS
-  const head = [['RECV DATE','EXP DATE','PICKED','LOT #','SKID ID','PRODUCT ID','PRODUCT ID 2','LOCATION','PCS','WEIGHT','TONS']];
+  const head = [['RECV DATE','EXP DATE','PICKED','LOT #','SKID ID','PRODUCT ID','PRODUCT ID 2','LOCATION','STATUS','PCS','WEIGHT','TONS']];
   // 11 cols, total 259mm — BOL + SKIDS removed, more room for content
   const colStyles = {
-    0:{cellWidth:22},                         // RECV DATE
-    1:{cellWidth:22},                         // EXP DATE
-    2:{cellWidth:15, halign:'center'},         // PICKED (checkbox)
-    3:{cellWidth:33},                         // LOT #
-    4:{cellWidth:25},                         // SKID ID
-    5:{cellWidth:42},                         // PRODUCT ID
-    6:{cellWidth:25},                         // PRODUCT ID 2
-    7:{cellWidth:25},                         // LOCATION
-    8:{cellWidth:14, halign:'center'},         // PCS
-    9:{cellWidth:20, halign:'right'},          // WEIGHT
-    10:{cellWidth:16, halign:'right'}          // TONS
+    0:{cellWidth:20},                         // RECV DATE
+    1:{cellWidth:20},                         // EXP DATE
+    2:{cellWidth:13, halign:'center'},         // PICKED (checkbox)
+    3:{cellWidth:30},                         // LOT #
+    4:{cellWidth:23},                         // SKID ID
+    5:{cellWidth:36},                         // PRODUCT ID
+    6:{cellWidth:22},                         // PRODUCT ID 2
+    7:{cellWidth:22},                         // LOCATION
+    8:{cellWidth:20},                         // STATUS
+    9:{cellWidth:14, halign:'center'},         // PCS
+    10:{cellWidth:19, halign:'right'},         // WEIGHT
+    11:{cellWidth:18, halign:'right'}          // TONS
   };
 
   // Group by SKU line
@@ -2286,14 +2356,14 @@ function exportPickTicketPDF(id, fromArchive=false) {
       r.dateRecd?r.dateRecd.toLocaleDateString():'—',
       (r.dirExpDate||r.expDate)?new Date(r.dirExpDate||r.expDate).toLocaleDateString():'—',
       '', // PICKED — checkbox drawn in didDrawCell
-      r.lot||'—', r.skidId||'—', r.productId||'—', r.prod2||'—', r.location||'—',
+      r.lot||'—', r.skidId||'—', r.productId||'—', r.prod2||'—', r.location||'—', ((r.pcsPending||0)>0?'PICKED':(r.status||'AVAILABLE')),
       '1',
       (r.grossWt||0).toLocaleString(), (r.tons||0).toFixed(1)
     ]);
 
     // Subtotal row per SKU
     if (skuLines.length>1) {
-      tableRows.push(['','','','','','','Subtotal',String(lineRolls.length),String(lineRolls.length),lineWt.toLocaleString(),lineTons.toFixed(1)]);
+      tableRows.push(['','','','','','','','Subtotal',String(lineRolls.length),String(lineRolls.length),lineWt.toLocaleString(),lineTons.toFixed(1)]);
     }
 
     // ── Per-SKU label above each table ──────────────────────────────────────
@@ -2384,7 +2454,7 @@ function exportPickTicketPDF(id, fromArchive=false) {
       margin:{left:margin,right:margin},
       tableWidth:pageW-margin*2,
       showHead:'never',
-      body:[['','','','','','GRAND TOTAL',String(totalRolls),String(totalRolls),totalWt.toLocaleString(),totalTons.toFixed(1)]],
+      body:[['','','','','','','GRAND TOTAL',String(totalRolls),String(totalRolls),totalWt.toLocaleString(),totalTons.toFixed(1)]],
       styles:{fontSize:8,cellPadding:2,fontStyle:'bold'},
       columnStyles:{...colStyles, 5:{cellWidth:colStyles[5].cellWidth,halign:'right'}},
       didParseCell: function(data) { data.cell.styles.fillColor=[220,240,220]; }
@@ -2507,6 +2577,14 @@ function applyInvFilter(page) {
   if (sku)  filtered = filtered.filter(r=>r.sku.toLowerCase().includes(sku.toLowerCase()));
   if (loc)  filtered = filtered.filter(r=>r.location.toLowerCase().includes(loc.toLowerCase()));
   if (lot)  filtered = filtered.filter(r=>(r.lot||'').toLowerCase().includes(lot.toLowerCase()));
+  // Sort by Customer → SKU → Lot #
+  filtered = [...filtered].sort((a,b)=>{
+    const cCmp = (a.customer||'').localeCompare(b.customer||'');
+    if (cCmp!==0) return cCmp;
+    const sCmp = (a.sku||'').localeCompare(b.sku||'', undefined, {numeric:true});
+    if (sCmp!==0) return sCmp;
+    return (a.lot||'').localeCompare(b.lot||'', undefined, {numeric:true, sensitivity:'base'});
+  });
 
   const ps=50, st=page*ps, sl=filtered.slice(st,st+ps), tot=filtered.length, pg=Math.ceil(tot/ps)||1;
   const isFiltered = cust||bu||sku||loc||lot;
@@ -2532,8 +2610,10 @@ function applyInvFilter(page) {
     h += '<td style="font-size:10px">'+(r.prod2||'—')+'</td>';
     h += '<td style="text-align:center">'+r.pcs+'</td>';
     h += '<td style="text-align:center;'+(r.pcsPending>0?'color:var(--warning);font-weight:bold':'')+'">'+(r.pcsPending||0)+'</td>';
-    const statusColor = r.status==='DAMAGED'?'var(--danger)':r.status==='GHOST'?'var(--text2)':'var(--accent2)';
-    h += '<td style="color:'+statusColor+';font-weight:bold">'+r.status+'</td>';
+    const isPicked = (r.pcsPending||0) > 0;
+    const displayStatus = isPicked ? 'PICKED' : (r.status||'AVAILABLE');
+    const statusColor = isPicked ? 'var(--warning)' : r.status==='DAMAGED' ? 'var(--danger)' : r.status==='GHOST' ? 'var(--text2)' : r.status==='CYCLE COUNT' ? 'var(--accent)' : 'var(--accent2)';
+    h += '<td style="color:'+statusColor+';font-weight:bold">'+displayStatus+'</td>';
     h += '<td style="font-size:10px">'+(r.lot||'—')+'</td>';
     h += '<td style="font-size:10px">'+(r.skidId||'—')+'</td>';
     h += '<td style="font-weight:bold">'+(r.location||'—')+'</td>';
@@ -2579,6 +2659,7 @@ function showDataPreview() {
             <div class="form-group"><label>FILTER LOCATION</label><input type="text" id="f-loc" placeholder="Location..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
             <div class="form-group"><label>FILTER LOT #</label><input type="text" id="f-lot" placeholder="Lot #..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
             <button class="btn btn-sm" onclick="clearInvFilters()">✕ Clear</button>
+            <button class="btn btn-sm btn-primary" onclick="exportInvToExcel()" style="white-space:nowrap">&#11123; Export Excel</button>
           </div>
           <div id="inv-table-wrap"></div>`;
       }
@@ -2598,6 +2679,7 @@ function showDataPreview() {
           '<div class="form-group"><label>FILTER BATCH / LOT #</label><input type="text" id="df-lot" placeholder="Batch or Lot #..." oninput="applyDirFilter()" style="'+finp+'"></div>' +
           '<div class="form-group"><label>FILTER SKU (MATERIAL)</label><input type="text" id="df-sku" placeholder="Material / SKU..." oninput="applyDirFilter()" style="'+finp+'"></div>' +
           '<button class="btn btn-sm" onclick="clearDirFilter()">&#x2715; Clear</button>' +
+          '<button class="btn btn-sm btn-primary" onclick="exportDirToExcel()" style="white-space:nowrap">&#11123; Export Excel</button>' +
           '</div>' +
           '<div style="display:flex;align-items:center;gap:16px;margin-bottom:10px;padding:10px 14px;background:rgba(26,122,74,0.08);border:1px solid rgba(26,122,74,0.2);border-radius:6px">' +
           '<span style="font-size:13px;font-weight:bold;color:var(--accent2)">'+dirTsStr+'</span>' +
@@ -2890,6 +2972,66 @@ function deleteUser(uid) {
   db.ref('6021/users/'+uid).remove()
     .then(()=>{ showAlert('✓ User deleted.','success'); closeModal(); })
     .catch(e=>showAlert('Error: '+e.message,'danger'));
+}
+
+
+// ─── EXPORT TO EXCEL ─────────────────────────────────────────────────────────
+function exportInvToExcel() {
+  // Use currently filtered inventory (respects all active filters)
+  const cust = (document.getElementById('f-cust')||{}).value||'';
+  const bu   = (document.getElementById('f-bu')||{}).value||'';
+  const sku  = (document.getElementById('f-sku')||{}).value||'';
+  const loc  = (document.getElementById('f-loc')||{}).value||'';
+  const lot  = (document.getElementById('f-lot')||{}).value||'';
+  let rows = state.inventory;
+  if (cust) rows = rows.filter(r=>r.customer.toLowerCase().includes(cust.toLowerCase()));
+  if (bu)   rows = rows.filter(r=>(r.bu||'').toLowerCase()===bu.toLowerCase());
+  if (sku)  rows = rows.filter(r=>(r.sku||'').toLowerCase().includes(sku.toLowerCase()));
+  if (loc)  rows = rows.filter(r=>(r.location||'').toLowerCase().includes(loc.toLowerCase()));
+  if (lot)  rows = rows.filter(r=>(r.lot||'').toLowerCase().includes(lot.toLowerCase()));
+
+  const data = [['CUSTOMER','BU','SKU','LOT #','SKID ID','PRODUCT ID','PROD ID 2','LOCATION','DATE RECD','EXP DATE','ZMO','STATUS','PCS PENDING','WEIGHT']];
+  rows.forEach(r => {
+    const expD = r.dirExpDate||r.expDate;
+    const isPicked = (r.pcsPending||0)>0;
+    data.push([
+      r.customer||'', r.bu||'', r.sku||'', r.lot||'', r.skidId||'',
+      r.productId||'', r.prod2||'', r.location||'',
+      r.dateRecd ? new Date(r.dateRecd).toLocaleDateString() : '',
+      expD ? new Date(expD).toLocaleDateString() : '',
+      r.zmo||'',
+      isPicked ? 'PICKED' : (r.status||''),
+      r.pcsPending||0, r.grossWt||0
+    ]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = data[0].map(()=>({wch:18}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Raw Inventory');
+  XLSX.writeFile(wb, 'PickFlow_6021_Inventory_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  showAlert('✓ Inventory exported to Excel.','success');
+}
+
+function exportDirToExcel() {
+  const lotF = (document.getElementById('df-lot')||{}).value||'';
+  const skuF = (document.getElementById('df-sku')||{}).value||'';
+  const lotQ = lotF.trim().toUpperCase();
+  const skuQ = skuF.trim().toUpperCase();
+  let entries = Object.entries(state.dirData||{});
+  if (lotQ) entries = entries.filter(([b])=>b.toUpperCase().includes(lotQ));
+  if (skuQ) entries = entries.filter(([,d])=>(d.material||'').toUpperCase().includes(skuQ)||(d.matDesc||'').toUpperCase().includes(skuQ));
+
+  const data = [['BATCH / LOT #','MATERIAL #','MATERIAL DESC','DOC TYPE','ZMO','CUSTOMER PO','MFG DATE','CUSTOMER']];
+  entries.forEach(([batch,d])=>{
+    const dZmo = d.zmo||(d.soDoc?d.soDoc+(d.soItem?'-'+d.soItem:''):'');
+    data.push([batch, d.material||'', d.matDesc||'', d.docType||'', dZmo||'', d.customerPO||'', d.mfgDate||'', d.customerName||'']);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = data[0].map(()=>({wch:20}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'DIR Data');
+  XLSX.writeFile(wb, 'PickFlow_6021_DIR_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  showAlert('✓ DIR data exported to Excel.','success');
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
