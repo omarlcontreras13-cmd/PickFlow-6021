@@ -1344,7 +1344,7 @@ function renderSkuLinesSections(ticket, id) {
     html += '</div>';
 
     html += '<div style="overflow-x:auto"><table class="data-table" style="margin:0">';
-    html += '<thead><tr><th>RECV DATE</th><th>EXP DATE</th><th>LOT #</th><th>SKID ID</th><th>PRODUCT ID</th><th>LOCATION</th><th>STATUS</th><th>INBOUND BOL</th><th style="text-align:center">PCS</th><th style="text-align:right">WEIGHT</th><th style="text-align:right">TONS</th><th></th></tr></thead>';
+    html += '<thead><tr><th>RECV DATE</th><th>EXP DATE</th><th>LOT #</th><th>SKID ID</th><th>PRODUCT ID</th><th>PRODUCT ID 2</th><th>LOCATION</th><th>STATUS</th><th>INBOUND BOL</th><th style="text-align:center">PCS</th><th style="text-align:right">WEIGHT</th><th style="text-align:right">TONS</th><th></th></tr></thead>';
     html += '<tbody>';
 
     if (lineRolls.length===0) {
@@ -1358,6 +1358,7 @@ function renderSkuLinesSections(ticket, id) {
         html += '<td style="font-size:11px">' + (r.lot||'—') + '</td>';
         html += '<td style="font-size:11px">' + (r.skidId||'—') + '</td>';
         html += '<td style="font-size:11px">' + (r.productId||'—') + '</td>';
+        html += '<td style="font-size:10px;color:var(--accent)">' + (r.prod2||'—') + '</td>';
         html += '<td style="font-weight:bold">' + (r.location||'—') + '</td>';
         const _isPick = (r.pcsPending||0)>0;
         const _statDisp = _isPick ? 'PICKED' : (r.status||'AVAILABLE');
