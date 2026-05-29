@@ -199,6 +199,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
         <button class="btn btn-primary" id="import-btn" onclick="showImport()">⬆ Import Data</button>
         <button class="btn btn-success" id="new-ticket-btn" onclick="showNewTicket()" disabled>+ New Pick Ticket</button>
         <button class="btn" id="preview-btn" onclick="showDataPreview()" disabled style="font-size:11px">🔍 Preview Data</button>
+        <button class="btn" id="tons-btn" onclick="showInventorySummary()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📦 Customer Ton View</button>
         <button class="btn" id="archive-settings-btn" onclick="showArchiveSettings()" style="font-size:11px;display:none">📁 Archive Settings</button>
         <button class="btn" id="manage-users-btn" onclick="showUserManagement()" style="font-size:11px;display:none">👥 Manage Users</button>
       </div>
@@ -298,7 +299,7 @@ function reResolveBUs() {
 }
 
 const GHOST_LOCATION = '23-GHOST-00';
-const CYCLE_COUNT_PATTERN = '-CC-'; // locations containing -CC- are Cycle Count
+const CYCLE_COUNT_PATTERN = 'CYC_CNT'; // locations containing CYC_CNT are Cycle Count
 const FIFO_ACCOUNTS = ['COVINGTON XDK','CBM','NORCROSS XDK','BLANK'];
 const FEFO_ACCOUNTS = ['SCI GAMES','HBH','CONWAY','LANET'];
 
@@ -532,8 +533,10 @@ function updateImportStamp() {
 function enableAppButtons() {
   const nb = document.getElementById('new-ticket-btn');
   const pb = document.getElementById('preview-btn');
+  const tb = document.getElementById('tons-btn');
   if (nb) nb.disabled = false;
   if (pb) pb.disabled = false;
+  if (tb) tb.disabled = false;
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -938,7 +941,7 @@ function importInventory(wb, filename, batchMode=false) {
   // Remove existing rolls for these customers before re-importing
   if (incomingCustomers.size) {
     const before = state.inventory.length;
-    state.inventory = state.inventory.filter(r=>!incomingCustomers.has(r.customer));
+    state.inventory = []; // Full replacement — wipe all existing inventory
     console.log('Replaced '+( before-state.inventory.length)+' existing rolls for: '+[...incomingCustomers].join(', '));
   }
 
@@ -2099,12 +2102,14 @@ function archiveTicket(id, silent=false) {
 // ─── ARCHIVE LIST ─────────────────────────────────────────────────────────────
 function switchSidebarTab(tab) {
   state.sidebarTab = tab;
-  ['open','archive'].forEach(t=>{
+  ['open','archive'].forEach(t => {
     const btn = document.getElementById('tab-'+t);
-    btn.classList.toggle('active',t===tab);
+    if (btn) btn.classList.toggle('active', t===tab);
   });
-  if (tab==='archive') renderArchiveList();
-  else updateTicketList();
+  document.querySelectorAll('.ticket-item').forEach(el => {
+    const isArchive = el.dataset.archived === 'true';
+    el.style.display = (tab==='archive')===isArchive ? '' : 'none';
+  });
 }
 
 function renderArchiveList(filterDate='') {
@@ -2635,6 +2640,172 @@ function clearInvFilters() {
   const buSel2=document.getElementById('f-bu'); if(buSel2) buSel2.value='';
   applyInvFilter(0);
 }
+
+function showInventorySummary() {
+  const inv = state.inventory;
+  if (!inv.length) { showAlert('No inventory loaded.','warning'); return; }
+  window._summarySmurfitExpanded = window._summarySmurfitExpanded || false;
+
+  const getStatus = r => {
+    if ((r.pcsPending||0) > 0) return 'PICKED';
+    const loc = (r.location||'').toUpperCase();
+    const st  = (r.status||'').toUpperCase();
+    if (loc === '23-GHOST-00' || st === 'GHOST') return 'GHOST';
+    if (st === 'DAMAGED' || loc.includes('23-QH')) return 'DAMAGED';
+    // Cycle Count location pattern: 23-CYC_CNT-00
+    if (loc.includes('CYC_CNT') || loc.includes('CYC-CNT') || st === 'CYCLE COUNT') return 'CYCLE COUNT';
+    return 'AVAILABLE';
+  };
+
+  const statuses = ['AVAILABLE','PICKED','DAMAGED','CYCLE COUNT','GHOST'];
+  const allCols = [...statuses, 'TOTAL'];
+  const statusColors = {
+    'AVAILABLE':'var(--accent2)', 'PICKED':'var(--warning)',
+    'DAMAGED':'var(--danger)', 'CYCLE COUNT':'var(--accent)',
+    'GHOST':'var(--text2)', 'TOTAL':'var(--text)'
+  };
+
+  // Identify Smurfit Westrock rows
+  const isSmurfit = c => c && (c.toUpperCase().includes('SMURFIT') || c.toUpperCase().includes('WESTROCK'));
+  const customers = [...new Set(inv.map(r=>r.customer||'UNKNOWN'))].sort();
+
+  const emptyBucket = () => ({tons:0, rolls:0});
+  const addTo = (bucket, r) => { bucket.tons += r.tons||0; bucket.rolls += 1; };
+
+  // Build customer map
+  const map = {};
+  customers.forEach(c => {
+    map[c] = {};
+    allCols.forEach(s => map[c][s] = emptyBucket());
+  });
+
+  // Build BU map for Smurfit rows
+  const buMap = {}; // bu → status → {tons,rolls}
+
+  inv.forEach(r => {
+    const c = r.customer||'UNKNOWN';
+    const s = getStatus(r);
+    if (!map[c]) return;
+    addTo(map[c][s], r); addTo(map[c]['TOTAL'], r);
+    if (isSmurfit(c)) {
+      const bu = r.bu||'UNKNOWN BU';
+      if (!buMap[bu]) { buMap[bu]={}; allCols.forEach(s2=>buMap[bu][s2]=emptyBucket()); }
+      addTo(buMap[bu][s], r); addTo(buMap[bu]['TOTAL'], r);
+    }
+  });
+
+  // Grand totals
+  const grand = {}; allCols.forEach(s => grand[s] = emptyBucket());
+  inv.forEach(r => { const s=getStatus(r); addTo(grand[s],r); addTo(grand['TOTAL'],r); });
+
+  const cell = (d, isTotal=false, color='') => {
+    if (!d||(!d.tons&&!d.rolls)) return `<td style="text-align:right;color:var(--text2);opacity:0.35;${isTotal?'font-weight:bold;border-left:2px solid var(--border)':''}">${isTotal?'0':'—'}</td>`;
+    return `<td style="text-align:right;font-weight:${isTotal?'bold':'normal'};color:${color||statusColors['AVAILABLE']};${isTotal?'border-left:2px solid var(--border)':''}">
+      <div style="font-weight:bold;font-size:${isTotal?'14px':'inherit'}">${d.tons.toFixed(0)}</div>
+      <div style="font-size:9px;color:var(--text2)">${d.rolls.toLocaleString()} rolls</div>
+    </td>`;
+  };
+
+  const sortedBUs = Object.keys(buMap).sort();
+  const expanded = window._summarySmurfitExpanded;
+
+  // Separate Smurfit rows from others — merge into one combined Smurfit row
+  const smurfitCustomers = customers.filter(c=>isSmurfit(c));
+  const otherCustomers = customers.filter(c=>!isSmurfit(c));
+
+  // Combine all Smurfit customers into one total
+  const smurfitTotal = {}; allCols.forEach(s=>smurfitTotal[s]=emptyBucket());
+  smurfitCustomers.forEach(c => allCols.forEach(s=>{
+    smurfitTotal[s].tons += map[c][s].tons;
+    smurfitTotal[s].rolls += map[c][s].rolls;
+  }));
+
+  const renderCustomerRow = (c, ci, altBg) => `
+    <tr style="background:${altBg?'var(--surface)':''}">
+      <td style="font-weight:bold">${c}</td>
+      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s])).join('')}
+    </tr>`;
+
+  // Build all rows
+  let rows = '';
+  let rowIdx = 0;
+
+  otherCustomers.forEach(c => {
+    rows += renderCustomerRow(c, rowIdx, rowIdx%2!==0);
+    rowIdx++;
+  });
+
+  // Smurfit combined row with expand toggle
+  if (smurfitCustomers.length) {
+    rows += `
+    <tr style="background:rgba(61,92,230,0.05);cursor:pointer" onclick="toggleSmurfitBU()" title="Click to ${expanded?'collapse':'expand'} BU detail">
+      <td style="font-weight:bold">
+        <span id="smurfit-chevron" style="color:var(--accent);margin-right:6px;font-size:12px">${expanded?'▼':'▶'}</span>
+        SMURFIT WESTROCK
+        <span style="font-size:10px;color:var(--text2);margin-left:6px">${expanded?'(collapse)':'(expand by BU)'}</span>
+      </td>
+      ${allCols.map(s=>cell(smurfitTotal[s], s==='TOTAL', statusColors[s])).join('')}
+    </tr>`;
+
+    // BU sub-rows (shown/hidden based on expanded state)
+    sortedBUs.forEach((bu,bi) => {
+      rows += `
+      <tr class="smurfit-bu-row" style="display:${expanded?'table-row':'none'};background:rgba(61,92,230,0.03)">
+        <td style="padding-left:28px;color:var(--accent);font-size:11px">↳ ${bu}</td>
+        ${allCols.map(s=>cell(buMap[bu][s], s==='TOTAL', statusColors[s])).join('')}
+      </tr>`;
+    });
+    // Smurfit subtotal row (shown when expanded)
+    rows += `
+    <tr class="smurfit-bu-row" style="display:${expanded?'table-row':'none'};background:rgba(61,92,230,0.1);border-top:2px solid rgba(61,92,230,0.3)">
+      <td style="padding-left:14px;font-weight:bold;color:var(--accent);font-size:12px">▶ SMURFIT WESTROCK TOTAL</td>
+      ${allCols.map(s=>cell(smurfitTotal[s], true, statusColors[s])).join('')}
+    </tr>`;
+  }
+
+  let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 INVENTORY SUMMARY — TONS BY CUSTOMER</div>
+    <div style="font-size:11px;color:var(--text2)">Last import: ${state.lastImport?new Date(state.lastImport).toLocaleString():'—'}</div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:20px">
+    ${allCols.map(s=>`
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center">
+        <div style="font-size:9px;color:${statusColors[s]};letter-spacing:1px;font-weight:bold;margin-bottom:4px">${s}</div>
+        <div style="font-size:20px;font-weight:bold;color:${statusColors[s]}">${(grand[s]?.tons||0).toFixed(0)}</div>
+        <div style="font-size:10px;color:var(--text2)">${(grand[s]?.rolls||0).toLocaleString()} rolls</div>
+      </div>`).join('')}
+  </div>
+
+  <div style="overflow-x:auto">
+  <table class="data-table" id="inv-summary-table">
+    <thead>
+      <tr>
+        <th style="text-align:left;min-width:200px">CUSTOMER / BU</th>
+        ${allCols.map(s=>`<th style="text-align:right;color:${statusColors[s]}">${s}</th>`).join('')}
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+    <tfoot>
+      <tr style="background:var(--surface2);border-top:3px solid var(--border)">
+        <td style="font-weight:bold;font-size:16px;letter-spacing:1px">GRAND TOTAL</td>
+        ${allCols.map(s=>`<td style="text-align:right;font-weight:bold;color:${statusColors[s]}">
+          <div style="font-size:20px;font-weight:bold">${(grand[s]?.tons||0).toFixed(0)}</div>
+          <div style="font-size:10px;color:var(--text2)">${(grand[s]?.rolls||0).toLocaleString()} rolls</div>
+        </td>`).join('')}
+      </tr>
+    </tfoot>
+  </table>
+  </div>`;
+
+  document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">'+h+'</div>';
+}
+
+function toggleSmurfitBU() {
+  window._summarySmurfitExpanded = !window._summarySmurfitExpanded;
+  showInventorySummary();
+}
+
 
 function showDataPreview() {
   state.activeTicket=null; updateTicketList();
