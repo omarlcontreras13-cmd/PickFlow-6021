@@ -941,7 +941,7 @@ function importInventory(wb, filename, batchMode=false) {
   // Remove existing rolls for these customers before re-importing
   if (incomingCustomers.size) {
     const before = state.inventory.length;
-    state.inventory = []; // Full replacement — wipe all existing inventory
+    state.inventory = state.inventory.filter(r=>!incomingCustomers.has(r.customer));
     console.log('Replaced '+( before-state.inventory.length)+' existing rolls for: '+[...incomingCustomers].join(', '));
   }
 
