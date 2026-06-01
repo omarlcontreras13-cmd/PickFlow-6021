@@ -181,6 +181,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
       <span id="data-status"><span class="status-dot" style="background:var(--danger)"></span>NO DATA</span>
       <span id="sync-status" class="sync-indicator sync-pending">⟳ CONNECTING...</span>
       <span id="current-time"></span>
+      <button onclick="showDashboard()" title="Home" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);cursor:pointer;font-size:14px;line-height:1">🏠</button>
       <button onclick="location.reload(true)" style="padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer;font-family:var(--font);font-size:10px;letter-spacing:1px">↻ REFRESH</button>
     </div>
   </div>
@@ -200,6 +201,8 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
         <button class="btn btn-success" id="new-ticket-btn" onclick="showNewTicket()" disabled>+ New Pick Ticket</button>
         <button class="btn" id="preview-btn" onclick="showDataPreview()" disabled style="font-size:11px">🔍 Preview Data</button>
         <button class="btn" id="tons-btn" onclick="showInventorySummary()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📦 Customer Ton View</button>
+        <button class="btn" id="putaway-btn" onclick="showPendingPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📥 Pending Put Away</button>
+        <button class="btn" id="lastputaway-btn" onclick="showLastPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📋 Last Put Away</button>
         <button class="btn" id="archive-settings-btn" onclick="showArchiveSettings()" style="font-size:11px;display:none">📁 Archive Settings</button>
         <button class="btn" id="manage-users-btn" onclick="showUserManagement()" style="font-size:11px;display:none">👥 Manage Users</button>
       </div>
@@ -534,9 +537,13 @@ function enableAppButtons() {
   const nb = document.getElementById('new-ticket-btn');
   const pb = document.getElementById('preview-btn');
   const tb = document.getElementById('tons-btn');
+  const pab = document.getElementById('putaway-btn');
+  const lpb = document.getElementById('lastputaway-btn');
   if (nb) nb.disabled = false;
   if (pb) pb.disabled = false;
   if (tb) tb.disabled = false;
+  if (pab) pab.disabled = false;
+  if (lpb) lpb.disabled = false;
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -2808,6 +2815,311 @@ function toggleSmurfitBU() {
   showInventorySummary();
 }
 
+
+
+// ─── PENDING PUT AWAY ─────────────────────────────────────────────────────────
+function showPendingPutAway() {
+  const PUT_AWAY_LOCS = ['23-TR', '23-RR', '23-GENERAL'];
+  const inv = state.inventory.filter(r => {
+    if ((r.pcsPending||0) > 0) return false;
+    const loc = (r.location||'').trim().toUpperCase();
+    return PUT_AWAY_LOCS.some(p => loc.startsWith(p) || loc.includes(p));
+  });
+  if (!inv.length) { showAlert('No pending put away inventory found in 23-TR, 23-RR, or 23-GENERAL locations.','warning'); return; }
+
+  // Group: Customer → Date → BOL → SKU → rolls
+  const grouped = {};
+  inv.forEach(r => {
+    const cust = r.customer||'UNKNOWN';
+    const dt   = r.dateRecd ? new Date(r.dateRecd).toLocaleDateString('en-US') : 'Unknown Date';
+    const bol  = r.bol||'—';
+    const sku  = r.sku||'—';
+    if (!grouped[cust]) grouped[cust] = {};
+    if (!grouped[cust][dt]) grouped[cust][dt] = {};
+    if (!grouped[cust][dt][bol]) grouped[cust][dt][bol] = {};
+    if (!grouped[cust][dt][bol][sku]) grouped[cust][dt][bol][sku] = [];
+    grouped[cust][dt][bol][sku].push(r);
+  });
+
+  const customers = Object.keys(grouped).sort();
+  const totalTons  = inv.reduce((s,r)=>s+(r.tons||0),0);
+  const totalBOLs  = new Set(inv.map(r=>r.bol).filter(Boolean)).size;
+
+  let skuRowIdx = 0;
+
+  let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📥 PENDING PUT AWAY</div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="paToggleAll(true)">▼ Expand All</button>
+      <button class="btn btn-sm" onclick="paToggleAll(false)">▶ Collapse All</button>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">CUSTOMERS</div>
+      <div style="font-size:22px;font-weight:bold;color:var(--accent)">${customers.length}</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">TOTAL ROLLS</div>
+      <div style="font-size:22px;font-weight:bold;color:var(--text)">${inv.length.toLocaleString()}</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">INBOUND BOLs</div>
+      <div style="font-size:22px;font-weight:bold;color:var(--accent2)">${totalBOLs.toLocaleString()}</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">TOTAL TONS</div>
+      <div style="font-size:22px;font-weight:bold;color:var(--warning)">${Math.round(totalTons).toLocaleString()}</div>
+    </div>
+  </div>`;
+
+  customers.forEach((cust, ci) => {
+    const custData  = grouped[cust];
+    const custRolls = Object.values(custData).flatMap(d=>Object.values(d).flatMap(b=>Object.values(b).flat()));
+    const custTons  = custRolls.reduce((s,r)=>s+(r.tons||0),0);
+    const custBOLs  = new Set(custRolls.map(r=>r.bol).filter(Boolean)).size;
+
+    let bodyRows = '';
+
+    Object.keys(custData).sort().forEach(dt => {
+      Object.keys(custData[dt]).sort().forEach(bol => {
+        Object.keys(custData[dt][bol]).sort().forEach((sku, si) => {
+          const skuRolls = custData[dt][bol][sku];
+          const skuTons  = skuRolls.reduce((s,r)=>s+(r.tons||0),0);
+          const locs     = [...new Set(skuRolls.map(r=>r.location).filter(Boolean))].join(', ');
+          const bus      = [...new Set(skuRolls.map(r=>r.bu).filter(Boolean))].join(', ');
+          const rowId    = `pa-sku-${ci}-${skuRowIdx}`;
+          const altBg    = skuRowIdx%2!==0;
+          skuRowIdx++;
+
+          // SKU summary row — clickable to expand lots
+          bodyRows += `<tr style="background:${altBg?'var(--surface)':''}">
+            <td>${dt}</td>
+            <td style="font-weight:bold;color:var(--accent)">${bol}</td>
+            <td style="font-size:10px">${locs}</td>
+            <td style="font-size:10px;color:var(--text2)">${bus}</td>
+            <td style="cursor:pointer;user-select:none" onclick="paSkuToggle('${rowId}')">
+              <span style="color:var(--accent);font-weight:bold">${sku}</span>
+              <span id="${rowId}-chev" style="font-size:10px;color:var(--accent2);margin-left:6px">▶ ${skuRolls.length} lots</span>
+            </td>
+            <td style="text-align:right">${skuRolls.length}</td>
+            <td style="text-align:right;font-weight:bold;color:var(--warning)">${Math.round(skuTons)}</td>
+          </tr>`;
+
+          // Sub-header row for lots (hidden by default)
+          bodyRows += `<tr id="${rowId}-lot-hdr" style="display:none;background:rgba(61,92,230,0.08)">
+            <td style="padding-left:28px;font-size:9px;font-weight:bold;color:var(--text2);letter-spacing:1px" colspan="4">↳ LOTS</td>
+            <td style="font-size:9px;font-weight:bold;color:var(--accent);letter-spacing:1px;text-align:right;padding-right:12px">LOT #</td>
+            <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">ROLLS</td>
+            <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">TONS</td>
+          </tr>`;
+          // Individual lot rows (hidden by default)
+          skuRolls.sort((a,b)=>(a.lot||'').localeCompare(b.lot||'')).forEach((r,ri) => {
+            bodyRows += `<tr id="${rowId}-lot-${ri}" style="display:none;background:rgba(61,92,230,0.03)">
+              <td colspan="4" style="padding-left:32px;font-size:10px;color:var(--text2)"></td>
+              <td style="font-size:11px;font-weight:bold;color:var(--accent2);text-align:right;padding-right:12px">${r.lot||'—'}</td>
+              <td style="text-align:right;font-size:10px">1</td>
+              <td style="text-align:right;font-size:10px;color:var(--warning)">${Math.round(r.tons||0)}</td>
+            </tr>`;
+          });
+        });
+      });
+    });
+
+    // Customer subtotal
+    bodyRows += `<tr style="background:var(--surface2);font-weight:bold">
+      <td colspan="5" style="color:var(--text2);font-size:11px">Customer Total</td>
+      <td style="text-align:right;color:var(--accent2)">${custRolls.length}</td>
+      <td style="text-align:right;font-weight:bold;color:var(--warning);font-size:13px">${Math.round(custTons)}</td>
+    </tr>`;
+
+    h += `<div style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <div onclick="paToggle('pa-${ci}')" style="cursor:pointer;padding:10px 14px;background:var(--surface);display:flex;align-items:center;gap:10px;user-select:none"
+           onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
+        <span id="pa-chev-${ci}" style="color:var(--accent);font-size:13px">▶</span>
+        <span style="font-weight:bold;font-size:13px;flex:1">${cust}</span>
+        <span style="font-size:11px;color:var(--text2)">${custRolls.length} rolls</span>
+        <span style="font-size:11px;color:var(--accent2);margin-left:8px">${custBOLs} BOLs</span>
+        <span style="font-size:13px;font-weight:bold;color:var(--warning);margin-left:8px">${Math.round(custTons).toLocaleString()} tons</span>
+      </div>
+      <div id="pa-${ci}" style="display:none;overflow-x:auto">
+        <table class="data-table" style="font-size:11px;margin:0">
+          <thead><tr>
+            <th style="text-align:left">DATE REC'D</th>
+            <th style="text-align:left">INBOUND BOL</th>
+            <th style="text-align:left">LOCATION</th>
+            <th style="text-align:left">BU</th>
+            <th style="text-align:left">SKU (click to expand lots)</th>
+            <th style="text-align:right">ROLLS</th>
+            <th style="text-align:right">TONS</th>
+          </tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">'+h+'</div>';
+}
+
+
+function paToggle(id) {
+  const el=document.getElementById(id); if(!el) return;
+  const idx=id.replace('pa-','');
+  const chev=document.getElementById('pa-chev-'+idx);
+  const open=el.style.display==='none';
+  el.style.display=open?'block':'none';
+  if(chev) chev.textContent=open?'▼':'▶';
+}
+function paSkuToggle(rowId) {
+  const chev=document.getElementById(rowId+'-chev');
+  const hdr=document.getElementById(rowId+'-lot-hdr');
+  const lots=document.querySelectorAll('[id^="'+rowId+'-lot-"]:not([id$="-hdr"])');
+  if(!lots.length) return;
+  const open=lots[0].style.display==='none';
+  if(hdr) hdr.style.display=open?'table-row':'none';
+  lots.forEach(el=>el.style.display=open?'table-row':'none');
+  if(chev){
+    const count=lots.length;
+    chev.textContent=open?('▼ '+count+' lots'):('▶ '+count+' lots');
+    chev.style.color=open?'var(--warning)':'var(--accent2)';
+  }
+}
+function paToggleAll(expand) {
+  document.querySelectorAll('[id^="pa-"]').forEach(el=>{
+    if(el.id.startsWith('pa-chev')) return;
+    const idx=el.id.replace('pa-','');
+    const chev=document.getElementById('pa-chev-'+idx);
+    el.style.display=expand?'block':'none';
+    if(chev) chev.textContent=expand?'▼':'▶';
+  });
+}
+
+// ─── LAST PUT AWAY ────────────────────────────────────────────────────────────
+function showLastPutAway(filterDate='') {
+  const inv = state.inventory.filter(r=>(r.pcsPending||0)===0 && (r.status||'').toUpperCase()!=='GHOST');
+  if (!inv.length) { showAlert('No available inventory loaded.','warning'); return; }
+
+  // Get unique dates for the picker
+  const allDates = [...new Set(inv.map(r=>r.dateRecd?new Date(r.dateRecd).toLocaleDateString('en-US'):null).filter(Boolean))].sort((a,b)=>new Date(b)-new Date(a));
+
+  // Use most recent date if no filter set
+  const selectedDate = filterDate || allDates[0] || '';
+
+  const filtered = selectedDate ? inv.filter(r=>{
+    if (!r.dateRecd) return false;
+    return new Date(r.dateRecd).toLocaleDateString('en-US') === selectedDate;
+  }) : inv;
+
+  // Group: Customer → Location
+  const grouped = {};
+  filtered.forEach(r => {
+    const cust = r.customer||'UNKNOWN';
+    const loc = r.location||'—';
+    if (!grouped[cust]) grouped[cust] = {};
+    if (!grouped[cust][loc]) grouped[cust][loc] = [];
+    grouped[cust][loc].push(r);
+  });
+
+  const customers = Object.keys(grouped).sort();
+  const totalTons = filtered.reduce((s,r)=>s+(r.tons||0),0);
+
+  const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:12px;outline:none';
+
+  let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📋 LAST PUT AWAY</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select onchange="showLastPutAway(this.value)" style="${fi}">
+        <option value="">All Dates</option>
+        ${allDates.map(d=>`<option value="${d}"${d===selectedDate?' selected':''}>${d}</option>`).join('')}
+      </select>
+      <button class="btn btn-sm" onclick="lpaToggleAll(true)">▼ Expand All</button>
+      <button class="btn btn-sm" onclick="lpaToggleAll(false)">▶ Collapse All</button>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">DATE FILTER</div>
+      <div style="font-size:16px;font-weight:bold;color:var(--accent)">${selectedDate||'All Dates'}</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">ROLLS</div>
+      <div style="font-size:22px;font-weight:bold;color:var(--text)">${filtered.length.toLocaleString()}</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:var(--text2);letter-spacing:1px">TOTAL TONS</div>
+      <div style="font-size:22px;font-weight:bold;color:var(--warning)">${Math.round(totalTons).toLocaleString()}</div>
+    </div>
+  </div>`;
+
+  if (!filtered.length) {
+    h += `<div class="alert alert-info">No inventory found for the selected date.</div>`;
+  } else {
+    customers.forEach((cust, ci) => {
+      const custData = grouped[cust];
+      const custRolls = Object.values(custData).flat();
+      const custTons = custRolls.reduce((s,r)=>s+(r.tons||0),0);
+
+      h += `<div style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <div onclick="lpaToggle('lpa-${ci}')" style="cursor:pointer;padding:10px 14px;background:var(--surface);display:flex;align-items:center;gap:10px;user-select:none"
+             onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
+          <span id="lpa-chev-${ci}" style="color:var(--accent);font-size:13px">▶</span>
+          <span style="font-weight:bold;font-size:13px;flex:1">${cust}</span>
+          <span style="font-size:11px;color:var(--text2)">${custRolls.length} rolls</span>
+          <span style="font-size:13px;font-weight:bold;color:var(--warning);margin-left:8px">${Math.round(custTons).toLocaleString()} tons</span>
+        </div>
+        <div id="lpa-${ci}" style="display:none">
+          <table class="data-table" style="font-size:11px;margin:0">
+            <thead><tr>
+              <th style="text-align:left">LOCATION</th>
+              <th style="text-align:left">LOT #</th>
+              <th style="text-align:right">ROLLS</th>
+              <th style="text-align:right">TONS</th>
+            </tr></thead>
+            <tbody>`;
+
+      Object.keys(custData).sort().forEach((loc, li) => {
+        const locRolls = custData[loc];
+        const lots = [...new Set(locRolls.map(r=>r.lot).filter(Boolean))];
+        const locTons = locRolls.reduce((s,r)=>s+(r.tons||0),0);
+        h += `<tr style="background:${li%2!==0?'var(--surface)':''}">
+          <td style="font-weight:bold;color:var(--accent)">${loc}</td>
+          <td style="font-size:10px;color:var(--text2)">${lots.slice(0,4).join(', ')}${lots.length>4?' +'+( lots.length-4)+' more':''}</td>
+          <td style="text-align:right">${locRolls.length}</td>
+          <td style="text-align:right;font-weight:bold;color:var(--warning)">${Math.round(locTons)}</td>
+        </tr>`;
+      });
+
+      h += `<tr style="background:var(--surface2);font-weight:bold">
+        <td colspan="2" style="color:var(--text2)">Customer Total</td>
+        <td style="text-align:right;color:var(--accent2)">${custRolls.length}</td>
+        <td style="text-align:right;color:var(--warning);font-size:13px">${Math.round(custTons)}</td>
+      </tr>`;
+      h += `</tbody></table></div></div>`;
+    });
+  }
+
+  document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">'+h+'</div>';
+}
+
+function lpaToggle(id) {
+  const el=document.getElementById(id); if(!el) return;
+  const idx=id.replace('lpa-','');
+  const chev=document.getElementById('lpa-chev-'+idx);
+  const open=el.style.display==='none';
+  el.style.display=open?'block':'none';
+  if(chev) chev.textContent=open?'▼':'▶';
+}
+function lpaToggleAll(expand) {
+  document.querySelectorAll('[id^="lpa-"]').forEach(el=>{
+    if(el.id.startsWith('lpa-chev')) return;
+    const idx=el.id.replace('lpa-','');
+    const chev=document.getElementById('lpa-chev-'+idx);
+    el.style.display=expand?'block':'none';
+    if(chev) chev.textContent=expand?'▼':'▶';
+  });
+}
 
 function showDataPreview() {
   state.activeTicket=null; updateTicketList();
