@@ -201,6 +201,8 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
         <button class="btn btn-success" id="new-ticket-btn" onclick="showNewTicket()" disabled>+ New Pick Ticket</button>
         <button class="btn" id="preview-btn" onclick="showDataPreview()" disabled style="font-size:11px">🔍 Preview Data</button>
         <button class="btn" id="tons-btn" onclick="showInventorySummary()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📦 Customer Ton View</button>
+        <button class="btn" id="cc-btn" onclick="showCycleCountStart()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">🔢 Cycle Counts</button>
+        <button class="btn" id="edi-btn" onclick="showEDIImportFile()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📄 EDI Import File</button>
         <button class="btn" id="putaway-btn" onclick="showPendingPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📥 Pending Put Away</button>
         <button class="btn" id="lastputaway-btn" onclick="showLastPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📋 Last Put Away</button>
         <button class="btn" id="archive-settings-btn" onclick="showArchiveSettings()" style="font-size:11px;display:none">📁 Archive Settings</button>
@@ -327,6 +329,7 @@ let state = {
   eodTime: '17:00',
   eodEnabled: false,
   dataLoaded: false,
+  currentView: 'dashboard', // tracks active screen to prevent unwanted re-renders
   buMap: {},
   lastDirImport: null,
   buSeqMap: {},
@@ -384,10 +387,19 @@ function listenToFirebase() {
     state.tickets = state.tickets.filter(t=>remoteIds.has(t.id));
     state.tickets.sort((a,b)=>a.created-b.created);
     updateTicketList();
+    // Only re-render ticket screens — never jump away from other views
     if (state.activeTicket) {
       const still = state.tickets.find(t=>t.id===state.activeTicket);
-      if (still) viewTicket(state.activeTicket); else showDashboard();
-    } else if (state.dataLoaded) showDashboard();
+      if (still) {
+        // Quietly refresh the active ticket without a full re-render
+        // (viewTicket would jump the screen; just update the sidebar list)
+      } else {
+        // Active ticket was deleted — go to dashboard
+        state.activeTicket = null;
+        showDashboard();
+      }
+    }
+    // Do NOT call showDashboard() here — let the user stay on whatever screen they're on
     setSyncStatus('ok');
   }, ()=>setSyncStatus('err'));
 
@@ -466,6 +478,7 @@ function listenToFirebase() {
     if (data) state.buZmoMap = data;
   });
 
+  // cycleCount6021 connection loaded on demand
   db.ref('6021/lastImport').on('value', snap => {
     const ts = snap.val();
     if (ts) { state.lastImport = ts; updateImportStamp(); }
@@ -483,10 +496,21 @@ function listenToFirebase() {
       }));
       // Re-resolve BU display names using current buMap (fixes stale Firebase values)
       if (state.buMap && Object.keys(state.buMap).length) reResolveBUs();
-      state.dataLoaded = true;
-      enableAppButtons();
-      updateImportStamp();
-      if (state.currentUser) showDashboard();
+      if (!state.dataLoaded) {
+        // First load only — enable UI and show dashboard
+        state.dataLoaded = true;
+        enableAppButtons();
+        updateImportStamp();
+        if (state.currentUser) showDashboard();
+        // Auto-snapshot today's tons if not yet saved today
+        const todayKey = new Date().toISOString().slice(0,10);
+        if (db) db.ref('6021/tonSnapshots/'+todayKey).once('value', snap => {
+          if (!snap.val()) setTimeout(() => saveTonSnapshot(true), 2000);
+        });
+      } else {
+        // Subsequent silent updates — just refresh state, don't jump screens
+        updateImportStamp();
+      }
     }
   });
 
@@ -537,6 +561,10 @@ function enableAppButtons() {
   const nb = document.getElementById('new-ticket-btn');
   const pb = document.getElementById('preview-btn');
   const tb = document.getElementById('tons-btn');
+  const ccb = document.getElementById('cc-btn');
+  if (ccb) ccb.disabled = false;
+  const edib = document.getElementById('edi-btn');
+  if (edib) edib.disabled = false;
   const pab = document.getElementById('putaway-btn');
   const lpb = document.getElementById('lastputaway-btn');
   if (nb) nb.disabled = false;
@@ -812,6 +840,13 @@ function importDIR(wb) {
   const hdr = allRows[hi];
   const col = (name) => hdr.findIndex(h=>typeof h==='string'&&h.trim()===name);
 
+  // Store column headers for EDI column picker
+  window._dirColumnHeaders = hdr.map((h,i) => ({
+    idx: i,
+    name: (h||'').toString().trim(),
+    letter: i < 26 ? String.fromCharCode(65+i) : String.fromCharCode(64+Math.floor(i/26))+String.fromCharCode(65+(i%26))
+  }));
+  console.log('[DIR columns]', window._dirColumnHeaders.map(c=>c.letter+':'+c.name).join(' | '));
   const batchI    = col('Batch');
   const matI      = col('Material');
   const matDescI  = col('Material Description');
@@ -825,6 +860,16 @@ function importDIR(wb) {
   const tonsI     = col('Tons');
   const widthI    = col('Width');
   const qtyMlfI   = col('Qty(MLF)');
+  // Stock Category
+  const stockCatI = ['Stock Cat','Stock Category','Stk Cat','StkCat','Cat','Spec. Stock'].reduce((f,n)=>f>=0?f:col(n), -1);
+  // Shipment Number
+  const shipmentI = ['Shipment','Shipment Number','Ship No','Ship #','Delivery','Inbound Delivery','Trans. Order','Transfer Order'].reduce((f,n)=>f>=0?f:col(n), -1);
+  // Purchasing Document + Item (for PO# column in EDI)
+  // Purchasing Document = Column U (index 20), PO Item = Column V (index 21)
+  // Fixed column positions per DIR format; header name as fallback
+  const purchDocI  = hdr.length > 20 ? 20 : ['Purchasing Document','Purch. Doc.','Purchase Order','PO Number','PO'].reduce((f,n)=>f>=0?f:col(n), -1);
+  const purchItemI = hdr.length > 21 ? 21 : ['PO Item','Purch. Item','Item No.','Itm','Order Item'].reduce((f,n)=>f>=0?f:col(n), -1);
+  const vehicleI   = ['Vehicle ID','Vehicle','Veh. ID','Veh ID','License Plate','Truck ID','Carrier ID','Means of Transport'].reduce((f,n)=>f>=0?f:col(n), -1);
 
   state.dirData = {};
   for (let i=hi+1;i<allRows.length;i++) {
@@ -868,6 +913,14 @@ function importDIR(wb) {
       width:        widthI>=0  ? (parseFloat(r[widthI])||0)         : 0,
       qtyMlf:       qtyMlfI>=0 ? (parseFloat(r[qtyMlfI])||0)        : 0,
       customerName: nameI>=0   ? (r[nameI]||'').toString().trim()   : '',
+      stockCat:     stockCatI>=0  ? (r[stockCatI]||'').toString().trim()  : '',
+      shipment:     shipmentI>=0  ? (r[shipmentI]||'').toString().trim()  : '',
+      purchDoc:     purchDocI>=0  ? (r[purchDocI]||'').toString().trim()  : '',
+      // Store raw values at the EDI-mapped indices for PO# column (updated via picker)
+      _pd: r[window._ediPurchDocIdx  !== undefined ? window._ediPurchDocIdx  : 20] !== undefined ? (r[window._ediPurchDocIdx  !== undefined ? window._ediPurchDocIdx  : 20]||'').toString().trim() : '',
+      _pi: r[window._ediPurchItemIdx !== undefined ? window._ediPurchItemIdx : 21] !== undefined ? (r[window._ediPurchItemIdx !== undefined ? window._ediPurchItemIdx : 21]||'').toString().trim() : '',
+      purchItem:    purchItemI>=0 ? (r[purchItemI]||'').toString().trim() : '',
+      vehicleId:    vehicleI>=0   ? (r[vehicleI]||'').toString().trim()   : '',
     };
   }
 
@@ -1145,6 +1198,7 @@ function buildStatCards() {
 }
 
 function showDashboard() {
+  state.currentView = 'dashboard';
   state.activeTicket = null;
   updateTicketList();
 
@@ -1565,7 +1619,7 @@ function viewTicket(id) {
   h += '<button class="btn btn-sm" style="font-weight:bold" data-tid="'+id+'" onclick="editTicket(this.dataset.tid)">✎ Edit</button>';
   h += '<button class="btn btn-sm" style="font-weight:bold" data-tid="'+id+'" onclick="exportPickTicketPDF(this.dataset.tid)">📄 Pick Ticket</button>';
   h += '<button class="btn btn-sm" style="font-weight:bold" data-tid="'+id+'" onclick="exportLoadTag(this.dataset.tid)">🏷 Load Tag</button>';
-  h += '<button class="btn btn-sm" style="font-weight:bold" onclick="window.print()">🖨 Print</button>';
+  h += '<button class="btn btn-sm" style="font-weight:bold" onclick="printCCCurrentSheet()">🖨 Print</button>';
   h += '<div style="flex:1"></div>';
   if (isAdmin()) h += '<button class="btn btn-sm" style="font-weight:bold;border-color:var(--warning);color:var(--warning)" data-tid="'+id+'" onclick="archiveTicket(this.dataset.tid)">📁 Archive</button>';
   h += '<button class="btn btn-sm btn-danger" style="font-weight:bold" data-tid="'+id+'" onclick="deleteTicket(this.dataset.tid)">✕ Delete</button>';
@@ -2650,6 +2704,175 @@ function clearInvFilters() {
   applyInvFilter(0);
 }
 
+// ─── TON SNAPSHOT ───────────────────────────────────────────────────────────
+
+function buildTonSnapshotData() {
+  const inv = state.inventory;
+  const getStatus = r => {
+    if ((r.pcsPending||0) > 0) return 'PICKED';
+    const loc = (r.location||'').toUpperCase();
+    const st  = (r.status||'').toUpperCase();
+    if (loc === '23-GHOST-00' || st === 'GHOST') return 'GHOST';
+    if (st === 'DAMAGED' || loc.includes('23-QH')) return 'DAMAGED';
+    if (loc.includes('CYC_CNT') || st === 'CYCLE COUNT') return 'CYCLE COUNT';
+    return 'AVAILABLE';
+  };
+  const statuses = ['AVAILABLE','PICKED','DAMAGED','CYCLE COUNT','GHOST'];
+  const customers = [...new Set(inv.map(r=>r.customer||'UNKNOWN'))].sort();
+  const map = {};
+  customers.forEach(c => {
+    map[c] = {};
+    [...statuses,'TOTAL'].forEach(s => map[c][s] = {tons:0, rolls:0});
+  });
+  const grand = {};
+  [...statuses,'TOTAL'].forEach(s => grand[s] = {tons:0, rolls:0});
+
+  inv.forEach(r => {
+    const cust = r.customer||'UNKNOWN';
+    const st   = getStatus(r);
+    const tons = r.tons||0;
+    map[cust][st].tons  += tons; map[cust][st].rolls  += 1;
+    map[cust]['TOTAL'].tons += tons; map[cust]['TOTAL'].rolls += 1;
+    grand[st].tons  += tons; grand[st].rolls  += 1;
+    grand['TOTAL'].tons += tons; grand['TOTAL'].rolls += 1;
+  });
+  return { customers: map, grand };
+}
+
+function saveTonSnapshot(auto) {
+  if (!db) { if (!auto) showAlert('Not connected.','warning'); return; }
+  const today    = new Date();
+  const dateKey  = today.toISOString().slice(0,10); // YYYY-MM-DD
+  const snap     = buildTonSnapshotData();
+  const payload  = {
+    date:      dateKey,
+    savedAt:   today.getTime(),
+    savedBy:   state.currentUser || 'system',
+    importTs:  state.lastImport  || null,
+    customers: snap.customers,
+    grand:     snap.grand
+  };
+  db.ref('6021/tonSnapshots/' + dateKey).set(payload)
+    .then(() => {
+      if (!auto) showAlert('✓ Snapshot saved for ' + today.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}), 'success');
+    })
+    .catch(err => { if (!auto) showAlert('Error: '+err.message,'danger'); });
+}
+
+function viewTonSnapshots() {
+  const panel = document.getElementById('main-panel');
+  panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div style="color:var(--text2)">Loading snapshots...</div></div>';
+  if (!db) { panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div class="alert alert-warning">Not connected.</div></div>'; return; }
+
+  db.ref('6021/tonSnapshots').orderByChild('savedAt').once('value', snap => {
+    const data = snap.val() || {};
+    const snaps = Object.values(data).sort((a,b) => b.savedAt - a.savedAt);
+
+    if (!snaps.length) {
+      panel.innerHTML = `<div class="panel-inner" style="padding:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📅 TON SNAPSHOT HISTORY</div>
+          <button class="btn btn-sm" onclick="showInventorySummary()">← Back</button>
+        </div>
+        <div style="color:var(--text2);text-align:center;padding:40px">No snapshots saved yet. Use 📸 Save Snapshot from the ton view.</div>
+      </div>`;
+      return;
+    }
+
+    const statuses  = ['AVAILABLE','PICKED','DAMAGED','CYCLE COUNT','GHOST','TOTAL'];
+    const sColors   = { 'AVAILABLE':'var(--accent2)','PICKED':'var(--warning)','DAMAGED':'var(--danger)','CYCLE COUNT':'var(--accent)','GHOST':'var(--text2)','TOTAL':'var(--text)' };
+    const firstSnap = snaps[0];
+
+    // Build date selector
+    let dateOpts = snaps.map(s => `<option value="${s.date}">${new Date(s.savedAt).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})} — ${new Date(s.savedAt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</option>`).join('');
+
+    let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+      <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📅 TON SNAPSHOT HISTORY</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <select id="snap-date-sel" onchange="renderTonSnapshot(this.value)"
+          style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:12px;outline:none">
+          ${dateOpts}
+        </select>
+        ${isAdmin()?`<button onclick="deleteTonSnapshot(document.getElementById('snap-date-sel').value)" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:12px" title="Delete this snapshot">🗑</button>`:''}
+        <button class="btn btn-sm" onclick="showInventorySummary()">← Back to Current</button>
+      </div>
+    </div>
+    <div id="snap-content"></div>`;
+
+    panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
+    window._tonSnapsData = data;
+    renderTonSnapshot(firstSnap.date);
+  });
+}
+
+function renderTonSnapshot(dateKey) {
+  const data  = window._tonSnapsData || {};
+  const snap  = data[dateKey];
+  if (!snap) return;
+
+  const statuses = ['AVAILABLE','PICKED','DAMAGED','CYCLE COUNT','GHOST','TOTAL'];
+  const sColors  = { 'AVAILABLE':'var(--accent2)','PICKED':'var(--warning)','DAMAGED':'var(--danger)','CYCLE COUNT':'var(--accent)','GHOST':'var(--text2)','TOTAL':'var(--text)' };
+  const isSmurfit = c => c && (c.toUpperCase().includes('SMURFIT') || c.toUpperCase().includes('WESTROCK'));
+  const customers = Object.keys(snap.customers||{}).sort();
+  const grand     = snap.grand || {};
+  const fmt = n => Math.round(n||0);
+
+  // Summary bar
+  let html = `<div style="font-size:11px;color:var(--text2);margin-bottom:12px">
+    Snapshot: ${new Date(snap.savedAt).toLocaleString()} &nbsp;·&nbsp; Saved by: ${snap.savedBy}
+    ${snap.importTs ? ' &nbsp;·&nbsp; Import: '+new Date(snap.importTs).toLocaleString() : ''}
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:20px">
+    ${statuses.map(s=>`
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:${sColors[s]};font-weight:bold;letter-spacing:1px;margin-bottom:4px">${s}</div>
+        <div style="font-size:18px;font-weight:bold;color:${sColors[s]}">${fmt(grand[s]?.tons||0)}</div>
+        <div style="font-size:10px;color:var(--text2)">${grand[s]?.rolls||0} rolls</div>
+      </div>`).join('')}
+  </div>
+
+  <!-- Table -->
+  <div style="overflow-x:auto">
+  <table class="data-table" style="font-size:12px">
+    <thead><tr>
+      <th>CUSTOMER</th>
+      ${statuses.map(s=>`<th style="text-align:right;color:${sColors[s]}">${s}</th>`).join('')}
+    </tr></thead>
+    <tbody>`;
+
+  customers.forEach((cust, ci) => {
+    const row = snap.customers[cust] || {};
+    if (isSmurfit(cust)) {
+      html += `<tr style="background:var(--surface2);font-weight:bold">
+        <td style="color:var(--accent)">${cust}</td>
+        ${statuses.map(s=>`<td style="text-align:right;font-weight:bold;color:${sColors[s]}">${fmt(row[s]?.tons||0)}<br><span style="font-size:9px;color:var(--text2)">${row[s]?.rolls||0}r</span></td>`).join('')}
+      </tr>`;
+    } else {
+      html += `<tr style="background:${ci%2!==0?'var(--surface2)':''}">
+        <td style="color:var(--text)">${cust}</td>
+        ${statuses.map(s=>`<td style="text-align:right;color:${sColors[s]}">${fmt(row[s]?.tons||0)}<br><span style="font-size:9px;color:var(--text2)">${row[s]?.rolls||0}r</span></td>`).join('')}
+      </tr>`;
+    }
+  });
+
+  html += `<tr style="background:var(--accent);color:#fff;font-weight:bold;font-size:13px">
+    <td style="padding:8px 10px">GRAND TOTAL</td>
+    ${statuses.map(s=>`<td style="text-align:right;padding:8px 10px">${fmt(grand[s]?.tons||0)}<br><span style="font-size:9px;opacity:0.8">${grand[s]?.rolls||0}r</span></td>`).join('')}
+  </tr></tbody></table></div>`;
+
+  document.getElementById('snap-content').innerHTML = html;
+}
+
+function deleteTonSnapshot(dateKey) {
+  if (!dateKey || !db) return;
+  if (!confirm('Delete snapshot for ' + dateKey + '?')) return;
+  db.ref('6021/tonSnapshots/' + dateKey).remove()
+    .then(() => { showAlert('Snapshot deleted.','success'); viewTonSnapshots(); })
+    .catch(err => showAlert('Error: '+err.message,'danger'));
+}
+
+
 function showInventorySummary() {
   const inv = state.inventory;
   if (!inv.length) { showAlert('No inventory loaded.','warning'); return; }
@@ -2772,9 +2995,15 @@ function showInventorySummary() {
     </tr>`;
   }
 
-  let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-    <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 INVENTORY SUMMARY — TONS BY CUSTOMER</div>
-    <div style="font-size:11px;color:var(--text2)">Last import: ${state.lastImport?new Date(state.lastImport).toLocaleString():'—'}</div>
+  let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div>
+      <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 INVENTORY SUMMARY — TONS BY CUSTOMER</div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px">Last import: ${state.lastImport?new Date(state.lastImport).toLocaleString():'—'}</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="viewTonSnapshots()" style="font-size:11px">📅 View History</button>
+      <button class="btn btn-sm" onclick="saveTonSnapshot()" style="font-size:11px;background:var(--accent2);color:#fff;border-color:var(--accent2)">📸 Save Snapshot</button>
+    </div>
   </div>
 
   <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:20px">
@@ -2817,8 +3046,693 @@ function toggleSmurfitBU() {
 
 
 
+// ─── EDI IMPORT FILE ─────────────────────────────────────────────────────────
+let _ediHBHLoads = []; // parsed HBH loads from uploaded file
+
+function applyEDIColMapping() {
+  const pdSel = document.getElementById('purch-doc-col');
+  const piSel = document.getElementById('purch-item-col');
+  if (!pdSel || !piSel) return;
+  window._ediPurchDocIdx  = parseInt(pdSel.value);
+  window._ediPurchItemIdx = parseInt(piSel.value);
+  // Re-build sciGroups with new column indices
+  const invByLot = {};
+  state.inventory.forEach(r => { if (r.lot) invByLot[r.lot] = r; });
+  const hasCatData = Object.values(state.dirData).some(x => x.stockCat);
+  const sciGroups = {};
+  Object.entries(state.dirData)
+    .filter(([lot, d]) => !hasCatData || d.stockCat === 'I')
+    .forEach(([lot, d]) => {
+      const key = (d.shipment && d.shipment !== '') ? d.shipment
+                : (d.soDoc && d.soDoc !== '') ? d.soDoc : d.customerPO;
+      if (!key) return;
+      if (!sciGroups[key]) sciGroups[key] = {
+        shipment: key, zmo: d.customerPO||d.soDoc,
+        invoiceRef: d.zmo, customerName: d.customerName, lots: []
+      };
+      const inv = invByLot[lot] || {};
+      // Use the user-selected column indices for purchDoc/purchItem
+      const purchDoc  = d['_pd']  || '';
+      const purchItem = d['_pi']  || '';
+      sciGroups[key].lots.push({
+        lot, material: d.material, matDesc: d.matDesc,
+        grossWt: d.grossWt, width: d.width, qtyMlf: d.qtyMlf,
+        expDate: inv.expDate || null, bol: inv.bol || '', po: inv.po || '',
+        prod2: inv.prod2 || ('Scientific Games ' + d.zmo),
+        purchDoc, purchItem, vehicleId: d.vehicleId || ''
+      });
+    });
+  Object.values(sciGroups).forEach(g => g.lots.sort((a,b)=>a.lot.localeCompare(b.lot)));
+  window._ediSciGroups = sciGroups;
+  showAlert('✓ Column mapping applied — PD: col '+(window._ediPurchDocIdx+1)+', PI: col '+(window._ediPurchItemIdx+1), 'success');
+  showEDIImportFile();
+}
+
+
+function deleteEDISciLoad(key) {
+  if (!window._ediSciDeleted) window._ediSciDeleted = new Set();
+  window._ediSciDeleted.add(key);
+  showEDIImportFile();
+}
+
+function deleteEDIHBHLoad(idx) {
+  _ediHBHLoads.splice(idx, 1);
+  showEDIImportFile();
+}
+
+function saveEDIExportStamp(keys) {
+  if (!db) return;
+  const now = Date.now();
+  const user = state.currentUser || 'unknown';
+  keys.forEach(k => {
+    const safeKey = k.toString().replace(/[.#$[\]]/g, '_');
+    db.ref('6021/ediExports/' + safeKey).set({ exportedAt: now, exportedBy: user });
+  });
+}
+
+function loadEDIExportStamps(callback) {
+  if (!db) { callback({}); return; }
+  db.ref('6021/ediExports').once('value', snap => callback(snap.val() || {}));
+}
+
+
+function onEDISciChange(cb) {
+  if (cb.checked) {
+    // Uncheck all HBH
+    document.querySelectorAll('.edi-hbh-chk').forEach(c => c.checked = false);
+  }
+}
+
+function onEDIHBHChange(cb) {
+  if (cb.checked) {
+    // Uncheck all Sci Games
+    document.querySelectorAll('.edi-sci-chk').forEach(c => c.checked = false);
+  }
+}
+
+
+function buildEDIColPickerHTML() {
+  const cols = window._dirColumnHeaders;
+  if (!cols || !cols.length) return '';
+  const pdIdx = window._ediPurchDocIdx  !== undefined ? window._ediPurchDocIdx  : 20;
+  const piIdx = window._ediPurchItemIdx !== undefined ? window._ediPurchItemIdx : 21;
+  const makeSelect = function(id, val) {
+    let opts = '';
+    cols.forEach(function(c) {
+      opts += '<option value="'+c.idx+'"'+(c.idx===val?' selected':'')+'>'+c.letter+': '+(c.name||'(blank)')+'</option>';
+    });
+    return '<select id="'+id+'" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">'+opts+'</select>';
+  };
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+    +'<span style="font-size:11px;font-weight:bold;color:var(--text2);letter-spacing:1px">PO# COLUMN MAPPING</span>'
+    +'<label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">Purchasing Document: '+makeSelect('purch-doc-col', pdIdx)+'</label>'
+    +'<label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">PO Item: '+makeSelect('purch-item-col', piIdx)+'</label>'
+    +'<button class="btn btn-sm" onclick="applyEDIColMapping()" style="font-size:11px">Apply</button>'
+    +'<span style="font-size:10px;color:var(--text2)">PO# = Doc-Item (e.g. 4512543138-10)</span>'
+    +'</div>';
+}
+
+
+function toggleEDIDetail(id) {
+  const el  = document.getElementById(id);
+  const btn = document.getElementById(id + '-btn');
+  if (!el) return;
+  const open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  if (btn) btn.textContent = open ? '▲' : '▼';
+}
+
+
+function showEDIImportFile() {
+  state.currentView = 'edi';
+  const _stamps = window._ediStamps || {};
+  const panel = document.getElementById('main-panel');
+
+  // Build Sci Games groups from dirData:
+  // Filter: Stock Category = "I" only (if stockCat field present in data)
+  // Group by: Shipment Number (fallback to customerPO/ZMO if no shipment field)
+  // Sort rolls by: Batch (lot number) ascending
+  const invByLot = {};
+  state.inventory.forEach(r => { if (r.lot) invByLot[r.lot] = r; });
+
+  const hasCatData = Object.values(state.dirData).some(x => x.stockCat);
+  const sciGroups = {};
+  Object.entries(state.dirData)
+    .filter(([lot, d]) => !hasCatData || d.stockCat === 'I')
+    .forEach(([lot, d]) => {
+      // Priority: explicit shipment field → soDoc (SAP delivery/SO doc) → customerPO
+      const key = (d.shipment && d.shipment !== '')
+        ? d.shipment
+        : (d.soDoc && d.soDoc !== '') ? d.soDoc
+        : d.customerPO;
+      if (!key) return;
+      if (!sciGroups[key]) sciGroups[key] = {
+        shipment: key,
+        zmo: d.customerPO || d.soDoc,
+        invoiceRef: d.zmo,
+        customerName: d.customerName,
+        lots: []
+      };
+      const inv = invByLot[lot] || {};
+      sciGroups[key].lots.push({
+        lot, material: d.material, matDesc: d.matDesc,
+        grossWt: d.grossWt, width: d.width, qtyMlf: d.qtyMlf,
+        expDate: inv.expDate || null,
+        bol: inv.bol || '', po: inv.po || '',
+        prod2: inv.prod2 || ('Scientific Games ' + d.zmo),
+        purchDoc:  d.purchDoc  || '',
+        purchItem: d.purchItem || '',
+        vehicleId: d.vehicleId || ''
+      });
+    });
+
+  // Sort rolls within each shipment by batch (lot) ascending
+  Object.values(sciGroups).forEach(g => g.lots.sort((a,b) => a.lot.localeCompare(b.lot)));
+
+  if (!window._ediSciDeleted) window._ediSciDeleted = new Set();
+  const sciKeys = Object.keys(sciGroups).filter(k => !window._ediSciDeleted.has(k)).sort();
+  window._ediSciGroups = sciGroups;
+
+  const sectionStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px';
+
+  let h = `
+  <!-- Top bar -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+    <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📄 EDI IMPORT FILE BUILDER</div>
+    <button class="btn btn-primary" onclick="exportEDIFile()" style="font-size:12px;padding:8px 20px;letter-spacing:1px">
+      ⬇ EXPORT EDI FILE (.xlsx)
+    </button>
+  </div>
+
+  <!-- DIR Column Mapping -->
+  ${buildEDIColPickerHTML()}
+
+  <!-- Two-column layout -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+
+    <!-- ── SCI GAMES ── -->
+    <div style="${sectionStyle}">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent2)">🔬 SCI GAMES LOADS</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Built from loaded DIR data</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm" onclick="ediCheckAll('sci',true);document.querySelectorAll('.edi-hbh-chk').forEach(c=>c.checked=false)" title="Select All">☑</button>
+          <button class="btn btn-sm" onclick="ediCheckAll('sci',false)" title="Deselect All">☐</button>
+        </div>
+      </div>`;
+
+  if (!sciKeys.length) {
+    h += `<div style="border:2px dashed var(--border);border-radius:6px;padding:24px;text-align:center;color:var(--text2);font-size:12px">
+      No Sci Games ZMO data found.<br>Import a DIR report first.
+    </div>`;
+  } else {
+    const totalRolls = Object.values(sciGroups).reduce((s,g)=>s+g.lots.length,0);
+    h += `<div style="font-size:10px;color:var(--text2)">${sciKeys.length} ZMOs &nbsp;·&nbsp; ${totalRolls.toLocaleString()} rolls total</div>
+    <div id="sci-load-list" style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">`;
+
+    sciKeys.forEach((key, i) => {
+      const g = sciGroups[key];
+      const alt = i%2!==0;
+      const detailId = 'sci-detail-'+i;
+      let detailRows = '';
+      g.lots.forEach(function(l, li) {
+        const pd = l._pd||l.purchDoc||'', pi = l._pi||l.purchItem||'';
+        const poDisp = pd ? pd+(pi?'-'+pi:'') : (l.po||'—');
+        const expDisp = l.expDate ? new Date(l.expDate).toLocaleDateString('en-US') : '—';
+        const bg = li%2!==0 ? 'rgba(0,0,0,0.03)' : '';
+        detailRows += '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
+          +'<td style="padding:4px 8px;font-weight:bold;color:var(--accent);white-space:nowrap">'+l.lot+'</td>'
+          +'<td style="padding:4px 8px">'+l.material+'</td>'
+          +'<td style="padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+l.matDesc+'</td>'
+          +'<td style="padding:4px 8px;color:var(--accent2);white-space:nowrap">'+poDisp+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(l.qtyMlf?parseFloat(l.qtyMlf).toFixed(3):'—')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(l.grossWt?l.grossWt.toLocaleString():'—')+'</td>'
+          +'<td style="padding:4px 8px;white-space:nowrap">'+expDisp+'</td></tr>';
+      });
+      const totLF = g.lots.reduce(function(s,l){return s+(parseFloat(l.qtyMlf)||0);},0).toFixed(3);
+      const totWt = g.lots.reduce(function(s,l){return s+(l.grossWt||0);},0).toLocaleString();
+      const dq = '"';
+      const sciStamp = _stamps[key] || null;
+      const sciStampStr = sciStamp ? 'Exported: '+new Date(sciStamp.exportedAt).toLocaleString() : '';
+      h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
+        +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
+        +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
+        +'<div style='+dq+'flex:1;min-width:0;cursor:pointer'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq+'>'
+        +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+key+'</div>'
+        +'<div style='+dq+'font-size:10px;color:var(--text2);margin-top:2px'+dq+'>'+g.customerName+' · Invoice: '+g.invoiceRef+'</div>'
+        +'</div>'
+        +'<div style='+dq+'text-align:right;white-space:nowrap;margin-right:4px'+dq+'>'
+        +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:13px'+dq+'>'+g.lots.length+'</div>'
+        +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>rolls</div>'
+        +(sciStampStr?'<div style='+dq+'font-size:9px;color:var(--accent2);white-space:nowrap;margin-top:2px'+dq+'>✓ '+sciStampStr+'</div>':'')
+        +'</div>'
+        +'<button onclick='+dq+'deleteEDISciLoad(&quot;'+key+'&quot;)'+dq
+        +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
+        +'<button id='+dq+detailId+'-btn'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq
+        +' style='+dq+'background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px'+dq+'>▼</button>'
+        +'</div>'
+        +'<div id='+dq+detailId+dq+' style='+dq+'display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:320px;overflow-y:auto'+dq+'>'
+        +'<table style='+dq+'width:100%;border-collapse:collapse;font-size:10px'+dq+'>'
+        +'<thead><tr style='+dq+'background:var(--surface2)'+dq+'>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>LOT #</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>SKU</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PRODUCT ID</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PO #</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>LF</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>WEIGHT</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>EXP DATE</th>'
+        +'</tr></thead><tbody>'+detailRows
+        +'<tr style='+dq+'background:rgba(26,158,122,0.08);font-weight:bold'+dq+'>'
+        +'<td colspan='+dq+'4'+dq+' style='+dq+'padding:5px 8px;color:var(--accent2)'+dq+'>TOTAL — '+g.lots.length+' rolls</td>'
+        +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--accent2)'+dq+'>'+totLF+'</td>'
+        +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--accent2)'+dq+'>'+totWt+'</td>'
+        +'<td></td></tr>'
+        +'</tbody></table></div></div>';
+    });;;;
+    h += `</div>`;
+  }
+
+  h += `</div>
+
+    <!-- ── HBH ── -->
+    <div style="${sectionStyle}">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--warning)">🏭 HBH LOADS</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Drag &amp; drop or click to upload GS file</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm" onclick="ediCheckAll('hbh',true);document.querySelectorAll('.edi-sci-chk').forEach(c=>c.checked=false)" title="Select All">☑</button>
+          <button class="btn btn-sm" onclick="ediCheckAll('hbh',false)" title="Deselect All">☐</button>
+        </div>
+      </div>
+
+      <!-- Drop zone -->
+      <div id="hbh-dropzone"
+        ondragover="event.preventDefault();this.style.borderColor='var(--warning)';this.style.background='rgba(255,160,50,0.08)'"
+        ondragleave="this.style.borderColor='';this.style.background=''"
+        ondrop="event.preventDefault();this.style.borderColor='';this.style.background='';handleHBHDrop(event)"
+        onclick="document.getElementById('hbh-file-input').click()"
+        style="border:2px dashed var(--border);border-radius:8px;padding:18px;text-align:center;cursor:pointer;transition:all 0.2s;user-select:none"
+        onmouseover="this.style.borderColor='var(--warning)';this.style.background='rgba(255,160,50,0.04)'"
+        onmouseout="this.style.borderColor='';this.style.background=''">
+        <div style="font-size:22px;margin-bottom:6px">📂</div>
+        <div style="font-size:12px;font-weight:bold;color:var(--warning)">Drop GS load file here</div>
+        <div style="font-size:10px;color:var(--text2);margin-top:4px">.xls or .xlsx &nbsp;·&nbsp; click to browse</div>
+        <input type="file" id="hbh-file-input" accept=".xls,.xlsx" onchange="handleHBHUpload(event)" style="display:none">
+      </div>`;
+
+  if (_ediHBHLoads.length) {
+    const totalHBHRolls = _ediHBHLoads.reduce((s,l)=>s+l.rows.length,0);
+    h += `<div style="font-size:10px;color:var(--text2)">${_ediHBHLoads.length} loads loaded &nbsp;·&nbsp; ${totalHBHRolls.toLocaleString()} rolls total
+      <button onclick="_ediHBHLoads=[];showEDIImportFile()" title="Clear all HBH loads"
+        style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;padding:0">✕ Clear All</button>
+      <button onclick="document.getElementById('hbh-file-input').click()" title="Add another file"
+        style="margin-left:8px;background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:0">＋ Add File</button>
+    </div>
+    <div id="hbh-load-list" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">`;
+
+    _ediHBHLoads.forEach(function(load, i) {
+      const alt = i%2!==0;
+      const detailId = 'hbh-detail-'+i;
+      let detailRows = '';
+      (load.rows||[]).forEach(function(r, ri) {
+        const bg = ri%2!==0 ? 'rgba(0,0,0,0.03)' : '';
+        const expDisp = r.expDate ? (typeof r.expDate === 'number'
+          ? new Date((r.expDate - 25569)*86400000).toLocaleDateString('en-US')
+          : r.expDate) : '—';
+        detailRows += '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
+          +'<td style="padding:4px 8px;font-weight:bold;color:var(--accent);white-space:nowrap">'+(r.lot||'—')+'</td>'
+          +'<td style="padding:4px 8px">'+(r.sku||'')+'</td>'
+          +'<td style="padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(r.productId||'')+'</td>'
+          +'<td style="padding:4px 8px;color:var(--accent2);white-space:nowrap">'+(r.po5||'—')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(r.lf||'—')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(r.weight?(+r.weight).toLocaleString():'—')+'</td>'
+          +'<td style="padding:4px 8px;white-space:nowrap">'+expDisp+'</td>'
+          +'</tr>';
+      });
+      const totWt = (load.rows||[]).reduce(function(s,r){return s+(+r.weight||0);},0).toLocaleString();
+      const dq = '"';
+      const hbhKey = load.sheetName.replace(/[.#$[\]]/g,'_');
+      const hbhStamp = _stamps[hbhKey] || null;
+      const hbhStampStr = hbhStamp ? 'Exported: '+new Date(hbhStamp.exportedAt).toLocaleString() : '';
+      h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
+        +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
+        +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-hbh-chk'+dq+' value='+dq+i+dq+' checked onchange='+dq+'onEDIHBHChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;accent-color:var(--warning);flex-shrink:0'+dq+'>'
+        +'<div style='+dq+'flex:1;min-width:0;cursor:pointer'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq+'>'
+        +'<div style='+dq+'font-weight:bold;color:var(--warning);font-size:12px'+dq+'>'+load.sheetName+'</div>'
+        +'<div style='+dq+'font-size:10px;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'+dq+'>'+load.poLine+'</div>'
+        +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>Invoice: '+load.invoice+' · Truck: '+load.truck+'</div>'
+        +'</div>'
+        +'<div style='+dq+'text-align:right;white-space:nowrap;margin-right:4px'+dq+'>'
+        +'<div style='+dq+'font-weight:bold;color:var(--warning);font-size:13px'+dq+'>'+load.rows.length+'</div>'
+        +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>rolls</div>'
+        +(hbhStampStr?'<div style='+dq+'font-size:9px;color:var(--warning);white-space:nowrap;margin-top:2px'+dq+'>✓ '+hbhStampStr+'</div>':'')
+        +'</div>'
+        +'<button onclick='+dq+'deleteEDIHBHLoad('+i+')'+dq
+        +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
+        +'<button id='+dq+detailId+'-btn'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq
+        +' style='+dq+'background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px'+dq+'>▼</button>'
+        +'</div>'
+        +'<div id='+dq+detailId+dq+' style='+dq+'display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:320px;overflow-y:auto'+dq+'>'
+        +'<table style='+dq+'width:100%;border-collapse:collapse;font-size:10px'+dq+'>'
+        +'<thead><tr style='+dq+'background:var(--surface2)'+dq+'>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>LOT #</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>SKU</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PRODUCT ID</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>'+(load.col5hdr||'STO')+'</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>LF</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>WEIGHT</th>'
+        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>EXP DATE</th>'
+        +'</tr></thead><tbody>'+detailRows
+        +'<tr style='+dq+'background:rgba(255,160,50,0.08);font-weight:bold'+dq+'>'
+        +'<td colspan='+dq+'5'+dq+' style='+dq+'padding:5px 8px;color:var(--warning)'+dq+'>TOTAL — '+load.rows.length+' rolls</td>'
+        +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--warning)'+dq+'>'+totWt+'</td>'
+        +'<td></td></tr>'
+        +'</tbody></table></div></div>';
+    });;
+    h += `</div>`;
+  }
+
+  h += `</div></div>`; // close HBH + grid
+
+  panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + h + '</div>';
+}
+
+function handleHBHDrop(e) {
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  processHBHFile(file);
+}
+
+
+function ediCheckAll(type, checked) {
+  const cls = type === 'sci' ? '.edi-sci-chk' : '.edi-hbh-chk';
+  document.querySelectorAll(cls).forEach(c => c.checked = checked);
+}
+
+function handleHBHUpload(e) {
+  const file = e.target.files[0]; if (!file) return;
+  processHBHFile(file);
+}
+
+// ─── HBH SKU CONVERSION ──────────────────────────────────────────────────────
+// Width → attachment suffix mapping (SKU = material + "." + attachment)
+const HBH_SKU_MAP = [
+  [26,      '2600'],  [29.5,   '2950'],  [31,     '3100'],
+  [33.875,  '3314'],  [36,     '3600'],  [38,     '3800'],
+  [40,      '4000'],  [42,     '4200'],  [48.5,   '4850'],
+  [50,      '5000'],  [50.125, '50125'], [50.25,  '5025'],
+  [54,      '5400'],  [56,     '5600'],  [56.25,  '5625']
+];
+
+function getHBHSku(material, width) {
+  const w      = parseFloat(width) || 0;
+  const entry  = HBH_SKU_MAP.find(([mw]) => Math.abs(mw - w) < 0.001);
+  if (!entry || !material) return material || '';
+  return material + '.' + entry[1];
+}
+
+
+function processHBHFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, {type:'binary', raw:true});
+      // Append to existing loads (support multiple file drops)
+      const invByLot = {};
+      state.inventory.forEach(r => { if (r.lot) invByLot[r.lot] = r; });
+
+      const hbhPrefix = s => ('HBH ' + s).replace(/^HBH\s+HBH\s+/i, 'HBH ');
+
+      wb.SheetNames.forEach(sn => {
+        const ws   = wb.Sheets[sn];
+        const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
+        if (!rows || !rows.length) return;
+
+        const gsGroups = {};
+        rows.forEach(r => {
+          if (!r || !r[0]) return;
+          const gsNum    = (r[0]||'').toString().trim();
+          if (!gsNum) return;
+          const wrdBatch = (r[6]||'').toString().trim();
+          if (!wrdBatch) return;
+          const batch    = wrdBatch.startsWith('WRD') ? '5' + wrdBatch.slice(3) : wrdBatch;
+          const truck    = (r[1]||'').toString().trim();
+          const stoDoc   = (r[18]||'').toString().trim().replace(/^0+/,'') || '';
+          const stoItem  = (r[19]||'').toString().trim().replace(/^0+/,'') || '';
+          const sto      = stoDoc + (stoItem ? '-'+stoItem : '');
+          const weight   = parseFloat(r[9]) || 0;
+          const lf       = parseFloat(r[12]) || 0;
+          const skuFile  = (r[21]||'').toString().trim();
+          const d        = state.dirData[batch] || {};
+          const inv      = invByLot[batch] || {};
+          // custName: strip leading "HBH " if already present
+          const rawCust  = d.customerName || '';
+          const custName = rawCust.replace(/^HBH\s+/i, '');
+
+          if (!gsGroups[gsNum]) gsGroups[gsNum] = { gsNum, truck, rolls:[] };
+          gsGroups[gsNum].rolls.push({
+            batch, sto, weight, lf,
+            sku:          getHBHSku(d.material || skuFile, d.width || 0),
+            productId:    d.matDesc   || '',
+            width:        d.width     || 0,
+            expDate:      inv.expDate || null,
+            custName
+          });
+        });
+
+        Object.values(gsGroups).forEach(group => {
+          group.rolls.sort((a,b) => a.batch.localeCompare(b.batch));
+          const first      = group.rolls[0] || {};
+          const invoiceRef = first.sto || '';
+          const custName   = first.custName || '';
+
+          _ediHBHLoads.push({
+            sheetName: group.gsNum,
+            receiver:  group.gsNum,
+            truck:     group.truck,
+            invoice:   invoiceRef,
+            poLine:    'HBH ' + custName + ' ' + invoiceRef + ' ' + group.gsNum,
+            col5hdr:   'STO',
+            rows: group.rolls.map(r => ({
+              sku:         r.sku,
+              productId:   r.productId,
+              lot:         r.batch,
+              prodId2:     'HBH ' + r.custName + ' ' + r.sto,
+              po5:         r.sto,
+              weight:      r.weight,
+              grossWeight: r.weight,
+              uom:         'ROLLS',
+              lf:          r.lf,
+              pcs:         1,
+              width:       r.width,
+              expDate:     r.expDate
+            }))
+          });
+        });
+      });
+
+      showAlert('✓ ' + _ediHBHLoads.length + ' HBH loads loaded from ' + file.name, 'success');
+      showEDIImportFile();
+    } catch(err) {
+      showAlert('Error reading file: ' + err.message, 'danger');
+    }
+  };
+  reader.readAsBinaryString(file);
+}
+
+
+
+
+
+function dateToExcelSerial(d) {
+  if (!d) return '';
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return '';
+  return Math.round(dt.getTime() / 86400000) + 25569;
+}
+
+function buildEDISheet_SciGames(group) {
+  const lots      = group.lots;
+  const rollCount = lots.length;
+
+  // Helper: get PO# for a lot (purchDoc-purchItem, fallback to inv.po)
+  const getLotPO = l => {
+    // Use _pd/_pi (user-mapped columns) first, then purchDoc/purchItem, then inv.po
+    const pd = l._pd || l.purchDoc || '';
+    const pi = l._pi || l.purchItem || '';
+    if (pd) return pd + (pi ? '-' + pi : '');
+    return l.po || '';
+  };
+
+  // Receiver = Shipment Number
+  const receiver = group.shipment || '';
+  // Invoice # = invoiceRef (soDoc-soItem)
+  const invoice  = group.invoiceRef || '';
+  // Truck # = Vehicle ID from DIR, fallback to BOL
+  const truck    = lots.find(l => l.vehicleId)?.vehicleId
+                || lots.find(l => l.bol)?.bol || '';
+  // PO # header = same value as line data PO# (first lot's PO)
+  // PO # header = customer name + shipment + truck (reference line)
+  const poLine   = group.customerName + ' ' + group.shipment + (truck ? ' ' + truck : '');
+
+  const aoa = [
+    // Row 1 — empty
+    [],
+    // Row 2 — A:Receiver, B:value, D:Total Rolls, E:count, H:Fraction Decimal
+    ['Receiver', receiver, null, 'Total Rolls', rollCount, null, null, 'Fraction  Decimal'],
+    // Row 3 — A:PO #, B:value, H:0.5, I:0.5
+    ['PO #', poLine, null, null, null, null, null, 0.5, 0.5],
+    // Row 4 — A:Invoice #, B:value
+    ['Invoice #', invoice],
+    // Row 5 — A:Truck #, B:value, H:Piper IBD Order #
+    ['Truck #', truck, null, null, null, null, null, 'Piper IBD Order #'],
+    // Row 6 — empty
+    [],
+    // Row 7 — empty
+    [],
+    // Row 8 — column headers
+    ['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
+  ];
+
+  lots.forEach(l => {
+    const poNum     = getLotPO(l);
+    const expSerial = dateToExcelSerial(l.expDate);
+    const weight    = l.grossWt || 0;
+    const lf        = l.qtyMlf ? +l.qtyMlf.toFixed(3) : 0;
+
+    aoa.push([
+      l.material,
+      l.matDesc,
+      l.lot,
+      l.prod2 || ('Scientific Games ' + invoice),
+      poNum,
+      weight, weight,
+      'ROLLS',
+      lf, 1,
+      l.width || 0,
+      expSerial || ''
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Apply short date format (m/d/yyyy) to Exp Date column (col L = index 11)
+  // Data rows start at row 9 (aoa index 8 = sheet row index 8, 0-based)
+  const expColIdx = 11;
+  for (let r = 8; r < aoa.length; r++) {
+    const cellRef = XLSX.utils.encode_cell({ r, c: expColIdx });
+    if (ws[cellRef] && ws[cellRef].v) {
+      ws[cellRef].t = 'n';
+      ws[cellRef].z = 'm/d/yyyy';
+    }
+  }
+
+  return ws;
+}
+
+
+
+
+
+function buildEDISheet_HBH(load) {
+  // Exact cell layout matching HBH EDI template
+  const aoa = [
+    // Row 1 — empty
+    [],
+    // Row 2 — Receiver / Total Rolls / Fraction Decimal
+    ['Receiver', load.receiver, null, 'Total Rolls', load.rows.length, null, null, 'Fraction  Decimal'],
+    // Row 3 — PO # / 0.5 fractions
+    ['PO #', load.poLine, null, null, null, null, null, 0.5, 0.5],
+    // Row 4 — Invoice #
+    ['Invoice #', load.invoice],
+    // Row 5 — Truck # / Piper IBD Order #
+    ['Truck #', load.truck, null, null, null, null, null, 'Piper IBD Order #'],
+    // Row 6 — empty
+    [],
+    // Row 7 — empty
+    [],
+    // Row 8 — column headers (STO not PO# for HBH)
+    ['SKU','Product ID','Lot#','Prod ID 2','STO','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
+  ];
+
+  load.rows.forEach(r => {
+    const expSerial = dateToExcelSerial(r.expDate);
+    const wt = typeof r.weight === 'string' ? parseFloat(r.weight.replace(/,/g,''))||0 : (r.weight||0);
+    const gw = typeof r.grossWeight === 'string' ? parseFloat(r.grossWeight.replace(/,/g,''))||0 : (r.grossWeight||0);
+    aoa.push([
+      r.sku, r.productId, r.lot, r.prodId2, r.po5,
+      wt, gw, r.uom || 'ROLLS',
+      r.lf || 0, r.pcs || 1, r.width || 0,
+      expSerial || ''
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Apply short date format to Exp Date column (L = index 11, data starts row 9 = aoa index 8)
+  for (let ri = 8; ri < aoa.length; ri++) {
+    const cellRef = XLSX.utils.encode_cell({r: ri, c: 11});
+    if (ws[cellRef] && ws[cellRef].v) {
+      ws[cellRef].t = 'n';
+      ws[cellRef].z = 'm/d/yyyy';
+    }
+  }
+  return ws;
+}
+
+
+
+function exportEDIFile() {
+  const sciGroups = window._ediSciGroups || {};
+  const wb = XLSX.utils.book_new();
+  let sheetCount = 0;
+  const exportedKeys = [];
+
+  // Sci Games selected loads
+  document.querySelectorAll('.edi-sci-chk:checked').forEach(chk => {
+    const key = chk.value;
+    const group = sciGroups[key];
+    if (!group || !group.lots.length) return;
+    const ws = buildEDISheet_SciGames(group);
+    const safeName = group.shipment.toString().substring(0,31);
+    XLSX.utils.book_append_sheet(wb, ws, safeName);
+    exportedKeys.push(safeName);
+    sheetCount++;
+  });
+
+  // HBH selected loads
+  document.querySelectorAll('.edi-hbh-chk:checked').forEach(chk => {
+    const idx = parseInt(chk.value);
+    const load = _ediHBHLoads[idx];
+    if (!load) return;
+    const ws = buildEDISheet_HBH(load);
+    const safeName = load.sheetName.toString().substring(0,31);
+    XLSX.utils.book_append_sheet(wb, ws, safeName);
+    exportedKeys.push(safeName);
+    sheetCount++;
+  });
+
+  if (!sheetCount) { showAlert('No loads selected for export.', 'warning'); return; }
+
+  const d = new Date();
+  const ts = d.getFullYear().toString().slice(2) +
+    String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+  const fname = 'EDI_Import_' + ts + '.xlsx';
+  XLSX.writeFile(wb, fname);
+  // Save export timestamps
+  saveEDIExportStamp(exportedKeys);
+  window._ediStamps = window._ediStamps || {};
+  exportedKeys.forEach(k => { window._ediStamps[k.replace(/[.#$[\]]/g,'_')] = { exportedAt: Date.now(), exportedBy: state.currentUser||'' }; });
+  showAlert('✓ Exported ' + sheetCount + ' load sheets to ' + fname, 'success');
+  showEDIImportFile(); // refresh to show stamps
+}
+
 // ─── PENDING PUT AWAY ─────────────────────────────────────────────────────────
 function showPendingPutAway() {
+  state.currentView = 'putaway';
   const PUT_AWAY_LOCS = ['23-TR', '23-RR', '23-GENERAL'];
   const inv = state.inventory.filter(r => {
     if ((r.pcsPending||0) > 0) return false;
@@ -3121,7 +4035,1508 @@ function lpaToggleAll(expand) {
   });
 }
 
+
+// ─── CYCLE COUNT (6021) ─────────────────────────────────────────────────────
+
+function saveCycleCount() {
+  const entries = (window._ccEntries||[]).map(e=>({
+    ...e,
+    rows: e.rows.map(r=>({sku:r.sku, bu:r.bu||'', productId:r.productId||r.sku, lot:r.lot||'', skid:r.skidId||'', dateRecd:r.dateRecd?new Date(r.dateRecd).toLocaleDateString('en-US'):'', pcs:r.pcs||0}))
+  }));
+  const id = 'CC-'+new Date().toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'2-digit'}).replace(/\//g,'')+'-'+Date.now().toString().slice(-4);
+  const session = { id, createdAt:Date.now(), status:'pending', countedBy:state.currentUser?state.currentUser.name:'Unknown', locations:window._ccLocations||[], entries, adjustments:[] };
+  if (db) db.ref('cycleCount6021/'+id).set(session).catch(()=>{});
+  window._ccLastSession = session;
+  loadCCHistory();
+  // Word export not available in PickFlow — session saved to Firebase
+  showCCReport(session);
+}
+function showCycleCountStart() {
+  state.currentView = 'cyclecount';
+  const SKIP_LOCS = ['23-TR','23-RR','23-GENERAL','01-GENERAL','23-GHOST','CYC_CNT'];
+  const panel = document.getElementById('main-panel');
+  panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div style="color:var(--text2);font-size:13px">Loading cycle count data...</div></div>';
+
+  if (!db) {
+    panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div class="alert alert-warning">Not connected to database.</div></div>';
+    return;
+  }
+
+  // Load ALL location sources in parallel: sessions history + custom location list
+  Promise.all([
+    db.ref('cycleCount6021').orderByChild('createdAt').once('value'),
+    db.ref('locationList6021').once('value')
+  ]).then(([sessionSnap, locSnap]) => {
+    const data     = sessionSnap.val() || {};
+    const sessions = Object.values(data).sort((a,b)=>b.createdAt-a.createdAt);
+
+    // Build full location list from all known sources
+    const locSet = new Set();
+
+    // 1. All locations ever in inventory (any status)
+    state.inventory.forEach(r => { if (r.location) locSet.add(r.location); });
+
+    // 2. All locations ever counted in any session
+    sessions.forEach(s => (s.locations||[]).forEach(l => locSet.add(l)));
+
+    // 3. Manually added persistent locations
+    const customLocsObj = locSnap.val() || {};
+    Object.keys(customLocsObj).forEach(l => locSet.add(l));
+    window._ccCustomLocs = new Set(Object.keys(customLocsObj));
+
+    // 4. Auto-fill gaps using the warehouse location naming pattern (e.g. 23-XX-YY)
+    //    Detect prefix + max aisle + max bay from known locations, then generate full grid
+    const patternRe = /^(\d+)-(\d+)-(\d+)$/;
+    const prefixGroups = {};
+    [...locSet].forEach(l => {
+      const m = l.match(patternRe);
+      if (!m) return;
+      const prefix = m[1];
+      const aisle  = parseInt(m[2], 10);
+      const bay    = parseInt(m[3], 10);
+      if (!prefixGroups[prefix]) prefixGroups[prefix] = { maxAisle:0, maxBay:{} };
+      const g = prefixGroups[prefix];
+      if (aisle > g.maxAisle) g.maxAisle = aisle;
+      if (!g.maxBay[aisle] || bay > g.maxBay[aisle]) g.maxBay[aisle] = bay;
+    });
+    // Generate every aisle/bay combo up to the max seen for each aisle
+    Object.entries(prefixGroups).forEach(([prefix, g]) => {
+      for (let a = 0; a <= g.maxAisle; a++) {
+        const aisleStr = String(a).padStart(2,'0');
+        const maxB = g.maxBay[a] || 0;
+        if (maxB === 0) continue; // no bays seen for this aisle yet — skip
+        for (let b = 1; b <= maxB; b++) {
+          locSet.add(prefix + '-' + aisleStr + '-' + String(b).padStart(2,'0'));
+        }
+      }
+    });
+
+    // Cache for tracker and other views
+    window._ccHistoricLocs = [...locSet];
+
+    // Filter skip locs
+    const allLocs     = [...locSet].sort();
+    const storageLocs = allLocs.filter(l => !SKIP_LOCS.some(p => l.toUpperCase().includes(p.toUpperCase())));
+
+    // Month window
+    const now        = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const monthEnd   = new Date(now.getFullYear(), now.getMonth()+1, 0, 23,59,59).getTime();
+    const monthName  = now.toLocaleDateString('en-US',{month:'long',year:'numeric'});
+    const todayStr   = now.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+
+    // Working days remaining
+    function workingDaysRemaining() {
+      const lastDay = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+      let count = 0;
+      for (let d = now.getDate(); d <= lastDay; d++) {
+        const dow = new Date(now.getFullYear(), now.getMonth(), d).getDay();
+        if (dow !== 0 && dow !== 6) count++;
+      }
+      return count;
+    }
+    const wdRemaining = workingDaysRemaining();
+
+    // Suggested: storage locs with most recent put-away, not yet counted this month
+    const locLastPutaway = {};
+    state.inventory.forEach(r => {
+      const loc = (r.location||'').toUpperCase();
+      if (!r.location || SKIP_LOCS.some(p => loc.includes(p.toUpperCase()))) return;
+      if ((r.pcsPending||0) > 0) return;
+      if (r.dateRecd) {
+        const t = r.dateRecd instanceof Date ? r.dateRecd.getTime() : new Date(r.dateRecd).getTime();
+        if (!locLastPutaway[r.location] || t > locLastPutaway[r.location])
+          locLastPutaway[r.location] = t;
+      }
+    });
+    const suggestedLocs = Object.entries(locLastPutaway)
+      .sort((a,b)=>b[1]-a[1]).slice(0,20)
+      .map(([loc,ts])=>({loc, date: new Date(ts).toLocaleDateString('en-US')}));
+
+    const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;width:100%';
+
+    // Month count map
+    const monthCountMap = {};
+    sessions.forEach(s => {
+      if (!s.createdAt||s.createdAt<monthStart||s.createdAt>monthEnd) return;
+      (s.locations||[]).forEach(loc=>{ monthCountMap[loc]=(monthCountMap[loc]||0)+1; });
+    });
+    window._ccMonthCountMap = monthCountMap;
+
+    const uncountedLocs   = storageLocs.filter(l => !monthCountMap[l]);
+    const countedLocsArr  = storageLocs.filter(l =>  monthCountMap[l]);
+    const pct             = storageLocs.length > 0 ? Math.round(countedLocsArr.length/storageLocs.length*100) : 0;
+    const pctColor        = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
+    const monthSessions   = sessions.filter(s=>s.createdAt>=monthStart&&s.createdAt<=monthEnd);
+    let totalLines=0, accurateLines=0, totalAdjAdd=0, totalAdjMiss=0, totalAdjExp=0;
+    monthSessions.forEach(s=>{
+      const adjMap = {};
+      (s.adjustments||[]).forEach(a=>{ adjMap[a.loc+'|'+a.sku] = a; });
+
+      // Total lines = all entries (each loc+sku combo), not just saved adjustments
+      (s.entries||[]).forEach(e=>{
+        if (e.empty) return; // skip empty locations
+        totalLines++;
+        const saved = adjMap[e.loc+'|'+e.sku];
+        const add  = saved ? (saved.adjAdd||0)  : 0;
+        const miss = saved ? (saved.adjMiss||0) : 0;
+        if (add + miss === 0) accurateLines++;
+        totalAdjAdd  += add;
+        totalAdjMiss += miss;
+        totalAdjExp  += (e.expectedPlt||0);
+      });
+    });
+    const binAcc = totalLines>0 ? Math.round(accurateLines/totalLines*100) : null;
+    const cntAcc = totalAdjExp>0 ? Math.max(0,Math.round((1-(totalAdjAdd+totalAdjMiss)/totalAdjExp)*100)) : null;
+
+    let html = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:18px;font-weight:bold;letter-spacing:2px">🔢 CYCLE COUNT</div>
+        <div style="font-size:13px;color:var(--accent2);font-weight:bold;margin-top:4px">${todayStr}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px">Goal: count all locations within <strong style="color:var(--accent)">${monthName}</strong></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="showAddLocationModal()" style="font-size:11px">+ Add Location</button>
+        <button class="btn" onclick="showCCTracker()" style="font-size:11px;background:var(--surface2)">📊 Month Tracker</button>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:16px">
+      ${[
+        {label:'TOTAL LOCATIONS', val:storageLocs.length, color:'var(--text)'},
+        {label:'COUNTED', val:countedLocsArr.length, color:'var(--accent2)'},
+        {label:'NOT COUNTED', val:uncountedLocs.length, color:uncountedLocs.length>0?'var(--danger)':'var(--accent2)'},
+        {label:'SESSIONS', val:monthSessions.length, color:'var(--accent)'},
+        {label:'BIN ACCURACY', val:binAcc!==null?binAcc+'%':'—', color:binAcc===null?'var(--text2)':binAcc>=100?'var(--accent2)':binAcc>=95?'var(--warning)':'var(--danger)'},
+        {label:'COUNT ACCURACY', val:cntAcc!==null?cntAcc+'%':'—', color:cntAcc===null?'var(--text2)':cntAcc>=100?'var(--accent2)':cntAcc>=90?'var(--warning)':'var(--danger)'},
+        {label:'WORK DAYS LEFT', val:wdRemaining, color:wdRemaining<=3?'var(--danger)':wdRemaining<=7?'var(--warning)':'var(--accent2)'}
+      ].map(c=>`
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:9px;color:${c.color};letter-spacing:1px;margin-bottom:4px;font-weight:bold">${c.label}</div>
+          <div style="font-size:20px;font-weight:bold;color:${c.color}">${c.val}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- Main 3-col grid -->
+    <div style="display:grid;grid-template-columns:200px 1fr 300px;gap:14px;align-items:start">
+
+      <!-- Suggested -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px">
+        <div style="font-size:10px;font-weight:bold;color:var(--warning);letter-spacing:1px;margin-bottom:8px">⚡ SUGGESTED</div>
+        <div style="font-size:9px;color:var(--text2);margin-bottom:10px;line-height:1.4">Most recently put-away locations</div>`;
+
+    if (!suggestedLocs.length) {
+      html += `<div style="font-size:11px;color:var(--text2);text-align:center;padding:12px">No recent put-away data</div>`;
+    } else {
+      suggestedLocs.forEach(({loc, date}) => {
+        const isCounted = monthCountMap[loc] > 0;
+        html += `<div onclick="ediSuggestSelect('${loc}')" title="Click to pre-select" style="display:flex;align-items:center;gap:6px;padding:5px 6px;margin-bottom:2px;border-radius:5px;cursor:pointer;border:1px solid var(--border);background:${isCounted?'rgba(26,158,122,0.07)':'rgba(224,62,62,0.07)'}"
+          onmouseover="this.style.background='rgba(79,110,247,0.1)'" onmouseout="this.style.background='${isCounted?'rgba(26,158,122,0.07)':'rgba(224,62,62,0.07)'}'">
+          <span style="width:8px;height:8px;border-radius:50%;background:${isCounted?'var(--accent2)':'var(--danger)'};display:inline-block;flex-shrink:0"></span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:bold;color:var(--accent)">${loc}</div>
+            <div style="font-size:9px;color:var(--text2)">${date}</div>
+          </div>
+        </div>`;
+      });
+    }
+
+    html += `</div>
+
+      <!-- Location selector -->
+      <div>
+        <div style="font-size:11px;color:var(--text2);letter-spacing:1px;margin-bottom:10px;font-weight:bold">
+          SELECT LOCATIONS TO COUNT
+          <span style="font-size:10px;font-weight:normal;margin-left:8px">${storageLocs.length} total locations (${uncountedLocs.length} not yet counted)</span>
+        </div>
+        <div class="form-group" style="margin-bottom:10px">
+          <input type="text" id="cc-loc-search" placeholder="Filter locations..." oninput="filterCCLocs()" style="${fi}">
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button class="btn btn-sm" onclick="document.querySelectorAll('.cc-loc-chk').forEach(c=>c.checked=true);updateCCSelCount()">Select All</button>
+          <button class="btn btn-sm" onclick="document.querySelectorAll('.cc-loc-chk').forEach(c=>c.checked=false);updateCCSelCount()">Clear All</button>
+          <button class="btn btn-sm" onclick="selectUncountedOnly()" style="background:rgba(224,62,62,0.1);color:var(--danger);border-color:var(--danger)">Select Uncounted Only</button>
+          <span id="cc-sel-count" style="font-size:12px;color:var(--text2);padding:5px 8px">0 selected</span>
+        </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span style="font-weight:bold;color:var(--text);font-size:12px">${monthName} Progress</span>
+            <span style="font-weight:bold;color:${pctColor};font-size:12px">${countedLocsArr.length} / ${storageLocs.length} &nbsp; ${pct}%
+              <span style="font-size:10px;color:${wdRemaining<=3?'var(--danger)':'var(--text2)'}"> &nbsp;(${wdRemaining} work days left)</span>
+            </span>
+          </div>
+          <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden">
+            <div style="width:${pct}%;background:${pctColor};height:100%;border-radius:4px;transition:width 0.4s"></div>
+          </div>
+        </div>
+        <div class="cc-loc-list" id="cc-loc-list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px">`;
+
+    if (!storageLocs.length) {
+      html += '<div style="text-align:center;color:var(--text2);padding:20px;font-size:13px">No locations found. Import inventory first.</div>';
+    } else {
+      storageLocs.forEach(l => {
+        const avail   = state.inventory.filter(r=>r.location===l&&(r.pcsPending||0)===0).length;
+        const picked  = state.inventory.filter(r=>r.location===l&&(r.pcsPending||0)>0).length;
+        const mc      = monthCountMap[l]||0;
+        const isSugg  = suggestedLocs.some(s=>s.loc===l);
+        const isCustom= window._ccCustomLocs && window._ccCustomLocs.has(l);
+        const isEmpty = avail===0 && picked===0;
+        const badge   = mc>0
+          ? `<span style="background:rgba(26,158,122,0.15);color:var(--accent2);border-radius:10px;padding:1px 8px;font-size:11px;font-weight:bold">✓ ${mc}x</span>`
+          : `<span style="background:rgba(224,62,62,0.1);color:var(--danger);border-radius:10px;padding:1px 8px;font-size:11px">Not counted</span>`;
+        const suggBorder = isSugg ? 'border-left:3px solid var(--warning);' : '';
+        html += `<label class="cc-loc-item" data-counted="${mc>0}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border);${suggBorder}" onmouseover="this.style.background='rgba(79,110,247,0.07)'" onmouseout="this.style.background=''">
+          <input type="checkbox" class="cc-loc-chk" value="${l}" onchange="updateCCSelCount()" style="cursor:pointer;width:16px;height:16px">
+          <span style="font-weight:bold;color:var(--accent);min-width:90px">${l}</span>
+          ${isSugg?`<span style="font-size:9px;color:var(--warning);font-weight:bold">⚡</span>`:''}
+          ${isCustom?`<span style="font-size:9px;color:var(--accent);background:rgba(79,110,247,0.12);border-radius:4px;padding:1px 5px">custom</span>`:''}
+          ${isEmpty
+            ? `<span style="color:var(--text2);font-size:12px;font-style:italic">Empty</span>`
+            : `<span style="color:var(--accent2);font-size:12px">${avail} avail</span>`}
+          ${picked?`<span style="color:var(--warning);font-size:12px">${picked} picked</span>`:''}
+          <span style="margin-left:auto">${badge}</span>
+          ${isCustom&&isAdmin()?`<button onclick="event.preventDefault();removeCustomLocation('${l}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:12px;padding:0 4px;margin-left:4px" title="Remove location">✕</button>`:''}
+        </label>`;
+      });
+    }
+
+    html += `</div>
+        <button class="btn btn-primary" style="width:100%;margin-top:12px;font-size:14px;padding:12px" onclick="startCycleCount()">Start Count →</button>
+      </div>
+
+      <!-- Recent counts -->
+      <div>
+        <div style="font-size:11px;color:var(--text2);letter-spacing:1px;margin-bottom:10px;font-weight:bold">RECENT COUNTS</div>
+        <div id="cc-inline-history">`;
+
+    const recent = sessions.slice(0,10);
+    if (!recent.length) {
+      html += '<div style="font-size:12px;color:var(--text2)">No cycle counts yet.</div>';
+    } else {
+      html += recent.map(s=>`
+        <div style="padding:9px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
+            <span style="font-weight:bold;color:var(--accent);cursor:pointer" onclick="viewCCSession('${s.id}')">${s.id}</span>
+            ${isAdmin()?`<button onclick="confirmDeleteSession('${s.id}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:''}
+          </div>
+          <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
+          <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
+        </div>`).join('');
+    }
+
+    html += `</div></div></div>`;
+
+    panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
+    window._ccAllLocs = storageLocs;
+    window._ccSuggestedLocs = suggestedLocs.map(s=>s.loc);
+  });
+}
+
+// Show modal to pick which uncounted locations to select
+function selectUncountedOnly() {
+  const mm       = window._ccMonthCountMap || {};
+  const allLocs  = window._ccAllLocs || [];
+  const uncounted = allLocs.filter(l => !mm[l]);
+
+  if (!uncounted.length) { showAlert('All locations have been counted this month!', 'success'); return; }
+
+  // Build inventory summary per location
+  const invByLoc = {};
+  (state.inventory||[]).forEach(r => {
+    if (!r.location) return;
+    if (!invByLoc[r.location]) invByLoc[r.location] = {avail:0, picked:0};
+    if ((r.pcsPending||0)>0) invByLoc[r.location].picked++;
+    else invByLoc[r.location].avail++;
+  });
+
+  const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:12px;outline:none;width:100%;box-sizing:border-box';
+
+  let rows = uncounted.map((loc, i) => {
+    const inv  = invByLoc[loc] || {avail:0, picked:0};
+    const desc = inv.avail ? `${inv.avail} avail` : inv.picked ? `${inv.picked} picked` : 'Empty';
+    const descColor = inv.avail ? 'var(--accent2)' : inv.picked ? 'var(--warning)' : 'var(--text2)';
+    return `<label style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12px;"
+      onmouseover="this.style.background='rgba(79,110,247,0.06)'" onmouseout="this.style.background=''">
+      <input type="checkbox" class="unc-loc-chk" value="${loc}" checked style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent)">
+      <span style="font-weight:bold;color:var(--accent);min-width:90px">${loc}</span>
+      <span style="font-size:11px;color:${descColor}">${desc}</span>
+    </label>`;
+  }).join('');
+
+  let h = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="width:480px;max-height:80vh;display:flex;flex-direction:column">
+      <h2 style="margin-bottom:4px">Select Uncounted Locations</h2>
+      <p style="font-size:11px;color:var(--text2);margin-bottom:12px">${uncounted.length} locations not yet counted this month</p>
+      <div style="margin-bottom:10px">
+        <input type="text" placeholder="Filter..." oninput="filterUncountedModal(this.value)" style="${fi}">
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-sm" onclick="document.querySelectorAll('.unc-loc-chk').forEach(c=>c.checked=true)">☑ All</button>
+        <button class="btn btn-sm" onclick="document.querySelectorAll('.unc-loc-chk').forEach(c=>c.checked=false)">☐ None</button>
+        <span id="unc-sel-count" style="font-size:11px;color:var(--text2);padding:5px">${uncounted.length} selected</span>
+      </div>
+      <div id="unc-loc-list" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:6px;max-height:380px">
+        ${rows}
+      </div>
+      <div class="modal-actions" style="margin-top:14px">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="applyUncountedSelection()">Apply Selection</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', h);
+  // Update count as user checks/unchecks
+  document.querySelectorAll('.unc-loc-chk').forEach(c => {
+    c.addEventListener('change', () => {
+      const sel = document.querySelectorAll('.unc-loc-chk:checked').length;
+      const el = document.getElementById('unc-sel-count');
+      if (el) el.textContent = sel + ' selected';
+    });
+  });
+}
+
+function filterUncountedModal(query) {
+  const q = query.toLowerCase();
+  document.querySelectorAll('#unc-loc-list label').forEach(label => {
+    const loc = label.querySelector('.unc-loc-chk')?.value || '';
+    label.style.display = loc.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+function applyUncountedSelection() {
+  const selected = new Set(
+    [...document.querySelectorAll('.unc-loc-chk:checked')].map(c => c.value)
+  );
+  // Uncheck everything in the main list first, then check selected uncounted ones
+  document.querySelectorAll('.cc-loc-chk').forEach(c => {
+    if (selected.has(c.value)) c.checked = true;
+    // leave already-checked ones alone if not in uncounted set
+  });
+  updateCCSelCount();
+  closeModal();
+}
+
+
+// Add a custom persistent location
+function showAddLocationModal() {
+  const fi = 'width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--font);font-size:14px;outline:none;box-sizing:border-box;margin-top:6px';
+  let h  = '<div class="modal-overlay" onclick="if(event.target===this)closeModal()">';
+  h += '<div class="modal" style="width:380px">';
+  h += '<h2 style="margin-bottom:12px">➕ Add Location</h2>';
+  h += '<p style="font-size:12px;color:var(--text2);margin-bottom:14px">Add a location that should always appear in the cycle count list, even when empty.</p>';
+  h += `<label style="font-size:12px;font-weight:bold">Location Name</label>
+        <input id="new-loc-input" type="text" placeholder="e.g. 23-04-15" style="${fi}" onkeydown="if(event.key==='Enter')saveCustomLocation()">`;
+  h += '<div class="modal-actions" style="margin-top:16px">';
+  h += '<button class="btn" onclick="closeModal()">Cancel</button>';
+  h += '<button class="btn btn-primary" onclick="saveCustomLocation()">Add Location</button>';
+  h += '</div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', h);
+  setTimeout(()=>document.getElementById('new-loc-input')?.focus(), 50);
+}
+
+function saveCustomLocation() {
+  const val = (document.getElementById('new-loc-input')?.value||'').trim().toUpperCase();
+  if (!val) { showAlert('Please enter a location name.','warning'); return; }
+  if (!db)  { showAlert('Not connected.','warning'); return; }
+  db.ref('locationList6021/' + val.replace(/[.#$[\]]/g,'-')).set(true)
+    .then(() => {
+      closeModal();
+      showAlert('Location ' + val + ' added.', 'success');
+      showCycleCountStart();
+    })
+    .catch(err => showAlert('Error: '+err.message,'danger'));
+}
+
+function removeCustomLocation(loc) {
+  if (!db) return;
+  const key = loc.replace(/[.#$[\]]/g,'-');
+  db.ref('locationList6021/'+key).remove()
+    .then(() => { showAlert('Location '+loc+' removed.','success'); showCycleCountStart(); })
+    .catch(err => showAlert('Error: '+err.message,'danger'));
+}
+
+
+
+// Click a suggested location to pre-check it in the main list
+function ediSuggestSelect(loc) {
+  const chks = document.querySelectorAll('.cc-loc-chk');
+  chks.forEach(c => { if (c.value === loc) c.checked = true; });
+  updateCCSelCount();
+  // Scroll the location into view
+  const item = [...document.querySelectorAll('.cc-loc-item')].find(el => {
+    const chk = el.querySelector('.cc-loc-chk');
+    return chk && chk.value === loc;
+  });
+  if (item) item.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+
+function showCCTracker() {
+  state.currentView = 'cctracker';
+  const panel = document.getElementById('main-panel');
+  panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div style="color:var(--text2)">Loading tracker...</div></div>';
+
+  const SKIP_LOCS = ['23-TR','23-RR','23-GENERAL','01-GENERAL','23-GHOST','CYC_CNT'];
+  // All locations: inventory (ever seen) + session history + custom — no capacity ref needed
+  const locSet2 = new Set(window._ccHistoricLocs || []);
+  state.inventory.forEach(r => { if (r.location) locSet2.add(r.location); });
+  const allLocs     = [...locSet2].sort();
+  const storageLocs = allLocs.filter(l => !SKIP_LOCS.some(p=>l.toUpperCase().includes(p.toUpperCase())));
+
+  const now = new Date();
+  const year  = now.getFullYear();
+  const month = now.getMonth();
+  const monthName = now.toLocaleDateString('en-US',{month:'long',year:'numeric'});
+  const monthStart = new Date(year, month, 1).getTime();
+  const monthEnd   = new Date(year, month+1, 0, 23,59,59).getTime();
+  const lastDay    = new Date(year, month+1, 0).getDate();
+  const today      = now.getDate();
+
+  // Working days in month & remaining
+  function isWorkday(y, m, d) {
+    const dow = new Date(y, m, d).getDay();
+    return dow !== 0 && dow !== 6;
+  }
+  let totalWorkDays = 0, remainWorkDays = 0;
+  for (let d = 1; d <= lastDay; d++) {
+    if (isWorkday(year, month, d)) {
+      totalWorkDays++;
+      if (d >= today) remainWorkDays++;
+    }
+  }
+  const passedWorkDays = totalWorkDays - remainWorkDays;
+
+  if (!db) { panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div class="alert alert-warning">Not connected to database.</div></div>'; return; }
+
+  db.ref('cycleCount6021').orderByChild('createdAt').once('value', snap => {
+    const data = snap.val() || {};
+    const sessions = Object.values(data).filter(s=>s.createdAt>=monthStart&&s.createdAt<=monthEnd).sort((a,b)=>a.createdAt-b.createdAt);
+
+    // Build per-location count map: loc → array of dates counted
+    const locDates = {};
+    sessions.forEach(s => {
+      const d = new Date(s.createdAt).getDate();
+      (s.locations||[]).forEach(loc => {
+        if (!locDates[loc]) locDates[loc] = new Set();
+        locDates[loc].add(d);
+      });
+    });
+
+    const countedLocs   = storageLocs.filter(l => locDates[l]?.size > 0);
+    const uncountedLocs = storageLocs.filter(l => !locDates[l]?.size);
+    const pct = storageLocs.length > 0 ? Math.round(countedLocs.length/storageLocs.length*100) : 0;
+    const pctColor = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
+    const wdColor  = remainWorkDays<=3?'var(--danger)':remainWorkDays<=7?'var(--warning)':'var(--accent2)';
+
+    // Build calendar day headers
+    const calDays = [];
+    for (let d = 1; d <= lastDay; d++) calDays.push(d);
+    const workdays = calDays.filter(d => isWorkday(year, month, d));
+
+    let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 CYCLE COUNT TRACKER — ${monthName.toUpperCase()}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">All locations must be counted at least once this month</div>
+      </div>
+      <button class="btn" onclick="showCycleCountStart()" style="font-size:11px">← Back to Count</button>
+    </div>
+
+    <!-- Summary bar -->
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:20px">
+      ${[
+        {l:'TOTAL LOCATIONS', v:storageLocs.length, c:'var(--text)'},
+        {l:'COUNTED', v:countedLocs.length, c:'var(--accent2)'},
+        {l:'REMAINING', v:uncountedLocs.length, c:uncountedLocs.length>0?'var(--danger)':'var(--accent2)'},
+        {l:'% COMPLETE', v:pct+'%', c:pctColor},
+        {l:'WORK DAYS DONE', v:passedWorkDays+'/'+totalWorkDays, c:'var(--text2)'},
+        {l:'WORK DAYS LEFT', v:remainWorkDays, c:wdColor}
+      ].map(x=>`
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:9px;color:${x.c};letter-spacing:1px;font-weight:bold;margin-bottom:4px">${x.l}</div>
+          <div style="font-size:20px;font-weight:bold;color:${x.c}">${x.v}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- Progress bar -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-weight:bold;font-size:13px">${monthName} Progress</span>
+        <span style="font-size:12px;color:var(--text2)">
+          ${remainWorkDays} working day${remainWorkDays!==1?'s':''} remaining to count <strong style="color:${wdColor}">${uncountedLocs.length}</strong> location${uncountedLocs.length!==1?'s':''}
+        </span>
+      </div>
+      <div style="background:var(--border);border-radius:4px;height:10px;overflow:hidden">
+        <div style="width:${pct}%;background:${pctColor};height:100%;border-radius:4px;transition:width 0.4s"></div>
+      </div>
+    </div>
+
+    <!-- Two-column: Not Counted | Counted ─────────────────────────────── -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+
+      <!-- NOT COUNTED -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="font-size:11px;font-weight:bold;color:var(--danger);letter-spacing:1px">❌ NOT YET COUNTED (${uncountedLocs.length})</div>
+        </div>
+        ${uncountedLocs.length === 0
+          ? `<div style="text-align:center;padding:20px;color:var(--accent2);font-size:13px;font-weight:bold">🎉 All locations counted!</div>`
+          : `<div style="max-height:400px;overflow-y:auto">
+          ${uncountedLocs.map((loc,i)=>{
+            const inv = state.inventory.filter(r=>r.location===loc);
+            const rolls = inv.filter(r=>(r.pcsPending||0)===0).length;
+            return `<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-radius:6px;margin-bottom:3px;background:${i%2!==0?'var(--surface2)':'rgba(224,62,62,0.05)'}">
+              <span style="font-weight:bold;color:var(--accent);font-size:12px">${loc}</span>
+              <span style="font-size:11px;color:var(--text2)">${rolls?rolls+' rolls':'Empty'}</span>
+            </div>`;
+          }).join('')}
+          </div>`
+        }
+      </div>
+
+      <!-- COUNTED -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:11px;font-weight:bold;color:var(--accent2);letter-spacing:1px;margin-bottom:10px">✅ COUNTED (${countedLocs.length})</div>
+        ${countedLocs.length === 0
+          ? `<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">No locations counted yet this month.</div>`
+          : `<div style="max-height:400px;overflow-y:auto">
+          ${countedLocs.map((loc,i)=>{
+            const days = [...(locDates[loc]||[])].sort((a,b)=>a-b);
+            const countStr = days.length>1?`${days.length}x (days ${days.join(', ')})`:(`day ${days[0]}`);
+            return `<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-radius:6px;margin-bottom:3px;background:${i%2!==0?'var(--surface2)':'rgba(26,158,122,0.05)'}">
+              <span style="font-weight:bold;color:var(--accent);font-size:12px">${loc}</span>
+              <span style="font-size:10px;color:var(--accent2)">${countStr}</span>
+            </div>`;
+          }).join('')}
+          </div>`
+        }
+      </div>
+    </div>`;
+
+    panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
+  });
+}
+
+
+
+function renderCCLocList(locs, monthCountMap) {
+  const listEl = document.getElementById('cc-loc-list');
+  if (!listEl) return;
+  if (!locs.length) { listEl.innerHTML='<div style="text-align:center;color:var(--text2);padding:16px">No locations found in inventory.</div>'; return; }
+
+  listEl.innerHTML = locs.map(l => {
+    const cnt = state.inventory.filter(r=>r.location===l&&(r.pcsPending||0)===0).length;
+    const picked = state.inventory.filter(r=>r.location===l&&(r.pcsPending||0)>0).length;
+    const monthCount = monthCountMap[l]||0;
+    const countedBadge = monthCount>0
+      ? `<span style="background:rgba(26,158,122,0.15);color:var(--accent2);border-radius:10px;padding:1px 8px;font-size:11px;font-weight:bold">✓ ${monthCount}x this month</span>`
+      : `<span style="background:rgba(224,62,62,0.1);color:var(--danger);border-radius:10px;padding:1px 8px;font-size:11px">Not counted</span>`;
+    return `<label class="cc-loc-item" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)" onmouseover="this.style.background='rgba(79,110,247,0.07)'" onmouseout="this.style.background=''">
+      <input type="checkbox" class="cc-loc-chk" value="${l}" onchange="updateCCSelCount()" style="cursor:pointer;width:16px;height:16px">
+      <span style="font-weight:bold;color:var(--accent);min-width:80px">${l}</span>
+      <span style="color:var(--accent2);font-size:12px">${cnt} avail</span>
+      ${picked?`<span style="color:var(--warning);font-size:12px">${picked} picked</span>`:''}
+      <span style="margin-left:auto">${countedBadge}</span>
+    </label>`;
+  }).join('');
+}
+
+function updateCCSelCount() {
+  const n = document.querySelectorAll('.cc-loc-chk:checked').length;
+  const el = document.getElementById('cc-sel-count');
+  if (el) el.textContent = n + ' selected';
+}
+
+function filterCCLocs() {
+  const q = (document.getElementById('cc-loc-search')||{}).value||'';
+  document.querySelectorAll('.cc-loc-chk').forEach(chk=>{
+    const row = chk.closest('label');
+    if (row) row.style.display = chk.value.toLowerCase().includes(q.toLowerCase()) ? '' : 'none';
+  });
+}
+
+function loadCCHistory(inline=false) {
+  const targetId = inline ? 'cc-inline-history' : 'cc-history-list';
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  if (!db) { el.innerHTML='<div style="font-size:12px;color:var(--text2);padding:8px 4px">No history (offline)</div>'; return; }
+  db.ref('cycleCount6021').orderByChild('createdAt').limitToLast(10).once('value', snap => {
+    const data = snap.val();
+    if (!data) { el.innerHTML='<div style="font-size:12px;color:var(--text2);padding:8px 4px">No cycle counts yet.</div>'; return; }
+    const sessions = Object.values(data).sort((a,b)=>b.createdAt-a.createdAt);
+    el.innerHTML = sessions.map(s=>`
+      <div style="padding:9px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
+          <span style="font-weight:bold;color:var(--accent);cursor:pointer" onclick="viewCCSession('${s.id}')">${s.id}</span>
+          ${isAdmin()?`<button onclick="confirmDeleteSession('${s.id}')" title="Delete" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:''}
+        </div>
+        <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
+        <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
+      </div>`).join('');
+  });
+}
+
+function startCycleCount() {
+  const selected = [...document.querySelectorAll('.cc-loc-chk:checked')].map(c=>c.value);
+  if (!selected.length) { showAlert('Select at least one location.','warning'); return; }
+
+  // Build per-location skid detail (excluding picked)
+  const locData = {};
+  selected.forEach(loc => { locData[loc] = []; });
+  state.inventory.forEach(r => {
+    if (!selected.includes(r.location)) return;
+    if ((r.pcsPending||0) > 0) return;
+    locData[r.location].push(r);
+  });
+
+  // Build entries grouped by loc+sku
+  const entries = [];
+  selected.forEach(loc => {
+    const rows = locData[loc].sort((a,b)=>(a.sku||'').localeCompare(b.sku||''));
+    const skuGroups = {};
+    rows.forEach(r=>{ if(!skuGroups[r.sku]) skuGroups[r.sku]={sku:r.sku,rows:[],totalPcs:0,totalPlt:0}; skuGroups[r.sku].rows.push(r); skuGroups[r.sku].totalPcs+=r.pcs||0; skuGroups[r.sku].totalPlt++; });
+    if (Object.keys(skuGroups).length===0) {
+      entries.push({ loc, sku:'', expectedPcs:0, expectedPlt:0, rows:[], empty:true });
+    } else {
+      Object.values(skuGroups).forEach(sg => entries.push({ loc, sku:sg.sku, expectedPcs:sg.totalPcs, expectedPlt:sg.totalPlt, rows:sg.rows, empty:false }));
+    }
+  });
+
+  window._ccEntries = entries;
+  window._ccLocations = selected;
+  window._ccLocData = locData;
+
+  // Show count sheet preview — no input needed, just confirm and save
+  let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div style="font-size:13px;font-weight:bold;letter-spacing:2px">🔢 COUNT SHEET PREVIEW</div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="showCycleCountStart()">← Back</button>
+      <button class="btn btn-sm" onclick="printCCCurrentSheet()" style="background:var(--accent2);color:#fff">🖨 Print Preview</button>
+      <button class="btn btn-primary btn-sm" onclick="saveCycleCount()">💾 Save Count</button>
+    </div>
+  </div>
+  <div class="alert alert-info" style="margin-bottom:12px">
+    Review the count sheet below. Click <strong>Save &amp; Export</strong> to save this session and download the Word document to take to the floor. You can re-open this session later to enter adjustments after the physical count.
+  </div>`;
+
+  selected.forEach(loc => {
+    const locEntries = entries.filter(e=>e.loc===loc);
+    const locPlt = locEntries.reduce((s,e)=>s+(e.expectedPlt||0),0);
+    const locPcs = locEntries.reduce((s,e)=>s+(e.expectedPcs||0),0);
+
+    html += `<div style="margin-bottom:20px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <div style="background:var(--surface);padding:8px 14px;border-bottom:1px solid var(--border)">
+        <span style="font-size:13px;font-weight:bold;color:var(--accent)">📍 ${loc}</span>
+        <span style="font-size:11px;color:var(--text2);margin-left:16px">${locPlt} pallets &nbsp;·&nbsp; ${locPcs.toLocaleString()} pcs</span>
+      </div>
+      <div style="overflow-x:auto">
+      <table class="data-table" style="font-size:11px;margin:0"><thead><tr>
+        <th>SKU</th><th>BU</th><th>PRODUCT ID</th><th>LOT #</th><th>SKID ID</th><th>DATE REC'D</th>
+        <th style="text-align:center">ROLLS</th><th style="text-align:right">PCS</th><th>COUNT NOTES</th>
+      </tr></thead><tbody>`;
+
+    if (locEntries.length===0 || locEntries[0].empty) {
+      html += '<tr><td colspan="8" style="text-align:center;color:var(--text2);font-style:italic;padding:10px">No available inventory</td></tr>';
+    } else {
+      locEntries.forEach(e => {
+        (e.rows||[]).forEach(r => {
+          html += `<tr>
+            <td style="color:var(--accent);font-weight:bold">${r.sku||''}</td>
+            <td style="font-size:10px;color:var(--accent2)">${r.bu||''}</td>
+            <td style="font-size:10px;color:var(--text2)">${r.productId||r.sku||''}</td>
+            <td style="font-size:10px">${r.lot||''}</td>
+            <td style="font-size:10px">${r.skidId||''}</td>
+            <td style="font-size:10px">${r.dateRecd?new Date(r.dateRecd).toLocaleDateString('en-US'):''}</td>
+            <td style="text-align:center">1</td>
+            <td style="text-align:right">${(r.pcs||0).toLocaleString()}</td>
+            <td style="color:var(--text2);font-size:10px">___________________</td>
+          </tr>`;
+        });
+        html += `<tr style="background:var(--surface);font-weight:bold">
+          <td colspan="5" style="color:var(--text2);font-size:10px">${e.sku} Total</td><td></td>
+          <td style="text-align:center;color:var(--accent2)">${e.expectedPlt}</td>
+          <td style="text-align:right;color:var(--accent2)">${e.expectedPcs.toLocaleString()}</td><td></td>
+        </tr>`;
+      });
+    }
+    html += `<tr style="background:var(--surface2);font-weight:bold">
+      <td colspan="6">Grand Total</td>
+      <td style="text-align:center;color:var(--accent)">${locPlt}</td>
+      <td style="text-align:right;color:var(--accent)">${locPcs.toLocaleString()}</td><td></td>
+    </tr>`;
+    html += '</tbody></table></div></div>';
+  });
+
+  document.getElementById('main-panel').innerHTML = html;
+}
+
+function updateVar(idx) { /* legacy — kept for compatibility */ }
+
+function viewCCSession(id) {
+  if (!db) return;
+  db.ref('cycleCount6021/'+id).once('value', snap=>{ const s=snap.val(); if(s) showCCReport(s); });
+}
+
+function deleteSession(sessionId) {
+  if (!db) { showAlert('Not connected.','warning'); return; }
+  db.ref('cycleCount6021/' + sessionId).remove()
+    .then(() => {
+      closeModal();
+      showAlert('Session ' + sessionId + ' deleted.', 'success');
+      if (window._ccLastSession && window._ccLastSession.id === sessionId) {
+        window._ccLastSession = null;
+      }
+      showCycleCountStart();
+    })
+    .catch(err => { showAlert('Error deleting session: ' + err.message, 'danger'); });
+}
+
+
+function toggleLocSection(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const btn = document.getElementById(id + '-btn');
+  const open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  if (btn) btn.textContent = open ? '▼' : '▶';
+}
+
+function toggleAllLocSections(expand) {
+  document.querySelectorAll('[id^="loc-detail-"]').forEach(el => {
+    const id = el.id;
+    const btn = document.getElementById(id + '-btn');
+    el.style.display = expand ? 'block' : 'none';
+    if (btn) btn.textContent = expand ? '▼' : '▶';
+  });
+}
+
+function printCCCountSheet(sessionId) {
+  // Find session from Firebase then render print window
+  if (!db) { showAlert('Not connected.','warning'); return; }
+  db.ref('cycleCount6021/' + sessionId).once('value', snap => {
+    const session = snap.val();
+    if (!session) { showAlert('Session not found.','warning'); return; }
+    _renderCCPrintWindow(session);
+  });
+}
+
+function printCCCurrentSheet() {
+  const session = window._ccLastSession;
+  if (!session) { showAlert('No active session.','warning'); return; }
+  _renderCCPrintWindow(session);
+  // Print window opens; stay on current view
+}
+
+function _renderCCPrintWindow(session) {
+  let rows = '';
+  let grandTotalRolls = 0, grandTotalPcs = 0;
+
+  session.locations.forEach((loc, locIdx) => {
+    const locEntries = (session.entries||[]).filter(e => e.loc === loc);
+    const locRolls = locEntries.reduce((s,e)=>s+(e.expectedPlt||0),0);
+    const locPcs   = locEntries.reduce((s,e)=>s+(e.expectedPcs||0),0);
+    grandTotalRolls += locRolls;
+    grandTotalPcs   += locPcs;
+
+    rows += `<div class="loc-block" style="${locIdx>0?'page-break-before:always':''}">
+      <table class="loc-header-table">
+        <tr>
+          <td class="loc-name">📍 ${loc}</td>
+          <td class="loc-summary">${locRolls} rolls &nbsp;·&nbsp; ${locPcs.toLocaleString()} pcs</td>
+        </tr>
+      </table>
+      <table class="count-table">
+        <colgroup>
+          <col class="sku"><col class="bu"><col class="prodid">
+          <col class="lot"><col class="chk"><col class="skid">
+          <col class="daterecd"><col class="rolls"><col class="pcs"><col class="notes">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>BU</th>
+            <th>PRODUCT ID</th>
+            <th>LOT #</th>
+            <th class="chk-hdr">✓</th>
+            <th>SKID ID</th>
+            <th>REC'D DATE</th>
+            <th class="num">ROLLS</th>
+            <th class="num">PCS</th>
+            <th class="wide">COUNT NOTES</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+    if (!locEntries.length || locEntries[0].empty) {
+      rows += `<tr><td colspan="10" class="empty-cell">No available inventory</td></tr>`;
+    } else {
+      locEntries.forEach(e => {
+        (e.rows||[]).forEach(r => {
+          rows += `<tr>
+            <td class="bold-cell">${r.sku||''}</td>
+            <td class="bu-cell">${r.bu||''}</td>
+            <td class="small-cell">${r.productId||r.sku||''}</td>
+            <td class="small-cell">${r.lot||''}</td>
+            <td class="chk-cell"><span class="checkbox"></span></td>
+            <td class="small-cell">${r.skid||''}</td>
+            <td class="small-cell">${r.dateRecd||''}</td>
+            <td class="num">1</td>
+            <td class="num">${(r.pcs||0).toLocaleString()}</td>
+            <td class="notes-cell"></td>
+          </tr>`;
+        });
+      });
+    }
+
+    rows += `<tr class="total-row">
+      <td colspan="7" class="total-label">LOCATION TOTAL</td>
+      <td class="num">${locRolls}</td>
+      <td class="num">${locPcs.toLocaleString()}</td>
+      <td></td>
+    </tr>`;
+    rows += `</tbody></table></div>`;
+  });
+
+  const dateStr = new Date(session.createdAt).toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'});
+
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>Cycle Count — ${session.id}</title>
+  <style>
+    @page { size: landscape; margin: 0.45in; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; font-size: 9pt; color: #111; }
+    .page-header { display: flex; justify-content: space-between; align-items: flex-end;
+      border-bottom: 2px solid #333; padding-bottom: 6px; margin-bottom: 14px; }
+    .page-header h1 { font-size: 14pt; font-weight: bold; letter-spacing: 1px; }
+    .page-header p { font-size: 8pt; color: #555; margin-top: 2px; }
+    .page-header .right { text-align: right; font-size: 8pt; }
+    .loc-block { margin-bottom: 16px; page-break-inside: avoid; }
+    .loc-header-table { width: 100%; border-collapse: collapse;
+      background: #f0f0f0; border: 1px solid #ccc; border-bottom: none; }
+    .loc-header-table td { padding: 5px 8px; }
+    .loc-name { font-weight: bold; font-size: 10pt; color: #333; }
+    .loc-summary { text-align: right; font-size: 8pt; color: #666; }
+    .count-table { width: 100%; border-collapse: collapse;
+      border: 1px solid #ccc; table-layout: fixed; }
+    .count-table col.sku      { width: 58px; }
+    .count-table col.bu       { width: 48px; }
+    .count-table col.prodid   { width: 180px; }
+    .count-table col.lot      { width: 90px; }
+    .count-table col.chk      { width: 26px; }
+    .count-table col.skid     { width: 62px; }
+    .count-table col.daterecd { width: 70px; }
+    .count-table col.rolls    { width: 42px; }
+    .count-table col.pcs      { width: 50px; }
+    .count-table col.notes    { width: 150px; }
+    .count-table th { background: #333; color: #fff; font-size: 8pt;
+      padding: 4px 5px; text-align: left; border: 1px solid #555; white-space: nowrap; }
+    .count-table td { padding: 4px 5px; border: 1px solid #ddd;
+      font-size: 8pt; vertical-align: middle; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .count-table th.num, .count-table td.num { text-align: right; }
+    .count-table th.chk-hdr { text-align: center; }
+    .chk-cell { text-align: center; vertical-align: middle; }
+    .checkbox { display: inline-block; width: 12px; height: 12px;
+      border: 1.5px solid #555; border-radius: 2px; }
+    .bold-cell { font-weight: bold; color: #1a5276; }
+    .bu-cell   { font-size: 7.5pt; color: #117a65; font-weight: bold; }
+    .small-cell { font-size: 7.5pt; color: #333; }
+    .empty-cell { text-align: center; color: #999; font-style: italic; padding: 8px; }
+    .total-row td { background: #e8f4e8; font-weight: bold; color: #1a5276; border-color: #b2d8b2; }
+    .total-label { text-align: right; padding-right: 10px; }
+    .notes-cell { background: #fafafa; }
+    .grand-total-block { margin-top: 20px; border: 2px solid #333;
+      border-radius: 4px; padding: 10px 16px; background: #f9f9f9;
+      display: flex; justify-content: space-between; align-items: center; }
+    .grand-total-block .gt-label { font-size: 11pt; font-weight: bold; color: #333; }
+    .grand-total-block .gt-vals  { font-size: 12pt; font-weight: bold; color: #1a5276; }
+    .signature-block { margin-top: 28px; border-top: 1px solid #ccc;
+      padding-top: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
+    .sig-field { font-size: 8.5pt; }
+    .sig-field .sig-line  { border-bottom: 1px solid #555; height: 26px; margin-bottom: 4px; }
+    .sig-field .sig-label { color: #666; font-size: 7.5pt; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+  </head><body>
+  <div class="page-header">
+    <div>
+      <h1>CYCLE COUNT — ${session.id}</h1>
+      <p>Date: ${dateStr} &nbsp;·&nbsp; ${session.locations.length} locations &nbsp;·&nbsp; ${grandTotalRolls} rolls</p>
+    </div>
+    <div class="right">
+      <strong>PICKFLOW 6021</strong><br>
+      Printed: ${new Date().toLocaleString()}
+    </div>
+  </div>
+
+  ${rows}
+
+  <div class="grand-total-block">
+    <div class="gt-label">GRAND TOTAL — ALL LOCATIONS</div>
+    <div class="gt-vals">${grandTotalRolls} Rolls &nbsp;&nbsp; ${grandTotalPcs.toLocaleString()} Pcs</div>
+  </div>
+
+  <div class="signature-block">
+    <div class="sig-field">
+      <div class="sig-line"></div>
+      <div class="sig-label">Counted By (Print Name)</div>
+    </div>
+    <div class="sig-field">
+      <div class="sig-line"></div>
+      <div class="sig-label">Signature</div>
+    </div>
+    <div class="sig-field">
+      <div class="sig-line"></div>
+      <div class="sig-label">Date / Time Completed</div>
+    </div>
+  </div>
+
+  <script>window.onload=function(){window.print();}<\/script>
+  </body></html>`;
+
+  const w = window.open('','_blank','width=1200,height=850');
+  w.document.write(html);
+  w.document.close();
+}
+
+
+
+
+
+
+function showCCReport(session) {
+  state.currentView = 'ccreport';
+  const adjs = session.adjustments||[];
+  const getAdj = (loc,sku) => adjs.find(a=>a.loc===loc&&a.sku===sku);
+
+  let totExpPlt=0, totExpPcs=0, totActPlt=0, totActPcs=0;
+  session.entries.forEach(e => {
+    const a = getAdj(e.loc, e.sku);
+    const adjAdd2 = a?(a.adjAdd||0):0, adjMiss2 = a?(a.adjMiss||0):0;
+    const adjPlt = adjAdd2 - adjMiss2;
+    const pcsPerPlt = e.expectedPlt>0 ? e.expectedPcs/e.expectedPlt : 0;
+    totExpPlt += e.expectedPlt||0; totExpPcs += e.expectedPcs||0;
+    totActPlt += (e.expectedPlt||0) + adjPlt;
+    totActPcs += Math.round((e.expectedPcs||0) + adjPlt*pcsPerPlt);
+  });
+  const totVarPlt = totActPlt - totExpPlt;
+  const hasAdj = adjs.length > 0;
+  const skuLines7 = session.entries.filter(e=>!e.empty&&e.sku);
+  const accurateLines7 = skuLines7.filter(e=>{ const a=getAdj(e.loc,e.sku); return ((a?(a.adjAdd||0):0)-(a?(a.adjMiss||0):0))===0; }).length;
+  const totalLines7 = skuLines7.length;
+  const binAcc = totalLines7>0 ? Math.round(accurateLines7/totalLines7*100) : 100;
+  const adjCount = adjs.filter(a=>(a.adjAdd||0)-(a.adjMiss||0)!==0).length;
+
+  let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div>
+      <div style="font-size:14px;font-weight:bold;color:var(--accent);letter-spacing:1px">${session.id}</div>
+      <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · By ${session.countedBy}
+        ${hasAdj?` · <span style="color:var(--accent2)">✓ Adjustments entered</span>`:` · <span style="color:var(--warning)">Pending adjustments</span>`}
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-sm" onclick="showCycleCountStart()">← Back</button>
+      <button class="btn btn-sm" onclick="showCCCountSheetView('${session.id}')">📋 Count Sheet</button>
+      <button class="btn btn-primary btn-sm" onclick="showCCAdjustments('${session.id}')">✎ Enter Adjustments</button>
+      ${isAdmin()?`<button class="btn btn-sm" onclick="confirmDeleteSession('${session.id}')" style="background:rgba(224,62,62,0.1);color:var(--danger);border-color:rgba(224,62,62,0.5)">🗑 Delete Session</button>`:''}
+
+      <button class="btn btn-sm" onclick="printCCCurrentSheet()">🖨 Print</button>
+    </div>
+  </div>
+  <div class="stats-grid" style="margin-bottom:20px">
+    <div class="stat-card"><div class="stat-label">LOCATIONS</div><div class="stat-value">${session.locations.length}</div></div>
+    <div class="stat-card"><div class="stat-label">EXPECTED PLT</div><div class="stat-value">${totExpPlt}</div></div>
+    <div class="stat-card"><div class="stat-label">ACTUAL ROLLS</div><div class="stat-value ${hasAdj?totVarPlt===0?'green':totVarPlt>0?'yellow':'red':''}">${hasAdj?totActPlt:'—'}</div></div>
+    <div class="stat-card"><div class="stat-label">VARIANCE PLT</div><div class="stat-value ${totVarPlt===0?'green':totVarPlt>0?'yellow':'red'}">${hasAdj?(totVarPlt>=0?'+':'')+totVarPlt:'—'}</div></div>
+    <div class="stat-card"><div class="stat-label">BIN ACCURACY</div><div class="stat-value ${binAcc>=100?'green':binAcc>=95?'yellow':'red'}">${accurateLines7}/${totalLines7}<br><span style="font-size:18px">${binAcc}%</span></div></div>
+    <div class="stat-card"><div class="stat-label">VARIANCES</div><div class="stat-value ${adjCount>0?'yellow':'green'}">${adjCount}</div></div>
+  </div>
+
+  <!-- Expand All / Collapse All -->
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+    <button class="btn btn-sm" onclick="toggleAllLocSections(true)">▼ Expand All</button>
+    <button class="btn btn-sm" onclick="toggleAllLocSections(false)">▶ Collapse All</button>
+  </div>`;
+
+  // Per-location COLLAPSED summary rows (accordion)
+  session.locations.forEach((loc, li) => {
+    const locEntries = session.entries.filter(e=>e.loc===loc);
+    const locExpPlt = locEntries.reduce((s,e)=>s+(e.expectedPlt||0),0);
+    const locExpPcs = locEntries.reduce((s,e)=>s+(e.expectedPcs||0),0);
+    const locSkus = [...new Set(locEntries.filter(e=>e.sku).map(e=>e.sku))];
+
+    // Compute location-level adjustment totals
+    let locActPlt=locExpPlt, locAdjAdd=0, locAdjMiss=0;
+    locEntries.forEach(e=>{
+      const a=getAdj(e.loc,e.sku);
+      locAdjAdd += a?(a.adjAdd||0):0;
+      locAdjMiss += a?(a.adjMiss||0):0;
+      locActPlt += (a?(a.adjAdd||0):0)-(a?(a.adjMiss||0):0);
+    });
+    const locVarPlt = locActPlt - locExpPlt;
+    const locAccLines = locEntries.filter(e=>{ const a=getAdj(e.loc,e.sku); return ((a?(a.adjAdd||0):0)-(a?(a.adjMiss||0):0))===0; }).length;
+    const locTotalLines = locEntries.filter(e=>!e.empty&&e.sku).length;
+    const locBinAcc = locTotalLines>0?Math.round(locAccLines/locTotalLines*100):100;
+    const varColor = locVarPlt===0?'var(--accent2)':locVarPlt>0?'var(--warning)':'var(--danger)';
+    const accColor = locBinAcc>=100?'var(--accent2)':locBinAcc>=95?'var(--warning)':'var(--danger)';
+    const hasLocAdj = (locAdjAdd+locAdjMiss)>0;
+
+    // Build detail rows (hidden by default)
+    let detailRows = '';
+    if (!locEntries.length || locEntries[0].empty) {
+      detailRows = `<tr><td colspan="${hasAdj?11:8}" style="text-align:center;color:var(--text2);font-style:italic;padding:10px">No available inventory</td></tr>`;
+    } else {
+      locEntries.forEach(e => {
+        const a = getAdj(e.loc, e.sku);
+        const adjAdd3=a?(a.adjAdd||0):0, adjMiss3=a?(a.adjMiss||0):0;
+        const netR = adjAdd3-adjMiss3;
+        const isAccR = netR===0;
+        const actPlt = e.expectedPlt+netR;
+        const pcsPerPlt = e.expectedPlt>0?e.expectedPcs/e.expectedPlt:0;
+        const actPcs = Math.round(e.expectedPcs+netR*pcsPerPlt);
+        const varPcs = actPcs-e.expectedPcs;
+        const vColor = varPcs===0?'var(--accent2)':varPcs>0?'var(--warning)':'var(--danger)';
+        const rowAccColor = isAccR?'var(--accent2)':'var(--danger)';
+
+        (e.rows||[]).forEach((r,ri)=>{
+          detailRows += `<tr style="background:${ri%2===0?'':'var(--surface)'}">
+            <td style="color:var(--accent);font-weight:bold">${r.sku||''}</td>
+            <td style="font-size:10px;color:var(--text2)">${r.productId||''}</td>
+            <td style="font-size:10px">${r.po||''}</td>
+            <td style="font-size:10px">${r.lot||''}</td>
+            <td style="font-size:10px">${r.skidId||''}</td>
+            <td style="text-align:center">1</td>
+            <td style="text-align:right">${(r.pcs||0).toLocaleString()}</td>
+            ${hasAdj?'<td></td><td></td><td></td><td></td>':'<td></td>'}
+          </tr>`;
+        });
+        // SKU row with adjustments
+        detailRows += `<tr style="background:var(--surface2);font-weight:bold">
+          <td colspan="4" style="color:var(--text2);font-size:10px">${e.sku} — ${''}</td>
+          <td></td>
+          <td style="text-align:center;color:var(--accent2)">${e.expectedPlt}</td>
+          <td style="text-align:right;color:var(--accent2)">${e.expectedPcs.toLocaleString()}</td>
+          ${hasAdj?`
+          <td style="text-align:right;color:${netR===0?'var(--text2)':netR>0?'var(--warning)':'var(--danger)'}">${netR===0?'—':(netR>0?'+':'')+netR}</td>
+          <td style="text-align:right;color:var(--accent2)">${actPlt}</td>
+          <td style="text-align:right;font-weight:bold;color:${vColor}">${varPcs!==0?(varPcs>0?'+':'')+varPcs.toLocaleString():'✓'}</td>
+          <td style="font-size:10px;color:${rowAccColor}">${isAccR?'✓ ACCURATE':'✗ VARIANCE'}</td>`:'<td></td>'}
+        </tr>`;
+      });
+    }
+
+    html += `
+    <div style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <!-- Collapsed header — always visible, click to expand -->
+      <div onclick="toggleLocSection('loc-detail-${li}')" style="cursor:pointer;padding:10px 14px;background:var(--surface);display:grid;grid-template-columns:28px 100px 1fr auto auto auto auto auto;gap:8px;align-items:center;user-select:none"
+           onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
+        <span id="loc-chevron-${li}" style="color:var(--accent2);font-size:13px">▶</span>
+        <span style="font-weight:bold;color:var(--accent);font-size:13px">${loc}</span>
+        <span style="font-size:11px;color:var(--text2)">${locSkus.length} SKU${locSkus.length!==1?'s':''} · ${locExpPlt} exp plt · ${locExpPcs.toLocaleString()} pcs</span>
+        ${hasAdj?`
+        <span style="font-size:11px;font-weight:bold;color:${varColor}">${locVarPlt===0?'—':(locVarPlt>0?'+':'')+locVarPlt} var</span>
+        <span style="font-size:11px;font-weight:bold;color:${varColor}">${hasAdj?locActPlt+' act':'—'}</span>
+        <span style="font-size:11px;font-weight:bold;color:${accColor}">${locBinAcc}% bin</span>
+        <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${hasLocAdj?'rgba(240,101,101,0.12)':'rgba(26,158,122,0.12)'};color:${hasLocAdj?'var(--danger)':'var(--accent2)'}">${hasLocAdj?'✗ VARIANCE':'✓ ACCURATE'}</span>`
+        :`<span></span><span></span><span></span><span></span>`}
+      </div>
+      <!-- Expandable detail -->
+      <div id="loc-detail-${li}" style="display:none;overflow-x:auto">
+        <table class="data-table" style="font-size:11px;margin:0">
+          <thead><tr>
+            <th>SKU</th><th>PRODUCT ID</th><th>PO #</th><th>LOT #</th><th>SKID ID</th>
+            <th style="text-align:center">PLT</th><th style="text-align:right">PCS</th>
+            ${hasAdj?'<th style="text-align:right;color:var(--warning)">ADJ PLT</th><th style="text-align:right;color:var(--accent2)">ACTUAL ROLLS</th><th style="text-align:right">VAR PCS</th><th>BIN ACC</th>':'<th>COUNT NOTES</th>'}
+          </tr></thead>
+          <tbody>${detailRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('main-panel').innerHTML = html;
+  window._ccLastSession = session;
+}
+
+function showCCCountSheetView(sessionId) {
+  state.currentView = 'ccsheet';
+  const load = (session) => {
+    window._ccLastSession = session;
+
+    let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:14px;font-weight:bold;color:var(--accent);letter-spacing:1px">${session.id} — COUNT SHEET</div>
+        <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · By ${session.countedBy} · ${session.locations.length} locations</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="showCCReport(window._ccLastSession)">← Back to Summary</button>
+        <button class="btn btn-sm" onclick="printCCCurrentSheet()" style="background:var(--accent2);color:#fff;border-color:var(--accent2)">🖨 Print (Landscape)</button>
+      </div>
+    </div>`;
+
+    session.locations.forEach(loc => {
+      const locEntries = session.entries.filter(e=>e.loc===loc);
+      const locRolls = locEntries.reduce((s,e)=>s+(e.expectedPlt||0),0);
+      const locPcs   = locEntries.reduce((s,e)=>s+(e.expectedPcs||0),0);
+
+      html += `<div style="margin-bottom:20px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <div style="background:var(--surface);padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <span style="font-size:13px;font-weight:bold;color:var(--accent)">📍 ${loc}</span>
+            <span style="font-size:11px;color:var(--text2);margin-left:12px">${locRolls} rolls · ${locPcs.toLocaleString()} pcs</span>
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+        <table class="data-table" style="font-size:11px;margin:0">
+          <thead><tr>
+            <th>SKU</th>
+            <th>BU</th>
+            <th>PRODUCT ID</th>
+            <th>LOT #</th>
+            <th style="text-align:center">✓</th>
+            <th>SKID ID</th>
+            <th>REC'D DATE</th>
+            <th style="text-align:center">ROLLS</th>
+            <th style="text-align:right">PCS</th>
+            <th>COUNT NOTES</th>
+          </tr></thead>
+          <tbody>`;
+
+      if (!locEntries.length || locEntries[0].empty) {
+        html += '<tr><td colspan="10" style="text-align:center;color:var(--text2);font-style:italic;padding:10px">No available inventory</td></tr>';
+      } else {
+        locEntries.forEach(e => {
+          const rows = e.rows||[];
+          if (!rows.length) {
+            html += `<tr>
+              <td style="color:var(--accent);font-weight:bold">${e.sku}</td>
+              <td colspan="7" style="color:var(--text2);font-size:10px">No roll detail available</td>
+              <td style="text-align:right">${e.expectedPcs.toLocaleString()}</td><td></td>
+            </tr>`;
+          } else {
+            rows.forEach((r,ri) => {
+              // bu and dateRecd come from saved session rows
+              const bu       = r.bu || '';
+              const dateRecd = r.dateRecd || '';
+              html += `<tr style="background:${ri%2===0?'':'var(--surface)'}">
+                <td style="color:var(--accent);font-weight:bold">${r.sku||''}</td>
+                <td style="font-size:10px;color:var(--accent2);font-weight:bold">${bu}</td>
+                <td style="font-size:10px;color:var(--text2)">${r.productId||''}</td>
+                <td style="font-size:10px">${r.lot||''}</td>
+                <td style="text-align:center">☐</td>
+                <td style="font-size:10px">${r.skid||''}</td>
+                <td style="font-size:10px;color:var(--text2)">${dateRecd}</td>
+                <td style="text-align:center">1</td>
+                <td style="text-align:right">${(r.pcs||0).toLocaleString()}</td>
+                <td style="color:var(--text2);font-size:10px">___________________</td>
+              </tr>`;
+            });
+          }
+        });
+      }
+
+      html += `<tr style="background:var(--accent);color:#fff;font-weight:bold">
+        <td colspan="7" style="padding:6px 8px">Location Total</td>
+        <td style="text-align:center">${locRolls}</td>
+        <td style="text-align:right">${locPcs.toLocaleString()}</td>
+        <td></td>
+      </tr>`;
+      html += `</tbody></table></div></div>`;
+    });
+
+    document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
+  };
+
+  if (db) {
+    db.ref('cycleCount6021/'+sessionId).once('value', snap => {
+      const s = snap.val();
+      if (s) load(s);
+      else showAlert('Session not found.','warning');
+    });
+  } else if (window._ccLastSession) {
+    load(window._ccLastSession);
+  }
+}
+
+
+
+function showCCAdjustments(sessionId) {
+  state.currentView = 'ccadjust';
+  const load = (session) => {
+    const adjs    = session.adjustments || [];
+    const getAdj  = (loc, sku) => adjs.find(a => a.loc===loc && a.sku===sku);
+
+    // Build flat row list: one row per location+SKU entry
+    const rows = [];
+    session.locations.forEach(loc => {
+      const entries = (session.entries||[]).filter(e => e.loc===loc);
+      if (!entries.length) {
+        rows.push({ loc, sku:'', productId:'', expRolls:0, isEmpty:true });
+      } else {
+        entries.forEach(e => {
+          const saved = getAdj(loc, e.sku) || {};
+          rows.push({
+            loc, sku: e.sku, productId: e.productId||e.sku||'',
+            expRolls: e.expectedPlt||0,
+            adjAdd:  saved.adjAdd  || 0,
+            adjMiss: saved.adjMiss || 0,
+            notes:   saved.notes   || ''
+          });
+        });
+      }
+    });
+
+    const totalExp = rows.reduce((s,r)=>s+(r.expRolls||0),0);
+
+    let html = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:16px;font-weight:bold;letter-spacing:1px">✎ ENTER ADJUSTMENTS</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">${session.id} &nbsp;·&nbsp; Both ADD and MISSING are positive entries</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="showCCReport(window._ccLastSession)">← Back</button>
+        <button class="btn btn-primary btn-sm" onclick="saveAdjustments()" style="background:var(--accent2);border-color:var(--accent2)">💾 Save Adjustments</button>
+      </div>
+    </div>
+
+    <!-- Info banner -->
+    <div style="background:rgba(79,110,247,0.07);border:1px solid rgba(79,110,247,0.2);border-radius:6px;padding:8px 14px;font-size:11px;color:var(--text2);margin-bottom:14px">
+      <strong style="color:var(--accent)">ADD</strong> = extra rolls found (over expected) &nbsp;·&nbsp;
+      <strong style="color:var(--danger)">MISSING</strong> = rolls not found (under expected) &nbsp;·&nbsp;
+      Net = Add − Missing
+    </div>
+
+    <!-- Summary bar -->
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:16px">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--text2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">EXP ROLLS</div>
+        <div id="rt-exp" style="font-size:22px;font-weight:bold;color:var(--text)">${totalExp}</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--accent2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">TOTAL ADD</div>
+        <div id="rt-add" style="font-size:22px;font-weight:bold;color:var(--accent2)">0</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--danger);letter-spacing:1px;font-weight:bold;margin-bottom:4px">TOTAL MISSING</div>
+        <div id="rt-miss" style="font-size:22px;font-weight:bold;color:var(--danger)">0</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--text2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">NET ADJ ROLLS</div>
+        <div id="rt-net" style="font-size:22px;font-weight:bold;color:var(--text)">+0</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--accent);letter-spacing:1px;font-weight:bold;margin-bottom:4px">ACTUAL ROLLS</div>
+        <div id="rt-act" style="font-size:22px;font-weight:bold;color:var(--accent)">${totalExp}</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--accent2);letter-spacing:1px;font-weight:bold;margin-bottom:2px">BIN ACCURACY</div>
+        <div style="font-size:8px;color:var(--text2);margin-bottom:4px"># accurate / # total</div>
+        <div id="rt-acc" style="font-size:16px;font-weight:bold;color:var(--accent2)">—</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--accent2);letter-spacing:1px;font-weight:bold;margin-bottom:2px">COUNT ACCURACY</div>
+        <div style="font-size:8px;color:var(--text2);margin-bottom:4px">(1−adj/exp)×100</div>
+        <div id="rt-cacc" style="font-size:16px;font-weight:bold;color:var(--accent2)">—</div>
+      </div>
+    </div>
+
+    <!-- Adjustments table -->
+    <div style="overflow-x:auto">
+    <table class="data-table" style="font-size:12px;border-collapse:collapse;width:100%">
+      <thead>
+        <tr style="background:var(--surface2)">
+          <th style="padding:8px 10px;text-align:left;white-space:nowrap">LOCATION</th>
+          <th style="padding:8px 10px;text-align:left;white-space:nowrap">SKU</th>
+          <th style="padding:8px 10px;text-align:left">PRODUCT ID</th>
+          <th style="padding:8px 10px;text-align:right;white-space:nowrap">EXP ROLLS</th>
+          <th style="padding:8px 10px;text-align:center;color:var(--accent2);white-space:nowrap">ADD ↑</th>
+          <th style="padding:8px 10px;text-align:center;color:var(--danger);white-space:nowrap">MISSING ↓</th>
+          <th style="padding:8px 10px;text-align:right;white-space:nowrap">NET ADJ</th>
+          <th style="padding:8px 10px;text-align:right;white-space:nowrap">ACTUAL ROLLS</th>
+          <th style="padding:8px 10px;text-align:center;white-space:nowrap">BIN ACCURACY</th>
+          <th style="padding:8px 10px;text-align:center;white-space:nowrap">COUNT ACCURACY</th>
+          <th style="padding:8px 10px;text-align:left">NOTES</th>
+        </tr>
+      </thead>
+      <tbody id="adj-tbody">`;
+
+    rows.forEach((r, idx) => {
+      if (r.isEmpty) return; // skip empty-location rows in adjustment table
+      const addVal  = r.adjAdd  || 0;
+      const missVal = r.adjMiss || 0;
+      html += `
+        <tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:7px 10px;font-weight:bold;color:var(--accent);white-space:nowrap">${r.loc}</td>
+          <td style="padding:7px 10px;font-weight:bold;color:var(--accent2);white-space:nowrap">${r.sku}</td>
+          <td style="padding:7px 10px;font-size:11px;color:var(--text2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.productId}">${r.productId}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:bold">${r.expRolls}</td>
+          <td style="padding:7px 10px;text-align:center">
+            <input id="adj-add-${idx}" type="number" min="0" value="${addVal}"
+              oninput="updateAdjRow(${idx},${r.expRolls})"
+              style="width:60px;text-align:center;background:rgba(26,158,122,0.06);border:1.5px solid var(--accent2);border-radius:5px;padding:4px 6px;color:var(--text);font-family:var(--font);font-size:12px;outline:none">
+          </td>
+          <td style="padding:7px 10px;text-align:center">
+            <input id="adj-miss-${idx}" type="number" min="0" value="${missVal}"
+              oninput="updateAdjRow(${idx},${r.expRolls})"
+              style="width:60px;text-align:center;background:rgba(224,62,62,0.06);border:1.5px solid var(--danger);border-radius:5px;padding:4px 6px;color:var(--text);font-family:var(--font);font-size:12px;outline:none">
+          </td>
+          <td id="adj-net-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold">—</td>
+          <td id="adj-act-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold;color:var(--accent)">${r.expRolls}</td>
+          <td id="adj-acc-${idx}" style="padding:7px 10px;text-align:center;font-size:11px;font-weight:bold;color:var(--accent2)">✓ ACCURATE</td>
+          <td id="adj-cacc-${idx}" style="padding:7px 10px;text-align:center;font-weight:bold;color:var(--accent2)">100%</td>
+          <td style="padding:7px 10px">
+            <input id="adj-notes-${idx}" type="text" value="${r.notes||''}" placeholder="Notes..."
+              style="width:140px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">
+          </td>
+        </tr>`;
+    });
+
+    // Grand total row
+    html += `
+      </tbody>
+      <tfoot>
+        <tr style="background:var(--surface2);font-weight:bold;font-size:12px">
+          <td colspan="3" style="padding:8px 10px">GRAND TOTAL</td>
+          <td id="gt-exp"  style="padding:8px 10px;text-align:right">${totalExp}</td>
+          <td id="gt-add"  style="padding:8px 10px;text-align:center;color:var(--accent2)">+0</td>
+          <td id="gt-miss" style="padding:8px 10px;text-align:center;color:var(--danger)">-0</td>
+          <td id="gt-net"  style="padding:8px 10px;text-align:right">+0</td>
+          <td id="gt-act"  style="padding:8px 10px;text-align:right;color:var(--accent)">${totalExp}</td>
+          <td id="gt-acc"  style="padding:8px 10px;text-align:center;color:var(--accent2)">100%</td>
+          <td id="gt-cacc" style="padding:8px 10px;text-align:center;color:var(--accent2)">100%</td>
+          <td></td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>`;
+
+    document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
+
+    window._ccLastSession  = session;
+    window._ccAdjSession   = session;
+    window._ccAdjRows      = rows;
+    updateAdjRow(); // calc totals on load
+  };
+
+  if (db) {
+    db.ref('cycleCount6021/'+sessionId).once('value', snap => {
+      const s = snap.val();
+      if (s) load(s);
+      else showAlert('Session not found.','warning');
+    });
+  } else if (window._ccLastSession) {
+    load(window._ccLastSession);
+  }
+}
+
+
+
+function updateAdjRow(idx, expRolls) {
+  const rows = window._ccAdjRows || [];
+  const dataRows = rows.filter(r => !r.isEmpty);
+
+  let totalAdd=0, totalMiss=0, totalExp=0, totalAct=0, accurateCount=0;
+
+  dataRows.forEach((r, i) => {
+    const addEl  = document.getElementById('adj-add-'+i);
+    const missEl = document.getElementById('adj-miss-'+i);
+    if (!addEl || !missEl) return;
+
+    const add  = parseInt(addEl.value)  || 0;
+    const miss = parseInt(missEl.value) || 0;
+    const exp  = r.expRolls || 0;
+    const net  = add - miss;
+    const act  = exp + net;
+    const isAccurate = (net === 0);
+
+    totalAdd  += add;
+    totalMiss += miss;
+    totalExp  += exp;
+    totalAct  += act;
+    if (isAccurate) accurateCount++;
+
+    const countPct = exp > 0 ? Math.max(0, Math.round((1 - (add + miss)/exp)*100)) : 100;
+    const netEl    = document.getElementById('adj-net-'+i);
+    const actEl    = document.getElementById('adj-act-'+i);
+    const accEl    = document.getElementById('adj-acc-'+i);
+    const caccEl   = document.getElementById('adj-cacc-'+i);
+
+    if (netEl)  { netEl.textContent  = (net>=0?'+':'')+net; netEl.style.color = net===0?'var(--text2)':net>0?'var(--accent2)':'var(--danger)'; }
+    if (actEl)  { actEl.textContent  = act; actEl.style.color = isAccurate?'var(--accent)':act<exp?'var(--danger)':'var(--accent2)'; }
+    if (accEl)  { accEl.innerHTML    = isAccurate?'<span style="color:var(--accent2)">✓ ACCURATE</span>':'<span style="color:var(--danger)">✗ VARIANCE</span>'; }
+    if (caccEl) { caccEl.textContent = countPct+'%'; caccEl.style.color = countPct>=100?'var(--accent2)':countPct>=90?'var(--warning)':'var(--danger)'; }
+  });
+
+  const totalNet = totalAdd - totalMiss;
+  const binPct   = dataRows.length > 0 ? Math.round(accurateCount/dataRows.length*100) : 100;
+  const caccPct  = totalExp > 0 ? Math.max(0, Math.round((1 - (totalAdd + totalMiss)/totalExp)*100)) : 100;
+  const caccColor= caccPct>=100?'var(--accent2)':caccPct>=90?'var(--warning)':'var(--danger)';
+  const binColor = binPct>=100?'var(--accent2)':binPct>=90?'var(--warning)':'var(--danger)';
+
+  // Summary bar
+  const set = (id,val) => { const el=document.getElementById(id); if(el) el.textContent=val; };
+  const setColor = (id,c) => { const el=document.getElementById(id); if(el) el.style.color=c; };
+  set('rt-add',  totalAdd);                                          setColor('rt-add',  totalAdd>0?'var(--accent2)':'var(--text2)');
+  set('rt-miss', totalMiss);                                         setColor('rt-miss', totalMiss>0?'var(--danger)':'var(--text2)');
+  set('rt-net',  (totalNet>=0?'+':'')+totalNet);                     setColor('rt-net',  totalNet===0?'var(--text2)':totalNet>0?'var(--accent2)':'var(--danger)');
+  set('rt-act',  totalAct);
+  set('rt-acc',  accurateCount+'/'+dataRows.length+' ('+binPct+'%)'); setColor('rt-acc',  binColor);
+  set('rt-cacc', caccPct+'%');                                        setColor('rt-cacc', caccColor);
+
+  // Grand total row
+  set('gt-add',  '+'+totalAdd);   setColor('gt-add',  totalAdd>0?'var(--accent2)':'var(--text2)');
+  set('gt-miss', '-'+totalMiss);  setColor('gt-miss', totalMiss>0?'var(--danger)':'var(--text2)');
+  set('gt-net',  (totalNet>=0?'+':'')+totalNet); setColor('gt-net', totalNet===0?'var(--text2)':totalNet>0?'var(--accent2)':'var(--danger)');
+  set('gt-act',  totalAct);       setColor('gt-act',  'var(--accent)');
+  set('gt-acc',  binPct+'%');     setColor('gt-acc',  binColor);
+  set('gt-cacc', caccPct+'%');    setColor('gt-cacc', caccColor);
+}
+
+// Save adjustments to Firebase
+function saveAdjustments() {
+  const session = window._ccAdjSession;
+  if (!session || !db) { showAlert('Nothing to save.','warning'); return; }
+
+  const rows    = (window._ccAdjRows||[]).filter(r=>!r.isEmpty);
+  const adjustments = rows.map((r, i) => {
+    const add   = parseInt(document.getElementById('adj-add-'+i)?.value)  || 0;
+    const miss  = parseInt(document.getElementById('adj-miss-'+i)?.value) || 0;
+    const notes = document.getElementById('adj-notes-'+i)?.value || '';
+    return { loc:r.loc, sku:r.sku, adjAdd:add, adjMiss:miss, notes };
+  }).filter(a => a.adjAdd||a.adjMiss||a.notes);
+
+  db.ref('cycleCount6021/'+session.id+'/adjustments').set(adjustments)
+    .then(() => {
+      showAlert('✓ Adjustments saved.','success');
+      session.adjustments = adjustments;
+      window._ccLastSession = session;
+    })
+    .catch(err => showAlert('Error: '+err.message,'danger'));
+}
+
+
+
+function confirmDeleteSession(sessionId) {
+  let h = '<div class="modal-overlay" onclick="if(event.target===this)closeModal()">';
+  h += '<div class="modal" style="width:380px;text-align:center">';
+  h += '<h2 style="color:var(--danger)">Delete Count Session</h2>';
+  h += '<p style="margin:16px 0;font-size:14px">Delete session <strong style="color:var(--accent)">'+sessionId+'</strong>?<br>';
+  h += '<span style="font-size:12px;color:var(--text2)">This will remove the count data and reset all totals for this session. This cannot be undone.</span></p>';
+  h += '<div class="modal-actions">';
+  h += '<button class="btn" onclick="closeModal()">Cancel</button>';
+  h += '<button class="btn btn-danger" data-sid="'+sessionId+'" onclick="deleteSession(this.dataset.sid)">Delete Session</button>';
+  h += '</div></div></div>';
+  document.getElementById('modal-container').innerHTML = h;
+}
+
 function showDataPreview() {
+  state.currentView = 'preview';
   state.activeTicket=null; updateTicketList();
   window.invFilters={sku:'',loc:'',cust:'',bu:'',lot:''};
   const customers=[...new Set(state.inventory.map(r=>r.customer))].sort();
@@ -3256,7 +5671,10 @@ function setupEodTimer() {
 }
 
 // ─── UTILS ────────────────────────────────────────────────────────────────────
-function closeModal() { document.getElementById('modal-container').innerHTML=''; }
+function closeModal() {
+  document.getElementById('modal-container').innerHTML = '';
+  document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+}
 
 function showAlert(msg,type) {
   const d=document.createElement('div');
@@ -3521,11 +5939,13 @@ function exportDirToExcel() {
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
+
 window.addEventListener('load', function() {
   buildLoginScreen();
   localStorage.removeItem('pickflow_state');
   listenToFirebase();
 });
+
 </script>
 </body>
 </html>
