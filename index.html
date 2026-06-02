@@ -3244,8 +3244,8 @@ function showEDIImportFile() {
       </div>`;
 
   if (!sciKeys.length) {
-    h += `<div style="border:2px dashed var(--border);border-radius:6px;padding:24px;text-align:center;color:var(--text2);font-size:12px">
-      No Sci Games ZMO data found.<br>Import a DIR report first.
+    h += `<div style="border:2px dashed var(--border);border-radius:6px;padding:24px;text-align:center;color:var(--text2);font-size:13px;font-weight:bold;letter-spacing:1px">
+      None Available To Export
     </div>`;
   } else {
     const totalRolls = Object.values(sciGroups).reduce((s,g)=>s+g.lots.length,0);
@@ -3278,7 +3278,7 @@ function showEDIImportFile() {
       const sciStampStr = sciStamp ? 'Exported: '+new Date(sciStamp.exportedAt).toLocaleString() : '';
       h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
         +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
-        +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
+        +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked onchange='+dq+'onEDISciChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
         +'<div style='+dq+'flex:1;min-width:0;cursor:pointer'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq+'>'
         +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+key+'</div>'
         +'<div style='+dq+'font-size:10px;color:var(--text2);margin-top:2px'+dq+'>'+g.customerName+' · Invoice: '+g.invoiceRef+'</div>'
@@ -4094,16 +4094,17 @@ function showCycleCountStart() {
       const prefix = m[1];
       const aisle  = parseInt(m[2], 10);
       const bay    = parseInt(m[3], 10);
-      if (!prefixGroups[prefix]) prefixGroups[prefix] = { maxAisle:0, maxBay:{} };
+      if (!prefixGroups[prefix]) prefixGroups[prefix] = { maxAisle:0, maxBay:{}, globalMaxBay:0 };
       const g = prefixGroups[prefix];
       if (aisle > g.maxAisle) g.maxAisle = aisle;
       if (!g.maxBay[aisle] || bay > g.maxBay[aisle]) g.maxBay[aisle] = bay;
+      if (bay > g.globalMaxBay) g.globalMaxBay = bay; // track max bay across ALL aisles
     });
-    // Generate every aisle/bay combo up to the max seen for each aisle
+    // Generate every aisle/bay combo using the global max bay so no aisle is short-changed
     Object.entries(prefixGroups).forEach(([prefix, g]) => {
       for (let a = 0; a <= g.maxAisle; a++) {
         const aisleStr = String(a).padStart(2,'0');
-        const maxB = g.maxBay[a] || 0;
+        const maxB = g.globalMaxBay || 0;  // use global max so sparse aisles get full range
         if (maxB === 0) continue; // no bays seen for this aisle yet — skip
         for (let b = 1; b <= maxB; b++) {
           locSet.add(prefix + '-' + aisleStr + '-' + String(b).padStart(2,'0'));
@@ -4137,7 +4138,19 @@ function showCycleCountStart() {
     }
     const wdRemaining = workingDaysRemaining();
 
-    // Suggested: storage locs with most recent put-away, not yet counted this month
+    // Suggested: all locs with put-away activity in the last 5 working days
+    const _getWorkingDaysAgo = (n) => {
+      const d = new Date(); d.setHours(0,0,0,0);
+      let count = 0;
+      while (count < n) {
+        d.setDate(d.getDate() - 1);
+        const day = d.getDay();
+        if (day !== 0 && day !== 6) count++;
+      }
+      return d.getTime();
+    };
+    const fiveWorkingDaysAgo = _getWorkingDaysAgo(5);
+
     const locLastPutaway = {};
     state.inventory.forEach(r => {
       const loc = (r.location||'').toUpperCase();
@@ -4145,12 +4158,18 @@ function showCycleCountStart() {
       if ((r.pcsPending||0) > 0) return;
       if (r.dateRecd) {
         const t = r.dateRecd instanceof Date ? r.dateRecd.getTime() : new Date(r.dateRecd).getTime();
+        if (isNaN(t) || t < fiveWorkingDaysAgo) return;
         if (!locLastPutaway[r.location] || t > locLastPutaway[r.location])
           locLastPutaway[r.location] = t;
       }
     });
+    const _toMidnight = ts => { const d=new Date(ts); d.setHours(0,0,0,0); return d.getTime(); };
     const suggestedLocs = Object.entries(locLastPutaway)
-      .sort((a,b)=>b[1]-a[1]).slice(0,20)
+      .sort((a,b) => {
+        const dayDiff = _toMidnight(b[1]) - _toMidnight(a[1]); // most recent date first
+        if (dayDiff !== 0) return dayDiff;
+        return a[0].localeCompare(b[0]);                         // same day → location A→Z
+      }).slice(0,15)
       .map(([loc,ts])=>({loc, date: new Date(ts).toLocaleDateString('en-US')}));
 
     const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;width:100%';
@@ -4913,7 +4932,7 @@ function _renderCCPrintWindow(session) {
     .page-header h1 { font-size: 14pt; font-weight: bold; letter-spacing: 1px; }
     .page-header p { font-size: 8pt; color: #555; margin-top: 2px; }
     .page-header .right { text-align: right; font-size: 8pt; }
-    .loc-block { margin-bottom: 16px; page-break-inside: avoid; }
+    .loc-block { margin-bottom: 0; }
     .loc-header-table { width: 100%; border-collapse: collapse;
       background: #f0f0f0; border: 1px solid #ccc; border-bottom: none; }
     .loc-header-table td { padding: 5px 8px; }
@@ -4921,32 +4940,27 @@ function _renderCCPrintWindow(session) {
     .loc-summary { text-align: right; font-size: 8pt; color: #666; }
     .count-table { width: 100%; border-collapse: collapse;
       border: 1px solid #ccc; table-layout: fixed; }
-    .count-table col.sku      { width: 58px; }
-    .count-table col.bu       { width: 48px; }
+    .count-table col.sku      { width: 82px; }
+    .count-table col.bu       { width: 76px; }
     .count-table col.prodid   { width: 180px; }
     .count-table col.lot      { width: 90px; }
-    .count-table col.chk      { width: 26px; }
-    .count-table col.skid     { width: 62px; }
-    .count-table col.daterecd { width: 70px; }
-    .count-table col.rolls    { width: 42px; }
-    .count-table col.pcs      { width: 50px; }
-    .count-table col.notes    { width: 150px; }
-    .count-table th { background: #333; color: #fff; font-size: 8pt;
-      padding: 4px 5px; text-align: left; border: 1px solid #555; white-space: nowrap; }
-    .count-table td { padding: 4px 5px; border: 1px solid #ddd;
-      font-size: 8pt; vertical-align: middle; overflow: hidden;
-      text-overflow: ellipsis; white-space: nowrap; }
+    .count-table col.chk      { width: 22px; }
+    .count-table col.skid     { width: 68px; }
+    .count-table col.daterecd { width: 60px; }
+    .count-table col.rolls    { width: 36px; }
+    .count-table col.pcs      { width: 36px; }
+    .count-table col.notes    { width: 130px; }
+    .count-table th { background: #333; color: #fff; font-size: 7.5pt;
+      padding: 3px 4px; text-align: left; border: 1px solid #555; white-space: nowrap; }
+    .count-table td { padding: 3px 4px; border: 1px solid #ddd;
+      font-size: 7.5pt; vertical-align: middle; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; }
+    .count-table td.notes-cell { white-space: normal; word-break: break-word; }
     .count-table th.num, .count-table td.num { text-align: right; }
     .count-table th.chk-hdr { text-align: center; }
     .chk-cell { text-align: center; vertical-align: middle; }
     .checkbox { display: inline-block; width: 12px; height: 12px;
       border: 1.5px solid #555; border-radius: 2px; }
-    .bold-cell { font-weight: bold; color: #1a5276; }
-    .bu-cell   { font-size: 7.5pt; color: #117a65; font-weight: bold; }
-    .small-cell { font-size: 7.5pt; color: #333; }
-    .empty-cell { text-align: center; color: #999; font-style: italic; padding: 8px; }
-    .total-row td { background: #e8f4e8; font-weight: bold; color: #1a5276; border-color: #b2d8b2; }
-    .total-label { text-align: right; padding-right: 10px; }
     .notes-cell { background: #fafafa; }
     .grand-total-block { margin-top: 20px; border: 2px solid #333;
       border-radius: 4px; padding: 10px 16px; background: #f9f9f9;
@@ -5268,30 +5282,26 @@ function showCCCountSheetView(sessionId) {
 function showCCAdjustments(sessionId) {
   state.currentView = 'ccadjust';
   const load = (session) => {
-    const adjs    = session.adjustments || [];
-    const getAdj  = (loc, sku) => adjs.find(a => a.loc===loc && a.sku===sku);
+    const adjs   = session.adjustments || [];
+    const getAdj = (loc) => adjs.find(a => a.loc === loc);
 
-    // Build flat row list: one row per location+SKU entry
+    // One row per LOCATION (not per SKU)
     const rows = [];
     session.locations.forEach(loc => {
       const entries = (session.entries||[]).filter(e => e.loc===loc);
-      if (!entries.length) {
-        rows.push({ loc, sku:'', productId:'', expRolls:0, isEmpty:true });
-      } else {
-        entries.forEach(e => {
-          const saved = getAdj(loc, e.sku) || {};
-          rows.push({
-            loc, sku: e.sku, productId: e.productId||e.sku||'',
-            expRolls: e.expectedPlt||0,
-            adjAdd:  saved.adjAdd  || 0,
-            adjMiss: saved.adjMiss || 0,
-            notes:   saved.notes   || ''
-          });
-        });
-      }
+      const expRolls = entries.reduce((s,e) => s+(e.expectedPlt||0), 0);
+      const saved    = getAdj(loc) || {};
+      rows.push({
+        loc,
+        expRolls,
+        adjAdd:  saved.adjAdd  || 0,
+        adjMiss: saved.adjMiss || 0,
+        notes:   saved.notes   || '',
+        isEmpty: entries.length === 0 || entries[0].empty
+      });
     });
 
-    const totalExp = rows.reduce((s,r)=>s+(r.expRolls||0),0);
+    const totalExp = rows.reduce((s,r) => s+(r.expRolls||0), 0);
 
     let html = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
@@ -5346,14 +5356,12 @@ function showCCAdjustments(sessionId) {
       </div>
     </div>
 
-    <!-- Adjustments table -->
+    <!-- Adjustments table — one row per LOCATION -->
     <div style="overflow-x:auto">
     <table class="data-table" style="font-size:12px;border-collapse:collapse;width:100%">
       <thead>
         <tr style="background:var(--surface2)">
           <th style="padding:8px 10px;text-align:left;white-space:nowrap">LOCATION</th>
-          <th style="padding:8px 10px;text-align:left;white-space:nowrap">SKU</th>
-          <th style="padding:8px 10px;text-align:left">PRODUCT ID</th>
           <th style="padding:8px 10px;text-align:right;white-space:nowrap">EXP ROLLS</th>
           <th style="padding:8px 10px;text-align:center;color:var(--accent2);white-space:nowrap">ADD ↑</th>
           <th style="padding:8px 10px;text-align:center;color:var(--danger);white-space:nowrap">MISSING ↓</th>
@@ -5366,25 +5374,23 @@ function showCCAdjustments(sessionId) {
       </thead>
       <tbody id="adj-tbody">`;
 
+    const inputStyle = 'width:65px;text-align:center;border:1.5px solid;border-radius:5px;padding:5px 6px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;-webkit-appearance:none;-moz-appearance:textfield;appearance:none;';
+
     rows.forEach((r, idx) => {
-      if (r.isEmpty) return; // skip empty-location rows in adjustment table
-      const addVal  = r.adjAdd  || 0;
-      const missVal = r.adjMiss || 0;
+      if (r.isEmpty) return;
       html += `
         <tr style="border-bottom:1px solid var(--border)">
           <td style="padding:7px 10px;font-weight:bold;color:var(--accent);white-space:nowrap">${r.loc}</td>
-          <td style="padding:7px 10px;font-weight:bold;color:var(--accent2);white-space:nowrap">${r.sku}</td>
-          <td style="padding:7px 10px;font-size:11px;color:var(--text2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.productId}">${r.productId}</td>
           <td style="padding:7px 10px;text-align:right;font-weight:bold">${r.expRolls}</td>
           <td style="padding:7px 10px;text-align:center">
-            <input id="adj-add-${idx}" type="number" min="0" value="${addVal}"
+            <input id="adj-add-${idx}" type="text" inputmode="numeric" pattern="[0-9]*" value="${r.adjAdd||0}"
               oninput="updateAdjRow(${idx},${r.expRolls})"
-              style="width:60px;text-align:center;background:rgba(26,158,122,0.06);border:1.5px solid var(--accent2);border-radius:5px;padding:4px 6px;color:var(--text);font-family:var(--font);font-size:12px;outline:none">
+              style="${inputStyle}background:rgba(26,158,122,0.06);border-color:var(--accent2);">
           </td>
           <td style="padding:7px 10px;text-align:center">
-            <input id="adj-miss-${idx}" type="number" min="0" value="${missVal}"
+            <input id="adj-miss-${idx}" type="text" inputmode="numeric" pattern="[0-9]*" value="${r.adjMiss||0}"
               oninput="updateAdjRow(${idx},${r.expRolls})"
-              style="width:60px;text-align:center;background:rgba(224,62,62,0.06);border:1.5px solid var(--danger);border-radius:5px;padding:4px 6px;color:var(--text);font-family:var(--font);font-size:12px;outline:none">
+              style="${inputStyle}background:rgba(224,62,62,0.06);border-color:var(--danger);">
           </td>
           <td id="adj-net-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold">—</td>
           <td id="adj-act-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold;color:var(--accent)">${r.expRolls}</td>
@@ -5392,17 +5398,16 @@ function showCCAdjustments(sessionId) {
           <td id="adj-cacc-${idx}" style="padding:7px 10px;text-align:center;font-weight:bold;color:var(--accent2)">100%</td>
           <td style="padding:7px 10px">
             <input id="adj-notes-${idx}" type="text" value="${r.notes||''}" placeholder="Notes..."
-              style="width:140px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">
+              style="width:160px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">
           </td>
         </tr>`;
     });
 
-    // Grand total row
     html += `
       </tbody>
       <tfoot>
         <tr style="background:var(--surface2);font-weight:bold;font-size:12px">
-          <td colspan="3" style="padding:8px 10px">GRAND TOTAL</td>
+          <td style="padding:8px 10px">GRAND TOTAL</td>
           <td id="gt-exp"  style="padding:8px 10px;text-align:right">${totalExp}</td>
           <td id="gt-add"  style="padding:8px 10px;text-align:center;color:var(--accent2)">+0</td>
           <td id="gt-miss" style="padding:8px 10px;text-align:center;color:var(--danger)">-0</td>
@@ -5417,11 +5422,10 @@ function showCCAdjustments(sessionId) {
     </div>`;
 
     document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
-
     window._ccLastSession  = session;
     window._ccAdjSession   = session;
     window._ccAdjRows      = rows;
-    updateAdjRow(); // calc totals on load
+    updateAdjRow();
   };
 
   if (db) {
@@ -5434,6 +5438,8 @@ function showCCAdjustments(sessionId) {
     load(window._ccLastSession);
   }
 }
+
+
 
 
 
@@ -5508,7 +5514,7 @@ function saveAdjustments() {
     const add   = parseInt(document.getElementById('adj-add-'+i)?.value)  || 0;
     const miss  = parseInt(document.getElementById('adj-miss-'+i)?.value) || 0;
     const notes = document.getElementById('adj-notes-'+i)?.value || '';
-    return { loc:r.loc, sku:r.sku, adjAdd:add, adjMiss:miss, notes };
+    return { loc:r.loc, adjAdd:add, adjMiss:miss, notes };
   }).filter(a => a.adjAdd||a.adjMiss||a.notes);
 
   db.ref('cycleCount6021/'+session.id+'/adjustments').set(adjustments)
