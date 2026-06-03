@@ -4151,6 +4151,16 @@ function showCycleCountStart() {
     };
     const fiveWorkingDaysAgo = _getWorkingDaysAgo(3);
 
+        // Last counted date per location (across all sessions)
+    const locLastCounted = {};
+    sessions.forEach(s => {
+      if (!s.createdAt) return;
+      (s.locations||[]).forEach(loc => {
+        if (!locLastCounted[loc] || s.createdAt > locLastCounted[loc])
+          locLastCounted[loc] = s.createdAt;
+      });
+    });
+
     const locLastPutaway = {};
     state.inventory.forEach(r => {
       const loc = (r.location||'').toUpperCase();
@@ -4170,7 +4180,13 @@ function showCycleCountStart() {
         if (dayDiff !== 0) return dayDiff;
         return a[0].localeCompare(b[0]);                         // same day → location A→Z
       }).slice(0,15)
-      .map(([loc,ts])=>({loc, date: new Date(ts).toLocaleDateString('en-US')}));
+      .map(([loc,ts])=>({
+        loc,
+        date: new Date(ts).toLocaleDateString('en-US'),
+        lastCounted: locLastCounted[loc]
+          ? new Date(locLastCounted[loc]).toLocaleDateString('en-US')
+          : null
+      }));
 
     const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;width:100%';
 
@@ -4182,7 +4198,8 @@ function showCycleCountStart() {
     });
     window._ccMonthCountMap = monthCountMap;
 
-    const uncountedLocs   = storageLocs.filter(l => !monthCountMap[l]);
+    // Last counted date per location (across all sessions, not just this month)
+        const uncountedLocs   = storageLocs.filter(l => !monthCountMap[l]);
     const countedLocsArr  = storageLocs.filter(l =>  monthCountMap[l]);
     const pct             = storageLocs.length > 0 ? Math.round(countedLocsArr.length/storageLocs.length*100) : 0;
     const pctColor        = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
@@ -4249,14 +4266,15 @@ function showCycleCountStart() {
     if (!suggestedLocs.length) {
       html += `<div style="font-size:11px;color:var(--text2);text-align:center;padding:12px">No recent put-away data</div>`;
     } else {
-      suggestedLocs.forEach(({loc, date}) => {
+      suggestedLocs.forEach(({loc, date, lastCounted}) => {
         const isCounted = monthCountMap[loc] > 0;
         html += `<div onclick="ediSuggestSelect('${loc}')" title="Click to pre-select" style="display:flex;align-items:center;gap:6px;padding:5px 6px;margin-bottom:2px;border-radius:5px;cursor:pointer;border:1px solid var(--border);background:${isCounted?'rgba(26,158,122,0.07)':'rgba(224,62,62,0.07)'}"
           onmouseover="this.style.background='rgba(79,110,247,0.1)'" onmouseout="this.style.background='${isCounted?'rgba(26,158,122,0.07)':'rgba(224,62,62,0.07)'}'">
           <span style="width:8px;height:8px;border-radius:50%;background:${isCounted?'var(--accent2)':'var(--danger)'};display:inline-block;flex-shrink:0"></span>
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:bold;color:var(--accent)">${loc}</div>
-            <div style="font-size:9px;color:var(--text2)">${date}</div>
+            <div style="font-size:9px;color:var(--text2)">Put away: ${date}</div>
+            <div style="font-size:9px;color:${lastCounted?'var(--accent2)':'var(--danger)'}">Counted: ${lastCounted||'Never'}</div>
           </div>
         </div>`;
       });
@@ -4289,6 +4307,17 @@ function showCycleCountStart() {
           <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden">
             <div style="width:${pct}%;background:${pctColor};height:100%;border-radius:4px;transition:width 0.4s"></div>
           </div>
+          ${(()=>{
+            const remaining = storageLocs.length - countedLocsArr.length;
+            if (remaining <= 0) return '<div style="font-size:11px;color:var(--accent2);margin-top:6px;font-weight:bold">✓ All locations counted this month!</div>';
+            const perDay = wdRemaining > 0 ? Math.ceil(remaining / wdRemaining) : remaining;
+            const urgColor = perDay >= 20 ? 'var(--danger)' : perDay >= 10 ? 'var(--warning)' : 'var(--accent2)';
+            return '<div style="font-size:11px;color:var(--text2);margin-top:6px">'
+              + '<span style="color:var(--text2)">To finish on time: </span>'
+              + '<span style="font-weight:bold;color:'+urgColor+'">'+perDay+' location'+(perDay===1?'':'s')+' / day</span>'
+              + '<span style="color:var(--text2)"> &nbsp;('+remaining+' remaining ÷ '+wdRemaining+' work day'+(wdRemaining===1?'':'s')+')</span>'
+              + '</div>';
+          })()}
         </div>
         <div class="cc-loc-list" id="cc-loc-list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px">`;
 
