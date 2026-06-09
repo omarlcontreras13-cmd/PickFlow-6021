@@ -1339,6 +1339,7 @@ function createTicket() {
     saveTickets();
     updateTicketList();
     viewTicket(id);
+
     } catch(e) { showAlert('Error creating ticket: '+e.message,'danger'); console.error(e); }
   });
 }
@@ -3221,105 +3222,43 @@ function showEDIImportFile() {
   <!-- Top bar -->
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📄 EDI IMPORT FILE BUILDER</div>
-    <button class="btn btn-primary" onclick="exportEDIFile()" style="font-size:12px;padding:8px 20px;letter-spacing:1px">
-      ⬇ EXPORT EDI FILE (.xlsx)
-    </button>
+    
   </div>
 
   <!-- DIR Column Mapping -->
   ${buildEDIColPickerHTML()}
 
   <!-- Two-column layout -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+  <div style="display:flex;flex-direction:column;gap:16px">
 
-    <!-- ── SCI GAMES ── -->
-    <div style="${sectionStyle}">
+    <!-- ── CATALYST ── -->
+    <div style="${sectionStyle};order:1">
       <div style="display:flex;align-items:center;justify-content:space-between">
         <div>
-          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent2)">🔬 SCI GAMES LOADS</div>
-          <div style="font-size:10px;color:var(--text2);margin-top:2px">Built from loaded DIR data</div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:#0ea5e9">CATALYST LOADS</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Build guidelines coming soon</div>
         </div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-sm" onclick="ediCheckAll('sci',true);document.querySelectorAll('.edi-hbh-chk').forEach(c=>c.checked=false)" title="Select All">☑</button>
-          <button class="btn btn-sm" onclick="ediCheckAll('sci',false)" title="Deselect All">☐</button>
+      </div>
+      <div style="border:2px dashed var(--border);border-radius:6px;padding:20px;text-align:center;color:var(--text2);font-size:11px;font-weight:bold;letter-spacing:2px">
+        COMING SOON
+      </div>
+    </div>
+
+    <!-- ── CATALYST XDK ── -->
+    <div style="${sectionStyle};order:2">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:#6366f1">CATALYST XDK LOADS</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Build guidelines coming soon</div>
         </div>
-      </div>`;
-
-  if (!sciKeys.length) {
-    h += `<div style="border:2px dashed var(--border);border-radius:6px;padding:24px;text-align:center;color:var(--text2);font-size:13px;font-weight:bold;letter-spacing:1px">
-      None Available To Export
-    </div>`;
-  } else {
-    const totalRolls = Object.values(sciGroups).reduce((s,g)=>s+g.lots.length,0);
-    h += `<div style="font-size:10px;color:var(--text2)">${sciKeys.length} ZMOs &nbsp;·&nbsp; ${totalRolls.toLocaleString()} rolls total</div>
-    <div id="sci-load-list" style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">`;
-
-    sciKeys.forEach((key, i) => {
-      const g = sciGroups[key];
-      const alt = i%2!==0;
-      const detailId = 'sci-detail-'+i;
-      let detailRows = '';
-      g.lots.forEach(function(l, li) {
-        const pd = l._pd||l.purchDoc||'', pi = l._pi||l.purchItem||'';
-        const poDisp = pd ? pd+(pi?'-'+pi:'') : (l.po||'—');
-        const expDisp = l.expDate ? new Date(l.expDate).toLocaleDateString('en-US') : '—';
-        const bg = li%2!==0 ? 'rgba(0,0,0,0.03)' : '';
-        detailRows += '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
-          +'<td style="padding:4px 8px;font-weight:bold;color:var(--accent);white-space:nowrap">'+l.lot+'</td>'
-          +'<td style="padding:4px 8px">'+l.material+'</td>'
-          +'<td style="padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+l.matDesc+'</td>'
-          +'<td style="padding:4px 8px;color:var(--accent2);white-space:nowrap">'+poDisp+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(l.qtyMlf?parseFloat(l.qtyMlf).toFixed(3):'—')+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(l.grossWt?l.grossWt.toLocaleString():'—')+'</td>'
-          +'<td style="padding:4px 8px;white-space:nowrap">'+expDisp+'</td></tr>';
-      });
-      const totLF = g.lots.reduce(function(s,l){return s+(parseFloat(l.qtyMlf)||0);},0).toFixed(3);
-      const totWt = g.lots.reduce(function(s,l){return s+(l.grossWt||0);},0).toLocaleString();
-      const dq = '"';
-      const sciStamp = _stamps[key] || null;
-      const sciStampStr = sciStamp ? 'Exported: '+new Date(sciStamp.exportedAt).toLocaleString() : '';
-      h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
-        +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
-        +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked onchange='+dq+'onEDISciChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
-        +'<div style='+dq+'flex:1;min-width:0;cursor:pointer'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq+'>'
-        +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+key+'</div>'
-        +'<div style='+dq+'font-size:10px;color:var(--text2);margin-top:2px'+dq+'>'+g.customerName+' · Invoice: '+g.invoiceRef+'</div>'
-        +'</div>'
-        +'<div style='+dq+'text-align:right;white-space:nowrap;margin-right:4px'+dq+'>'
-        +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:13px'+dq+'>'+g.lots.length+'</div>'
-        +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>rolls</div>'
-        +(sciStampStr?'<div style='+dq+'font-size:9px;color:var(--accent2);white-space:nowrap;margin-top:2px'+dq+'>✓ '+sciStampStr+'</div>':'')
-        +'</div>'
-        +'<button onclick='+dq+'deleteEDISciLoad(&quot;'+key+'&quot;)'+dq
-        +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
-        +'<button id='+dq+detailId+'-btn'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq
-        +' style='+dq+'background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px'+dq+'>▼</button>'
-        +'</div>'
-        +'<div id='+dq+detailId+dq+' style='+dq+'display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:320px;overflow-y:auto'+dq+'>'
-        +'<table style='+dq+'width:100%;border-collapse:collapse;font-size:10px'+dq+'>'
-        +'<thead><tr style='+dq+'background:var(--surface2)'+dq+'>'
-        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>LOT #</th>'
-        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>SKU</th>'
-        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PRODUCT ID</th>'
-        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PO #</th>'
-        +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>LF</th>'
-        +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>WEIGHT</th>'
-        +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>EXP DATE</th>'
-        +'</tr></thead><tbody>'+detailRows
-        +'<tr style='+dq+'background:rgba(26,158,122,0.08);font-weight:bold'+dq+'>'
-        +'<td colspan='+dq+'4'+dq+' style='+dq+'padding:5px 8px;color:var(--accent2)'+dq+'>TOTAL — '+g.lots.length+' rolls</td>'
-        +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--accent2)'+dq+'>'+totLF+'</td>'
-        +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--accent2)'+dq+'>'+totWt+'</td>'
-        +'<td></td></tr>'
-        +'</tbody></table></div></div>';
-    });;;;
-    h += `</div>`;
-  }
-
-  h += `</div>
+      </div>
+      <div style="border:2px dashed var(--border);border-radius:6px;padding:20px;text-align:center;color:var(--text2);font-size:11px;font-weight:bold;letter-spacing:2px">
+        COMING SOON
+      </div>
+    </div>
 
     <!-- ── HBH ── -->
-    <div style="${sectionStyle}">
+    <div style="${sectionStyle};order:3">
       <div style="display:flex;align-items:center;justify-content:space-between">
         <div>
           <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--warning)">🏭 HBH LOADS</div>
@@ -3345,6 +3284,61 @@ function showEDIImportFile() {
         <div style="font-size:10px;color:var(--text2);margin-top:4px">.xls or .xlsx &nbsp;·&nbsp; click to browse</div>
         <input type="file" id="hbh-file-input" accept=".xls,.xlsx" onchange="handleHBHUpload(event)" style="display:none">
       </div>`;
+
+
+  // ── SCI GAMES section ────────────────────────────────────────────────────────
+  {
+    const sciGroups = window._ediSciGroups || {};
+    const sciKeys = Object.keys(sciGroups).filter(k => !_ediSciDeleted.has(k));
+    const dq2 = '"';
+    h += `<div style="${sectionStyle};order:5">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent2)">🔬 SCI GAMES LOADS</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Built from loaded DIR data</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm" onclick="ediCheckAll('sci',true);document.querySelectorAll('.edi-hbh-chk').forEach(c=>c.checked=false)" title="Select All">☑</button>
+          <button class="btn btn-sm" onclick="ediCheckAll('sci',false)" title="Deselect All">☐</button>
+        </div>
+      </div>`;
+    if (!sciKeys.length) {
+      h += `<div style="border:2px dashed var(--border);border-radius:6px;padding:24px;text-align:center;color:var(--text2);font-size:13px;font-weight:bold;letter-spacing:1px">
+        None Available To Export
+      </div>`;
+    } else {
+      const totalRolls = sciKeys.reduce((s,k)=>(sciGroups[k]&&sciGroups[k].lots?s+sciGroups[k].lots.length:s),0);
+      h += `<div style="font-size:10px;color:var(--text2)">${sciKeys.length} ZMOs &nbsp;·&nbsp; ${totalRolls.toLocaleString()} rolls total</div>
+      <div id="sci-load-list" style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">`;
+      let alt = false;
+      sciKeys.forEach(key => {
+        if (_ediSciDeleted.has(key)) return;
+        const g = sciGroups[key];
+        if (!g||!g.lots||!g.lots.length) return;
+        const sciStamp = _stamps[key] || null;
+        const sciStampStr = sciStamp ? 'Exported: '+new Date(sciStamp.exportedAt).toLocaleString() : '';
+        const totLF = g.lots.reduce(function(s,l){return s+(parseFloat(l.qtyMlf)||0);},0).toFixed(3);
+        const totWt = g.lots.reduce(function(s,l){return s+(l.grossWt||0);},0).toLocaleString();
+        const dq = dq2;
+        h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
+          +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
+          +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked onchange='+dq+'onEDISciChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
+          +'<div style='+dq+'flex:1;min-width:0'+dq+'>'
+          +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+g.shipment+'</div>'
+          +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>'+g.customerName+' &nbsp;·&nbsp; '+g.lots.length+' rolls</div>'
+          +(sciStampStr?'<div style='+dq+'font-size:9px;color:var(--accent2)'+dq+'>✓ '+sciStampStr+'</div>':'')
+          +'</div>'
+          +'<button onclick='+dq+'exportSingleSci(&quot;'+key+'&quot;)'+dq
+          +' style='+dq+'background:var(--accent2);color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px'+dq+'>Export</button>'
+          +'<button onclick='+dq+'deleteEDISciLoad(&quot;'+key+'&quot;)'+dq
+          +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
+          +'</div></div>';
+        alt = !alt;
+      });
+      h += '</div>';
+    }
+    h += '</div>';
+  }
 
   if (_ediHBHLoads.length) {
     const totalHBHRolls = _ediHBHLoads.reduce((s,l)=>s+l.rows.length,0);
@@ -3393,6 +3387,8 @@ function showEDIImportFile() {
         +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>rolls</div>'
         +(hbhStampStr?'<div style='+dq+'font-size:9px;color:var(--warning);white-space:nowrap;margin-top:2px'+dq+'>✓ '+hbhStampStr+'</div>':'')
         +'</div>'
+        +'<button onclick='+dq+'exportSingleHBH('+i+')'+dq
+        +' style='+dq+'background:var(--warning);color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px'+dq+'>Export</button>'
         +'<button onclick='+dq+'deleteEDIHBHLoad('+i+')'+dq
         +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
         +'<button id='+dq+detailId+'-btn'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq
@@ -3418,9 +3414,247 @@ function showEDIImportFile() {
     h += `</div>`;
   }
 
-  h += `</div></div>`; // close HBH + grid
 
+  // ── IPG section ─────────────────────────────────────────────────────────────
+  h += `<div style="${sectionStyle};order:4">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent)">📦 IPG LOADS</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Intertape Polymer Group — drag &amp; drop or click to upload</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Load ID (BOL)</label>
+            <input id="ipg-load-id" type="text" placeholder="e.g. 12519228"
+              style="padding:7px 12px;border:1.5px solid var(--accent);border-radius:7px;font-family:var(--font);font-size:13px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:160px">
+          </div>
+          <div id="ipg-dropzone"
+            ondragover="event.preventDefault();this.style.borderColor='var(--accent)';this.style.background='rgba(79,110,247,0.05)'"
+            ondragleave="this.style.borderColor='var(--border)';this.style.background=''"
+            ondrop="event.preventDefault();this.style.borderColor='var(--border)';this.style.background='';handleIPGDrop(event)"
+            style="border:2px dashed var(--border);border-radius:8px;padding:12px 20px;text-align:center;cursor:pointer;font-size:12px;color:var(--text2);transition:.2s;min-width:200px"
+            onclick="document.getElementById('ipg-file-input').click()">
+            <span style="font-size:16px">📄</span>
+            <span style="font-weight:600;margin-left:6px">Drop Intertape file or click to browse</span>
+            <div style="font-size:10px;margin-top:2px">.xlsx format</div>
+            <input type="file" id="ipg-file-input" accept=".xlsx,.xls" style="display:none"
+              onchange="if(this.files[0])processIPGFile(this.files[0])">
+          </div>
+        </div>
+      </div>
+      <div id="ipg-load-list"></div>
+  </div>`;
+
+  h += `</div>`; // close outer flex stack
   panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + h + '</div>';
+  // Restore IPG loads if any are in memory (panel rebuild would clear the list div)
+  if (_ipgLoads && _ipgLoads.length) renderIPGLoads();
+}
+
+
+// ─── IPG INBOUND FILE PROCESSING ─────────────────────────────────────────────
+// Width description → [subSku, numericWidth]
+const IPG_WIDTH_TABLE = {
+  "21'' 8/16ths":  ['02150', 21.5],
+  "16'' 8/16ths":  ['01650', 16.5],
+  "19''":          ['01900', 19.0],
+  "22''":          ['02200', 22.0],
+  "23'' 10/16ths": ['02310', 23.625],
+  "37''":          ['03700', 37.0],
+  "49''":          ['04900', 49.0],
+  "97'' 14/16ths": ['09714', 97.14]
+};
+
+let _ipgLoads = []; // processed loads from IPG file
+
+function handleIPGDrop(e) {
+  const file = e.dataTransfer.files[0];
+  if (file) processIPGFile(file);
+}
+
+function processIPGFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, {type:'binary', cellDates:true});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false, dateNF:'yyyy-mm-dd'});
+
+      // Find header row (row with 'Roll ID')
+      let headerIdx = rows.findIndex(r => r.some(c => String(c||'').trim() === 'Roll ID'));
+      if (headerIdx === -1) { showAlert('Could not find Roll ID header in file','danger'); return; }
+
+      const hdr = rows[headerIdx];
+      const col = name => hdr.findIndex(c => String(c||'').trim().toLowerCase() === name.toLowerCase());
+
+      const cRollId    = col('Roll ID');
+      const cWidth     = col('Width(in)');
+      const cDiam      = col('Diameter(in)');
+      const cShipTo    = col('Ship To Short Name');
+      const cCustOrder = col('Customer Order #');
+      const cSomOrder  = col('SOM Order #');
+      const cGrade     = col('Grade');
+      const cShipFrom  = col('Ship From');
+      const cLF        = col('Linear Feet');
+      const cWeight    = col('Roll Weight (lbs)');
+      const cCarrier   = col('Carrier');
+      const cCarrierN  = col('Carrier Number');
+      const cDeliver   = col('Deliver By Date');
+
+      const dataRows = rows.slice(headerIdx + 1).filter(r => {
+        const rollId  = String(r[cRollId]||'').trim();
+        const somOrd  = String(r[cSomOrder]||'').trim();
+        // Skip empty rows, TOTALS rows, or rows with no SOM Order #
+        return rollId && somOrd && !/^(total|totals|sum|grand)/i.test(rollId);
+      });
+
+      if (!dataRows.length) { showAlert('No data rows found in file','warning'); return; }
+
+      // Today's date as Excel serial for Exp Date column
+      const today = new Date();
+      const excelEpoch = new Date(1900, 0, 1);
+      const todaySerial = Math.round((today - excelEpoch) / 86400000) + 1;
+
+      // Group by SOM Order # (each load = one SOM Order #)
+      const loadMap = {};
+      dataRows.forEach(r => {
+        const somOrder  = String(r[cSomOrder]||'').trim();
+        const rollId    = String(r[cRollId]||'').trim();
+        const widthDesc = String(r[cWidth]||'').trim();
+        const grade     = String(r[cGrade]||'').trim();
+        const diam      = String(r[cDiam]||'').trim();
+        const shipFrom  = String(r[cShipFrom]||'').trim();
+        const shipTo    = String(r[cShipTo]||'').trim();
+        const custOrder = String(r[cCustOrder]||'').trim();
+        const lf        = parseFloat(r[cLF])||0;
+        const wt        = parseFloat(r[cWeight])||0;
+        const carrier   = String(r[cCarrier]||'').trim();
+        const carrierN  = String(r[cCarrierN]||'').trim();
+        const delivDate = r[cDeliver]||'';
+
+        const widthLookup = IPG_WIDTH_TABLE[widthDesc] || [widthDesc, parseFloat(widthDesc)||0];
+        const subSku      = widthLookup[0];
+        const widthNum    = widthLookup[1];
+        const sku         = grade + subSku;
+        const prodId      = [grade, widthDesc, diam, shipFrom].join(',');
+
+        if (!loadMap[somOrder]) {
+          loadMap[somOrder] = {
+            somOrder, shipTo, custOrder, carrier, carrierN, delivDate,
+            rolls: []
+          };
+        }
+        loadMap[somOrder].rolls.push({
+          sku, prodId, rollId, custOrder, wt, lf, widthNum, todaySerial
+        });
+      });
+
+      _ipgLoads = Object.values(loadMap);
+      renderIPGLoads();
+      showAlert('✓ IPG file loaded — ' + dataRows.length + ' rolls across ' + _ipgLoads.length + ' load(s)', 'success');
+    } catch(err) {
+      showAlert('Error reading IPG file: ' + err.message, 'danger');
+      console.error(err);
+    }
+  };
+  reader.readAsBinaryString(file);
+}
+
+function deleteIPGLoad(idx) {
+  _ipgLoads.splice(idx, 1);
+  renderIPGLoads();
+}
+
+function renderIPGLoads() {
+  const container = document.getElementById('ipg-load-list');
+  if (!container) return;
+  if (!_ipgLoads.length) { container.innerHTML = ''; return; }
+
+  let h = '';
+  _ipgLoads.forEach((load, i) => {
+    const totalRolls = load.rolls.length;
+    const totalWt    = load.rolls.reduce((s,r)=>s+r.wt,0).toLocaleString();
+    const totalLF    = load.rolls.reduce((s,r)=>s+r.lf,0).toFixed(0);
+    const detailId   = 'ipg-detail-' + i;
+    const dq = '"';
+
+    h += '<div style="border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden">';
+    h += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2)">';
+    h += '<input type="checkbox" class="edi-ipg-chk" value="' + i + '" checked style="cursor:pointer;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0">';
+    h += '<div style="flex:1">';
+    h += '<div style="font-weight:bold;color:var(--accent);font-size:12px">SOM Order: ' + load.somOrder + '</div>';
+    h += '<div style="font-size:10px;color:var(--text2)">' + load.shipTo + ' · ' + load.custOrder + ' · ' + (load.carrier||'') + '_' + (load.carrierN||'') + '</div>';
+    h += '</div>';
+    h += '<div style="font-weight:bold;font-size:13px">' + totalRolls + ' rolls</div>';
+    h += '<button onclick="toggleEDIDetail(&quot;' + detailId + '&quot;)" style="background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:3px 8px;cursor:pointer;font-size:11px">▼</button>';
+    h += '<button onclick="exportIPGLoad(' + i + ')" style="background:var(--accent);color:#fff;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:700">Export</button>';
+    h += '<button onclick="deleteIPGLoad(' + i + ')" title="Remove load" style="background:none;border:none;cursor:pointer;font-size:14px;color:var(--danger);padding:2px 6px;line-height:1" >✕</button>';
+    h += '</div>';
+
+    // Detail table
+    h += '<div id="' + detailId + '" style="display:none;overflow-x:auto;max-height:320px;overflow-y:auto">';
+    h += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+    h += '<thead><tr style="background:var(--surface2);position:sticky;top:0">';
+    ['LOT #','SKU','PRODUCT ID','LF','WEIGHT','WIDTH'].forEach(col => {
+      h += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap">' + col + '</th>';
+    });
+    h += '</tr></thead><tbody>';
+    load.rolls.forEach(r => {
+      h += '<tr style="border-bottom:1px solid var(--border)">';
+      h += '<td style="padding:5px 10px">' + r.rollId + '</td>';
+      h += '<td style="padding:5px 10px;font-weight:bold">' + r.sku + '</td>';
+      h += '<td style="padding:5px 10px;color:var(--text2)">' + r.prodId + '</td>';
+      h += '<td style="padding:5px 10px">' + r.lf.toLocaleString() + '</td>';
+      h += '<td style="padding:5px 10px">' + r.wt.toLocaleString() + '</td>';
+      h += '<td style="padding:5px 10px">' + r.widthNum + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div></div>';
+  });
+
+  container.innerHTML = h;
+}
+
+function exportIPGLoad(idx) {
+  const load    = _ipgLoads[idx];
+  if (!load) return;
+  const loadId  = (document.getElementById('ipg-load-id')||{}).value||'';
+  if (!loadId) { showAlert('Please enter a Load ID before exporting','warning'); return; }
+
+  const totalRolls = load.rolls.length;
+  const truck   = (load.carrier||'') + '_' + (load.carrierN||'');
+  const poNum   = load.shipTo + ' ' + load.custOrder + ' ' + loadId;
+
+  const aoa = [
+    [''],
+    ['Receiver', loadId,  '', 'Total Rolls', totalRolls, '', '', 'Fraction  Decimal'],
+    ['PO #',     poNum,   '', '', '', '', '', 0.5, 0.5],
+    ['Invoice #',load.custOrder],
+    ['Truck #',  truck,   '', '', '', '', '', 'Piper IBD Order #'],
+    [''],
+    [''],
+    ['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
+  ];
+
+  load.rolls.forEach(r => {
+    aoa.push([
+      r.sku, r.prodId, r.rollId, r.custOrder, r.custOrder,
+      r.wt, r.wt, 'ROLLS', r.lf, 1, r.widthNum, r.todaySerial
+    ]);
+  });
+
+  const wb  = XLSX.utils.book_new();
+  const ws  = XLSX.utils.aoa_to_sheet(aoa);
+  // Format Exp Date column (col L = index 11) as date
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for (let row = 8; row <= range.e.r; row++) {
+    const cell = ws[XLSX.utils.encode_cell({r:row, c:11})];
+    if (cell) cell.z = 'm/d/yyyy';
+  }
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  const fname = 'IPG_Import_' + load.custOrder + '_' + loadId + '.xlsx';
+  XLSX.writeFile(wb, fname);
+  showAlert('✓ Exported ' + fname, 'success');
 }
 
 function handleHBHDrop(e) {
@@ -3686,6 +3920,38 @@ function buildEDISheet_HBH(load) {
 }
 
 
+
+function exportSingleSci(key) {
+  const group = (window._ediSciGroups||{})[key];
+  if (!group||!group.lots.length) return;
+  const wb = XLSX.utils.book_new();
+  const ws = buildEDISheet_SciGames(group);
+  const safeName = group.shipment.toString().substring(0,31);
+  XLSX.utils.book_append_sheet(wb, ws, safeName);
+  const fname = 'EDI_SciGames_' + safeName + '.xlsx';
+  XLSX.writeFile(wb, fname);
+  saveEDIExportStamp([safeName]);
+  window._ediStamps = window._ediStamps||{};
+  window._ediStamps[safeName.replace(/[.#$[\]]/g,'_')] = {exportedAt:Date.now(),exportedBy:state.currentUser||''};
+  showAlert('✓ Exported ' + fname, 'success');
+  showEDIImportFile();
+}
+
+function exportSingleHBH(idx) {
+  const load = _ediHBHLoads[idx];
+  if (!load) return;
+  const wb = XLSX.utils.book_new();
+  const ws = buildEDISheet_HBH(load);
+  const safeName = load.sheetName.toString().substring(0,31);
+  XLSX.utils.book_append_sheet(wb, ws, safeName);
+  const fname = 'EDI_HBH_' + safeName + '.xlsx';
+  XLSX.writeFile(wb, fname);
+  saveEDIExportStamp([safeName]);
+  window._ediStamps = window._ediStamps||{};
+  window._ediStamps[safeName.replace(/[.#$[\]]/g,'_')] = {exportedAt:Date.now(),exportedBy:state.currentUser||''};
+  showAlert('✓ Exported ' + fname, 'success');
+  showEDIImportFile();
+}
 
 function exportEDIFile() {
   const sciGroups = window._ediSciGroups || {};
