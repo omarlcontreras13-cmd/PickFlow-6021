@@ -314,7 +314,17 @@ const USERS = [
   { id:'Ocontreras', name:'Omar Contreras', password:null, role:'admin' },
 ];
 
-const FB_CONFIG = { databaseURL: "https://pickflow-3b80d-default-rtdb.firebaseio.com" };
+// ── ENVIRONMENT SWITCH ──────────────────────────────────────────────
+// 'live' → production database + no banner
+// 'test' → test database + orange TEST banner
+// Set this per repo: 'live' in the live file, 'test' in the test file.
+const DB_ENV = 'live';
+
+const FB_CONFIG = {
+  databaseURL: DB_ENV === 'test'
+    ? "https://pick-flow-test-default-rtdb.firebaseio.com"
+    : "https://pickflow-3b80d-default-rtdb.firebaseio.com"
+};
 let db = null;
 let eodTimer = null;
 
@@ -336,6 +346,7 @@ let state = {
   lastDirImport: null,
   buSeqMap: {},
   buZmoMap: {},
+  ipgWidthTable: {},
   importMode: 'inventory',
   lastImport: null
 };
@@ -478,6 +489,11 @@ function listenToFirebase() {
   db.ref('6021/buZmoMap').on('value', snap => {
     const data = snap.val();
     if (data) state.buZmoMap = data;
+  });
+  db.ref('6021/ipgWidthTable').on('value', snap => {
+    const data = snap.val();
+    state.ipgWidthTable = data || {};
+    updateIPGWidthCount(); // refresh count if the EDI section is open
   });
 
   // cycleCount6021 connection loaded on demand
@@ -3309,7 +3325,7 @@ function showEDIImportFile() {
     } else {
       const totalRolls = sciKeys.reduce((s,k)=>(sciGroups[k]&&sciGroups[k].lots?s+sciGroups[k].lots.length:s),0);
       h += `<div style="font-size:10px;color:var(--text2)">${sciKeys.length} ZMOs &nbsp;·&nbsp; ${totalRolls.toLocaleString()} rolls total</div>
-      <div id="sci-load-list" style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">`;
+      <div id="sci-load-list" style="max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">`;
       let alt = false;
       sciKeys.forEach(key => {
         if (_ediSciDeleted.has(key)) return;
@@ -3348,7 +3364,7 @@ function showEDIImportFile() {
       <button onclick="document.getElementById('hbh-file-input').click()" title="Add another file"
         style="margin-left:8px;background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:0">＋ Add File</button>
     </div>
-    <div id="hbh-load-list" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">`;
+    <div id="hbh-load-list" style="max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">`;
 
     _ediHBHLoads.forEach(function(load, i) {
       const alt = i%2!==0;
@@ -3371,7 +3387,7 @@ function showEDIImportFile() {
       });
       const totWt = (load.rows||[]).reduce(function(s,r){return s+(+r.weight||0);},0).toLocaleString();
       const dq = '"';
-      const hbhKey = load.sheetName.replace(/[.#$[\]]/g,'_');
+      const hbhKey = String(load.sheetName || '').replace(/[.#$[\]]/g,'_');
       const hbhStamp = _stamps[hbhKey] || null;
       const hbhStampStr = hbhStamp ? 'Exported: '+new Date(hbhStamp.exportedAt).toLocaleString() : '';
       h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
@@ -3419,12 +3435,12 @@ function showEDIImportFile() {
   h += `<div style="${sectionStyle};order:4">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
-          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent)">📦 IPG LOADS</div>
+          <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent)">📦 IPG / SOM LOADS</div>
           <div style="font-size:10px;color:var(--text2);margin-top:2px">Intertape Polymer Group — drag &amp; drop or click to upload</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <div style="display:flex;flex-direction:column;gap:4px">
-            <label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Load ID (BOL)</label>
+            <label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Shipment # (Load ID / BOL)</label>
             <input id="ipg-load-id" type="text" placeholder="e.g. 12519228"
               style="padding:7px 12px;border:1.5px solid var(--accent);border-radius:7px;font-family:var(--font);font-size:13px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:160px">
           </div>
@@ -3442,19 +3458,34 @@ function showEDIImportFile() {
           </div>
         </div>
       </div>
-      <div id="ipg-load-list"></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px">
+        <span style="font-size:10px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Width → SKU Table</span>
+        <button onclick="document.getElementById('ipg-width-input').click()"
+          style="background:var(--surface);color:var(--accent);border:1.5px solid var(--accent);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:700">⬆ Import Table</button>
+        <button onclick="downloadIPGWidthTemplate()"
+          style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600">⬇ Download Current / Template</button>
+        <span id="ipg-width-count" style="font-size:10px;color:var(--text2)"></span>
+        <input type="file" id="ipg-width-input" accept=".xlsx,.xls" style="display:none"
+          onchange="if(this.files[0])handleIPGWidthFile(this.files[0])">
+      </div>
+      <div id="ipg-load-list" style="max-height:420px;overflow-y:auto;overflow-x:hidden"></div>
   </div>`;
 
   h += `</div>`; // close outer flex stack
   panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + h + '</div>';
   // Restore IPG loads if any are in memory (panel rebuild would clear the list div)
   if (_ipgLoads && _ipgLoads.length) renderIPGLoads();
+  updateIPGWidthCount();
 }
 
 
 // ─── IPG INBOUND FILE PROCESSING ─────────────────────────────────────────────
 // Width description → [subSku, numericWidth]
-const IPG_WIDTH_TABLE = {
+// These are the built-in DEFAULTS. New mappings are added all the time, so the
+// table is user-maintainable: import a spreadsheet to add/override entries
+// (persisted to Firebase at 6021/ipgWidthTable). Imported entries overlay these
+// defaults — so nothing breaks if the imported table is missing an old width.
+const IPG_WIDTH_TABLE_DEFAULT = {
   "21'' 8/16ths":  ['02150', 21.5],
   "16'' 8/16ths":  ['01650', 16.5],
   "19''":          ['01900', 19.0],
@@ -3464,6 +3495,105 @@ const IPG_WIDTH_TABLE = {
   "49''":          ['04900', 49.0],
   "97'' 14/16ths": ['09714', 97.14]
 };
+
+// Returns the effective table: built-in defaults with any imported entries
+// (from state/Firebase) layered on top. Imported entries are stored as a LIST of
+// {desc, sub, w} records in Firebase — NOT keyed by the width description, because
+// descriptions contain "/" (e.g. "8/16ths") which Firebase forbids in keys.
+function getIpgWidthTable() {
+  const merged = {};
+  for (const k in IPG_WIDTH_TABLE_DEFAULT) merged[k] = IPG_WIDTH_TABLE_DEFAULT[k];
+  const imported = (state && state.ipgWidthTable) ? state.ipgWidthTable : null;
+  if (imported) {
+    // Firebase returns a list as an array, or as an object with integer keys.
+    const records = Array.isArray(imported) ? imported : Object.values(imported);
+    records.forEach(rec => {
+      if (rec && rec.desc !== undefined && rec.desc !== null && String(rec.desc).trim()) {
+        merged[String(rec.desc)] = [String(rec.sub), parseFloat(rec.w) || 0];
+      }
+    });
+  }
+  return merged;
+}
+
+// Count of imported (non-default) mappings, handling array or object form.
+function ipgImportedCount() {
+  const imported = (state && state.ipgWidthTable) ? state.ipgWidthTable : null;
+  if (!imported) return 0;
+  return Array.isArray(imported) ? imported.length : Object.keys(imported).length;
+}
+
+// Import a Width → SKU table from a spreadsheet.
+// Expected columns (row 1 = header, skipped): Width Description | Sub SKU | Numeric Width
+function importIPGWidthTable(wb) {
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+  const records = [];
+  rows.forEach((row, i) => {
+    if (i === 0) return; // skip header
+    const desc = (row[0]||'').toString().trim();
+    let sub    = (row[1]||'').toString().trim();
+    let w      = parseFloat(row[2]);
+    if (!desc || !sub) return;
+    // Preserve leading zeros: if Excel stripped them (e.g. 2150), re-pad all-digit
+    // sub-SKUs to 5 characters to match the warehouse SKU format.
+    if (/^\d+$/.test(sub)) sub = sub.padStart(5, '0');
+    if (isNaN(w)) w = parseFloat(desc) || 0; // fall back to leading number in the description
+    records.push({ desc: desc, sub: sub, w: w });
+  });
+  if (!records.length) {
+    showAlert('No width mappings found. Expected columns: Width Description | Sub SKU | Numeric Width', 'warning');
+    return;
+  }
+  state.ipgWidthTable = records;
+  if (db) {
+    db.ref('6021/ipgWidthTable').set(records)
+      .catch(err => showAlert('Loaded locally, but cloud sync failed: ' + err.message, 'warning'));
+  }
+  showAlert('✓ IPG width table loaded — ' + records.length + ' mapping(s).', 'success');
+  updateIPGWidthCount();
+}
+
+function handleIPGWidthFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, {type:'binary'});
+      importIPGWidthTable(wb);
+    } catch(err) {
+      showAlert('Width table import failed: ' + err.message, 'danger');
+      console.error(err);
+    }
+  };
+  reader.readAsBinaryString(file);
+}
+
+// Export the current effective table (defaults + imported) as an editable
+// spreadsheet — doubles as the import template so the format is self-documenting.
+function downloadIPGWidthTemplate() {
+  const table = getIpgWidthTable();
+  const aoa = [['Width Description', 'Sub SKU', 'Numeric Width']];
+  Object.keys(table).forEach(k => aoa.push([k, table[k][0], table[k][1]]));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Force the Sub SKU column to text so leading zeros survive in Excel.
+  for (let i = 2; i <= aoa.length; i++) {
+    const cell = ws['B' + i];
+    if (cell) { cell.t = 's'; cell.z = '@'; }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'IPG Width Table');
+  XLSX.writeFile(wb, 'IPG_Width_Table.xlsx');
+}
+
+function updateIPGWidthCount() {
+  const el = document.getElementById('ipg-width-count');
+  if (!el) return;
+  const total = Object.keys(getIpgWidthTable()).length;
+  const imported = ipgImportedCount();
+  el.textContent = imported
+    ? total + ' mappings (' + imported + ' imported + defaults)'
+    : total + ' mappings (defaults only)';
+}
 
 let _ipgLoads = []; // processed loads from IPG file
 
@@ -3515,8 +3645,15 @@ function processIPGFile(file) {
       const excelEpoch = new Date(1900, 0, 1);
       const todaySerial = Math.round((today - excelEpoch) / 86400000) + 1;
 
-      // Group by SOM Order # (each load = one SOM Order #)
-      const loadMap = {};
+      // ── 1 FILE = 1 LOAD ──────────────────────────────────────────────────────
+      // All rolls from this file go into ONE load, regardless of how many SOM Orders
+      // or SKUs are present. The load is tagged with the Shipment # (Load ID / BOL)
+      // entered in the field at drop time. Multiple files append (one load each),
+      // matching the HBH segment.
+      const widthTable = getIpgWidthTable(); // defaults + any imported overrides
+      const shipmentNo = (((document.getElementById('ipg-load-id')||{}).value)||'').trim();
+      const rolls = [];
+      let meta = null;
       dataRows.forEach(r => {
         const somOrder  = String(r[cSomOrder]||'').trim();
         const rollId    = String(r[cRollId]||'').trim();
@@ -3532,26 +3669,37 @@ function processIPGFile(file) {
         const carrierN  = String(r[cCarrierN]||'').trim();
         const delivDate = r[cDeliver]||'';
 
-        const widthLookup = IPG_WIDTH_TABLE[widthDesc] || [widthDesc, parseFloat(widthDesc)||0];
+        const widthLookup = widthTable[widthDesc] || [widthDesc, parseFloat(widthDesc)||0];
         const subSku      = widthLookup[0];
         const widthNum    = widthLookup[1];
         const sku         = grade + subSku;
         const prodId      = [grade, widthDesc, diam, shipFrom].join(',');
 
-        if (!loadMap[somOrder]) {
-          loadMap[somOrder] = {
-            somOrder, shipTo, custOrder, carrier, carrierN, delivDate,
-            rolls: []
-          };
-        }
-        loadMap[somOrder].rolls.push({
-          sku, prodId, rollId, custOrder, wt, lf, widthNum, todaySerial
-        });
+        // Representative load-level metadata = first data row
+        if (!meta) meta = { shipTo, custOrder, carrier, carrierN, delivDate };
+        rolls.push({ sku, prodId, rollId, custOrder, wt, lf, widthNum, todaySerial, somOrder });
       });
 
-      _ipgLoads = Object.values(loadMap);
+      // Distinct SOM Orders combined into this load (display only)
+      const somOrders = [];
+      rolls.forEach(r => { if (r.somOrder && somOrders.indexOf(r.somOrder) === -1) somOrders.push(r.somOrder); });
+
+      const newLoad = {
+        loadId:    shipmentNo,                       // reference # entered in the field
+        fileName:  (file && file.name) || 'IPG file',
+        shipTo:    meta ? meta.shipTo    : '',
+        custOrder: meta ? meta.custOrder : '',
+        carrier:   meta ? meta.carrier   : '',
+        carrierN:  meta ? meta.carrierN  : '',
+        delivDate: meta ? meta.delivDate : '',
+        somOrders: somOrders,
+        rolls:     rolls
+      };
+
+      _ipgLoads.push(newLoad); // append — 1 file = 1 load
       renderIPGLoads();
-      showAlert('✓ IPG file loaded — ' + dataRows.length + ' rolls across ' + _ipgLoads.length + ' load(s)', 'success');
+      showAlert('✓ IPG file loaded — ' + rolls.length + ' roll(s) in 1 load'
+        + (somOrders.length > 1 ? ' (' + somOrders.length + ' SOM Orders combined)' : ''), 'success');
     } catch(err) {
       showAlert('Error reading IPG file: ' + err.message, 'danger');
       console.error(err);
@@ -3562,7 +3710,14 @@ function processIPGFile(file) {
 
 function deleteIPGLoad(idx) {
   _ipgLoads.splice(idx, 1);
-  renderIPGLoads();
+  showEDIImportFile(); // full panel re-render (matches the working HBH/SCI delete pattern)
+}
+
+function clearIPGLoads() {
+  if (!_ipgLoads.length) return;
+  if (!confirm('Remove all ' + _ipgLoads.length + ' IPG load(s) from the list?')) return;
+  _ipgLoads = [];
+  showEDIImportFile();
 }
 
 function renderIPGLoads() {
@@ -3571,21 +3726,31 @@ function renderIPGLoads() {
   if (!_ipgLoads.length) { container.innerHTML = ''; return; }
 
   let h = '';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin:6px 0 8px 0">';
+  h += '<span style="font-size:10px;color:var(--text2)">' + _ipgLoads.length + ' load(s) — 1 file = 1 load</span>';
+  h += '<button onclick="clearIPGLoads()" title="Remove all loads" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;font-weight:600;padding:0">✕ Clear All</button>';
+  h += '</div>';
   _ipgLoads.forEach((load, i) => {
     const totalRolls = load.rolls.length;
     const totalWt    = load.rolls.reduce((s,r)=>s+r.wt,0).toLocaleString();
     const totalLF    = load.rolls.reduce((s,r)=>s+r.lf,0).toFixed(0);
     const detailId   = 'ipg-detail-' + i;
     const dq = '"';
+    const ref      = load.loadId ? ('Shipment #: ' + load.loadId) : 'Shipment # — enter above before export';
+    const refColor = load.loadId ? 'var(--accent)' : 'var(--danger)';
+    const soms     = (load.somOrders && load.somOrders.length)
+      ? load.somOrders.length + ' SOM order' + (load.somOrders.length > 1 ? 's' : '')
+      : '';
+    const subParts = [load.shipTo, (load.carrier||'') + '_' + (load.carrierN||''), soms, load.fileName].filter(Boolean);
 
     h += '<div style="border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden">';
     h += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2)">';
     h += '<input type="checkbox" class="edi-ipg-chk" value="' + i + '" checked style="cursor:pointer;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0">';
-    h += '<div style="flex:1">';
-    h += '<div style="font-weight:bold;color:var(--accent);font-size:12px">SOM Order: ' + load.somOrder + '</div>';
-    h += '<div style="font-size:10px;color:var(--text2)">' + load.shipTo + ' · ' + load.custOrder + ' · ' + (load.carrier||'') + '_' + (load.carrierN||'') + '</div>';
+    h += '<div style="flex:1;min-width:0">';
+    h += '<div style="font-weight:bold;color:' + refColor + ';font-size:12px">' + ref + '</div>';
+    h += '<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + subParts.join(' · ') + '</div>';
     h += '</div>';
-    h += '<div style="font-weight:bold;font-size:13px">' + totalRolls + ' rolls</div>';
+    h += '<div style="font-weight:bold;font-size:13px;white-space:nowrap">' + totalRolls + ' rolls</div>';
     h += '<button onclick="toggleEDIDetail(&quot;' + detailId + '&quot;)" style="background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:3px 8px;cursor:pointer;font-size:11px">▼</button>';
     h += '<button onclick="exportIPGLoad(' + i + ')" style="background:var(--accent);color:#fff;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:700">Export</button>';
     h += '<button onclick="deleteIPGLoad(' + i + ')" title="Remove load" style="background:none;border:none;cursor:pointer;font-size:14px;color:var(--danger);padding:2px 6px;line-height:1" >✕</button>';
@@ -3595,7 +3760,7 @@ function renderIPGLoads() {
     h += '<div id="' + detailId + '" style="display:none;overflow-x:auto;max-height:320px;overflow-y:auto">';
     h += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
     h += '<thead><tr style="background:var(--surface2);position:sticky;top:0">';
-    ['LOT #','SKU','PRODUCT ID','LF','WEIGHT','WIDTH'].forEach(col => {
+    ['LOT #','SKU','PRODUCT ID','SOM ORDER','LF','WEIGHT','WIDTH'].forEach(col => {
       h += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap">' + col + '</th>';
     });
     h += '</tr></thead><tbody>';
@@ -3604,6 +3769,7 @@ function renderIPGLoads() {
       h += '<td style="padding:5px 10px">' + r.rollId + '</td>';
       h += '<td style="padding:5px 10px;font-weight:bold">' + r.sku + '</td>';
       h += '<td style="padding:5px 10px;color:var(--text2)">' + r.prodId + '</td>';
+      h += '<td style="padding:5px 10px;color:var(--text2)">' + (r.somOrder||'') + '</td>';
       h += '<td style="padding:5px 10px">' + r.lf.toLocaleString() + '</td>';
       h += '<td style="padding:5px 10px">' + r.wt.toLocaleString() + '</td>';
       h += '<td style="padding:5px 10px">' + r.widthNum + '</td>';
@@ -3618,8 +3784,17 @@ function renderIPGLoads() {
 function exportIPGLoad(idx) {
   const load    = _ipgLoads[idx];
   if (!load) return;
-  const loadId  = (document.getElementById('ipg-load-id')||{}).value||'';
-  if (!loadId) { showAlert('Please enter a Load ID before exporting','warning'); return; }
+  const field  = document.getElementById('ipg-load-id');
+  // Prefer the Shipment # captured on this load at drop time; fall back to the field,
+  // then prompt. No file is created without a reference number.
+  let loadId   = (load.loadId || (field && field.value) || '').trim();
+  if (!loadId) {
+    loadId = (window.prompt('Enter the Shipment # (Load ID / BOL) for this load before creating the import file:', '') || '').trim();
+    if (!loadId) { showAlert('Shipment # is required — no file was created.', 'warning'); return; }
+  }
+  load.loadId = loadId;        // remember it on this load
+  if (field && !field.value) field.value = loadId;
+  renderIPGLoads();            // refresh the header so it shows the now-set reference
 
   const totalRolls = load.rolls.length;
   const truck   = (load.carrier||'') + '_' + (load.carrierN||'');
@@ -4312,7 +4487,9 @@ function saveCycleCount() {
     rows: e.rows.map(r=>({sku:r.sku, bu:r.bu||'', productId:r.productId||r.sku, lot:r.lot||'', skid:r.skidId||'', dateRecd:r.dateRecd?new Date(r.dateRecd).toLocaleDateString('en-US'):'', pcs:r.pcs||0}))
   }));
   const id = 'CC-'+new Date().toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'2-digit'}).replace(/\//g,'')+'-'+Date.now().toString().slice(-4);
-  const session = { id, createdAt:Date.now(), status:'pending', countedBy:state.currentUser?state.currentUser.name:'Unknown', locations:window._ccLocations||[], entries, adjustments:[] };
+  const counterName = ((document.getElementById('cc-counter-name')||{}).value||'').trim();
+  window._ccCounterName = counterName; // remember for the next count's prefill
+  const session = { id, createdAt:Date.now(), status:'pending', countedBy:state.currentUser?state.currentUser.name:'Unknown', counterName:counterName, locations:window._ccLocations||[], entries, adjustments:[] };
   if (db) db.ref('cycleCount6021/'+id).set(session).catch(()=>{});
   window._ccLastSession = session;
   loadCCHistory();
@@ -4862,7 +5039,10 @@ function showCCTracker() {
         <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 CYCLE COUNT TRACKER — ${monthName.toUpperCase()}</div>
         <div style="font-size:11px;color:var(--text2);margin-top:4px">All locations must be counted at least once this month</div>
       </div>
-      <button class="btn" onclick="showCycleCountStart()" style="font-size:11px">← Back to Count</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn" onclick="exportCCTrackerReport()" style="font-size:11px;background:var(--accent);color:#fff;border-color:var(--accent)">🖨 Print Report</button>
+        <button class="btn" onclick="showCycleCountStart()" style="font-size:11px">← Back to Count</button>
+      </div>
     </div>
 
     <!-- Summary bar -->
@@ -4936,8 +5116,148 @@ function showCCTracker() {
       </div>
     </div>`;
 
+    // Cache what the printable report needs
+    window._ccTrackerReport = {
+      monthName,
+      generatedAt: Date.now(),
+      totalLocs: storageLocs.length,
+      countedLocs: countedLocs.slice(),
+      uncountedLocs: uncountedLocs.slice(),
+      pct,
+      passedWorkDays, totalWorkDays, remainWorkDays,
+      sessions
+    };
+
     panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
   });
+}
+
+// Build a print-preview report (count results + % totals) from the tracker data.
+function exportCCTrackerReport() {
+  const T = window._ccTrackerReport;
+  if (!T) { showAlert('Open the Cycle Count Tracker first.','warning'); return; }
+
+  const pctTxt = n => (isFinite(n) ? Math.round(n) : 0) + '%';
+
+  // Per-session results (accuracy + variance), mirroring the report screen's math.
+  let aggLines = 0, aggAccurate = 0, aggExp = 0, aggAdj = 0, aggNet = 0, aggLocs = 0;
+  const sessionRows = (T.sessions || []).map(s => {
+    const adjs   = s.adjustments || [];
+    const getAdj = loc => adjs.find(a => a.loc === loc);
+    const entries = s.entries || [];
+    let exp = 0, adjTot = 0, net = 0;
+    entries.forEach(e => {
+      const a = getAdj(e.loc);
+      const add = a ? (a.adjAdd||0) : 0, miss = a ? (a.adjMiss||0) : 0;
+      exp    += e.expectedPlt || 0;
+      adjTot += add + miss;
+      net    += add - miss;
+    });
+    const nonEmpty = [...new Set(entries.filter(e => !e.empty && e.sku).map(e => e.loc))];
+    const accurate = nonEmpty.filter(loc => {
+      const a = getAdj(loc);
+      return !a || ((a.adjAdd||0) === 0 && (a.adjMiss||0) === 0);
+    }).length;
+    const binPct   = nonEmpty.length > 0 ? (accurate / nonEmpty.length * 100) : 100;
+    const countPct = exp > 0 ? Math.max(0, (1 - adjTot/exp) * 100) : 100;
+    const locs     = (s.locations || []).length;
+    aggLines += nonEmpty.length; aggAccurate += accurate;
+    aggExp += exp; aggAdj += adjTot; aggNet += net; aggLocs += locs;
+    return {
+      id: s.id, date: new Date(s.createdAt).toLocaleDateString('en-US'),
+      by: s.counterName || s.countedBy || '', locs, binPct, countPct, net,
+      adjusted: (s.adjustments && s.adjustments.length) ? 'Yes' : '—'
+    };
+  });
+  const aggBin   = aggLines > 0 ? (aggAccurate / aggLines * 100) : 100;
+  const aggCount = aggExp   > 0 ? Math.max(0, (1 - aggAdj/aggExp) * 100) : 100;
+
+  const cards = [
+    ['Total Locations', T.totalLocs],
+    ['Counted', T.countedLocs.length],
+    ['Remaining', T.uncountedLocs.length],
+    ['% Complete', T.pct + '%'],
+    ['Bin Accuracy', pctTxt(aggBin)],
+    ['Count Accuracy', pctTxt(aggCount)]
+  ].map(c => '<div class="card"><div class="lbl">'+c[0]+'</div><div class="val">'+c[1]+'</div></div>').join('');
+
+  const sessionTable = sessionRows.length
+    ? `<table>
+        <thead><tr>
+          <th>Session</th><th>Date</th><th>Counter</th>
+          <th class="num">Locations</th><th class="num">Bin Acc.</th>
+          <th class="num">Count Acc.</th><th class="num">Net Var.</th><th>Adjusted</th>
+        </tr></thead>
+        <tbody>
+          ${sessionRows.map(r => `<tr>
+            <td>${r.id}</td><td>${r.date}</td><td>${r.by}</td>
+            <td class="num">${r.locs}</td>
+            <td class="num">${pctTxt(r.binPct)}</td>
+            <td class="num">${pctTxt(r.countPct)}</td>
+            <td class="num">${r.net>=0?'+':''}${r.net}</td>
+            <td>${r.adjusted}</td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot><tr>
+          <td colspan="3">TOTALS — ${sessionRows.length} session${sessionRows.length!==1?'s':''}</td>
+          <td class="num">${aggLocs}</td>
+          <td class="num">${pctTxt(aggBin)}</td>
+          <td class="num">${pctTxt(aggCount)}</td>
+          <td class="num">${aggNet>=0?'+':''}${aggNet}</td>
+          <td></td>
+        </tr></tfoot>
+      </table>`
+    : '<div class="muted" style="padding:10px 0">No cycle counts recorded this month.</div>';
+
+  const uncountedList = T.uncountedLocs.length
+    ? '<div class="loclist">' + T.uncountedLocs.map(l => '<span>'+l+'</span>').join('') + '</div>'
+    : '<div class="muted" style="padding:10px 0">All locations have been counted. ✔</div>';
+
+  const doc = `<!doctype html><html><head><meta charset="utf-8">
+    <title>Cycle Count Report — ${T.monthName}</title>
+    <style>
+      *{font-family:Arial,Helvetica,sans-serif;box-sizing:border-box}
+      body{margin:24px;color:#111}
+      h1{font-size:20px;margin:0 0 2px}
+      h2{font-size:14px;margin:18px 0 6px;border-bottom:2px solid #222;padding-bottom:3px}
+      .sub{color:#555;font-size:12px;margin-bottom:16px}
+      .cards{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+      .card{border:1px solid #bbb;border-radius:6px;padding:8px 14px;min-width:120px;flex:1}
+      .card .lbl{font-size:10px;color:#666;letter-spacing:1px;text-transform:uppercase}
+      .card .val{font-size:22px;font-weight:bold;margin-top:2px}
+      table{width:100%;border-collapse:collapse;margin:8px 0 18px;font-size:12px}
+      th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}
+      th{background:#eee}
+      td.num,th.num{text-align:right}
+      tfoot td{font-weight:bold;background:#f6f6f6}
+      .muted{color:#777}
+      .loclist{display:flex;flex-wrap:wrap;gap:4px}
+      .loclist span{border:1px solid #ddd;border-radius:4px;padding:2px 7px;font-size:11px}
+      .bar{height:12px;background:#e5e5e5;border-radius:6px;overflow:hidden;margin:6px 0 16px}
+      .bar > div{height:100%;background:#1a9e7a;width:${T.pct}%}
+      .toolbar{margin-bottom:14px}
+      .toolbar button{font:bold 12px Arial;padding:7px 16px;border:none;border-radius:6px;background:#1a9e7a;color:#fff;cursor:pointer}
+      @media print{.noprint{display:none}body{margin:.5in}}
+    </style></head><body>
+    <div class="toolbar noprint"><button onclick="window.print()">🖨 Print</button></div>
+    <h1>PickFlow 6021 — Cycle Count Report</h1>
+    <div class="sub">Greensboro · ${T.monthName} · Generated ${new Date(T.generatedAt).toLocaleString()}</div>
+    <div class="cards">${cards}</div>
+    <div class="bar"><div></div></div>
+    <div class="sub">${T.passedWorkDays}/${T.totalWorkDays} work days elapsed · ${T.remainWorkDays} remaining</div>
+    <h2>Count Sessions</h2>
+    ${sessionTable}
+    <h2>Not Yet Counted (${T.uncountedLocs.length})</h2>
+    ${uncountedList}
+    </body></html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) { showAlert('Allow pop-ups for this site to print the report.','warning'); return; }
+  w.document.open();
+  w.document.write(doc);
+  w.document.close();
+  w.focus();
+  setTimeout(() => { try { w.print(); } catch(e){} }, 350);
 }
 
 
@@ -5037,6 +5357,12 @@ function startCycleCount() {
       <button class="btn btn-sm" onclick="printCCCurrentSheet()" style="background:var(--accent2);color:#fff">🖨 Print Preview</button>
       <button class="btn btn-primary btn-sm" onclick="saveCycleCount()">💾 Save Count</button>
     </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:10px 14px">
+    <label style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent);text-transform:uppercase;white-space:nowrap">Counter Name</label>
+    <input id="cc-counter-name" type="text" placeholder="Who is physically counting?" value="${(window._ccCounterName||'').replace(/"/g,'&quot;')}"
+      style="flex:1;min-width:180px;padding:7px 12px;border:1.5px solid var(--accent);border-radius:7px;font-family:var(--font);font-size:13px;font-weight:700;background:var(--surface);color:var(--text);outline:none">
+    <span style="font-size:10px;color:var(--text2)">The person performing the physical count — not the creator.</span>
   </div>
   <div class="alert alert-info" style="margin-bottom:12px">
     Review the count sheet below. Click <strong>Save &amp; Export</strong> to save this session and download the Word document to take to the floor. You can re-open this session later to enter adjustments after the physical count.
@@ -5281,7 +5607,7 @@ function _renderCCPrintWindow(session) {
   <div class="page-header">
     <div>
       <h1>CYCLE COUNT — ${session.id}</h1>
-      <p>Date: ${dateStr} &nbsp;·&nbsp; ${session.locations.length} locations &nbsp;·&nbsp; ${grandTotalRolls} rolls</p>
+      <p>Date: ${dateStr} &nbsp;·&nbsp; ${session.locations.length} locations &nbsp;·&nbsp; ${grandTotalRolls} rolls${session.counterName?` &nbsp;·&nbsp; Counter: <strong>${session.counterName}</strong>`:''}</p>
     </div>
     <div class="right">
       <strong>PICKFLOW 6021</strong><br>
@@ -5354,7 +5680,7 @@ function showCCReport(session) {
   let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
     <div>
       <div style="font-size:14px;font-weight:bold;color:var(--accent);letter-spacing:1px">${session.id}</div>
-      <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · By ${session.countedBy}
+      <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · Created by ${session.countedBy}${session.counterName?` · <span style="color:var(--accent)">Counter: ${session.counterName}</span>`:''}
         ${hasAdj?` · <span style="color:var(--accent2)">✓ Adjustments entered</span>`:` · <span style="color:var(--warning)">Pending adjustments</span>`}
       </div>
     </div>
@@ -5487,7 +5813,7 @@ function showCCCountSheetView(sessionId) {
     let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <div>
         <div style="font-size:14px;font-weight:bold;color:var(--accent);letter-spacing:1px">${session.id} — COUNT SHEET</div>
-        <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · By ${session.countedBy} · ${session.locations.length} locations</div>
+        <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · Created by ${session.countedBy}${session.counterName?` · Counter: ${session.counterName}`:''} · ${session.locations.length} locations</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-sm" onclick="showCCReport(window._ccLastSession)">← Back to Summary</button>
@@ -5631,6 +5957,14 @@ function showCCAdjustments(sessionId) {
       <strong style="color:var(--accent)">ADD</strong> = extra rolls found (over expected) &nbsp;·&nbsp;
       <strong style="color:var(--danger)">MISSING</strong> = rolls not found (under expected) &nbsp;·&nbsp;
       Net = Add − Missing
+    </div>
+
+    <!-- Counter name (the person who physically counted — not the creator) -->
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:10px 14px">
+      <label style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent);text-transform:uppercase;white-space:nowrap">Counter Name</label>
+      <input id="adj-counter-name" type="text" placeholder="Who physically counted?" value="${(session.counterName||'').replace(/"/g,'&quot;')}"
+        style="flex:1;min-width:180px;padding:7px 12px;border:1.5px solid var(--accent);border-radius:7px;font-family:var(--font);font-size:13px;font-weight:700;background:var(--surface);color:var(--text);outline:none">
+      <span style="font-size:10px;color:var(--text2)">Saved with the adjustments. Created by: ${session.countedBy||'—'}</span>
     </div>
 
     <!-- Summary bar -->
@@ -5818,6 +6152,7 @@ function addAdjLocation() {
   input.value = '';
   renderAdjTable();
   updateAdjRow();
+  // refresh datalist so the just-added loc drops out of the options
   const dl = document.getElementById('adj-loc-options');
   if (dl) dl.innerHTML = getAdjLocationOptions().map(l=>'<option value="'+l+'">').join('');
   const newIdx = rows.length - 1;
@@ -5919,10 +6254,17 @@ function saveAdjustments() {
     return { loc:r.loc, adjAdd:add, adjMiss:miss, notes };
   }).filter(a => a.adjAdd||a.adjMiss||a.notes);
 
-  db.ref('cycleCount6021/'+session.id+'/adjustments').set(adjustments)
+  const counterName = ((document.getElementById('adj-counter-name')||{}).value||'').trim();
+
+  const updates = {};
+  updates['cycleCount6021/'+session.id+'/adjustments'] = adjustments;
+  updates['cycleCount6021/'+session.id+'/counterName'] = counterName;
+
+  db.ref().update(updates)
     .then(() => {
       showAlert('✓ Adjustments saved.','success');
       session.adjustments = adjustments;
+      session.counterName = counterName;
       window._ccLastSession = session;
     })
     .catch(err => showAlert('Error: '+err.message,'danger'));
@@ -6352,6 +6694,18 @@ window.addEventListener('load', function() {
   buildLoginScreen();
   localStorage.removeItem('pickflow_state');
   listenToFirebase();
+
+  // ── TEST ENVIRONMENT BANNER ──────────────────────────────────────
+  // Only shows when DB_ENV === 'test'. Driven by the switch at the top
+  // of the file, so promoting code never requires editing this by hand.
+  if (DB_ENV === 'test') {
+    document.title = '[TEST] ' + document.title;
+    var b = document.createElement('div');
+    b.textContent = 'TEST ENVIRONMENT';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#d97706;color:#fff;text-align:center;font:bold 13px monospace;letter-spacing:3px;padding:6px;z-index:2147483647';
+    document.body.appendChild(b);
+    document.body.style.paddingTop = '30px';   // push app down so banner doesn't cover the header
+  }
 });
 
 </script>
