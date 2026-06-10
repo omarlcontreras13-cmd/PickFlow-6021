@@ -5599,8 +5599,17 @@ function showCCAdjustments(sessionId) {
         adjAdd:  saved.adjAdd  || 0,
         adjMiss: saved.adjMiss || 0,
         notes:   saved.notes   || '',
-        isEmpty: entries.length === 0 || entries[0].empty
+        isEmpty: entries.length === 0 || entries[0].empty,
+        added:   false
       });
+    });
+    // Include any location that has a saved adjustment but wasn't part of the
+    // original count — e.g. inventory found in a location expected to be empty.
+    adjs.forEach(a => {
+      if (a && a.loc && !rows.some(r => r.loc === a.loc)) {
+        rows.push({ loc:a.loc, expRolls:0, adjAdd:a.adjAdd||0, adjMiss:a.adjMiss||0,
+          notes:a.notes||'', isEmpty:true, added:true });
+      }
     });
 
     const totalExp = rows.reduce((s,r) => s+(r.expRolls||0), 0);
@@ -5658,6 +5667,16 @@ function showCCAdjustments(sessionId) {
       </div>
     </div>
 
+    <!-- Add a location not in the count (e.g. inventory found in an empty location) -->
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <span style="font-size:11px;color:var(--text2)">Found rolls in an empty / uncounted location?</span>
+      <input list="adj-loc-options" id="adj-add-loc" placeholder="Location code (e.g. 23-02-09)"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();addAdjLocation();}"
+        style="padding:6px 10px;border:1.5px solid var(--accent);border-radius:6px;font-family:var(--font);font-size:12px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:200px;text-transform:uppercase">
+      <datalist id="adj-loc-options">${getAdjLocationOptions().map(l=>`<option value="${l}">`).join('')}</datalist>
+      <button class="btn btn-sm" onclick="addAdjLocation()" style="background:rgba(26,158,122,0.1);color:var(--accent2);border-color:var(--accent2)">+ Add Location</button>
+    </div>
+
     <!-- Adjustments table — one row per LOCATION -->
     <div style="overflow-x:auto">
     <table class="data-table" style="font-size:12px;border-collapse:collapse;width:100%">
@@ -5674,39 +5693,7 @@ function showCCAdjustments(sessionId) {
           <th style="padding:8px 10px;text-align:left">NOTES</th>
         </tr>
       </thead>
-      <tbody id="adj-tbody">`;
-
-    const inputStyle = 'width:65px;text-align:center;border:1.5px solid;border-radius:5px;padding:5px 6px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;-webkit-appearance:none;-moz-appearance:textfield;appearance:none;';
-
-    rows.forEach((r, idx) => {
-      if (r.isEmpty) return;
-      html += `
-        <tr style="border-bottom:1px solid var(--border)">
-          <td style="padding:7px 10px;font-weight:bold;color:var(--accent);white-space:nowrap">${r.loc}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:bold">${r.expRolls}</td>
-          <td style="padding:7px 10px;text-align:center">
-            <input id="adj-add-${idx}" type="text" inputmode="numeric" pattern="[0-9]*" value="${r.adjAdd||0}"
-              oninput="updateAdjRow(${idx},${r.expRolls})"
-              style="${inputStyle}background:rgba(26,158,122,0.06);border-color:var(--accent2);">
-          </td>
-          <td style="padding:7px 10px;text-align:center">
-            <input id="adj-miss-${idx}" type="text" inputmode="numeric" pattern="[0-9]*" value="${r.adjMiss||0}"
-              oninput="updateAdjRow(${idx},${r.expRolls})"
-              style="${inputStyle}background:rgba(224,62,62,0.06);border-color:var(--danger);">
-          </td>
-          <td id="adj-net-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold">—</td>
-          <td id="adj-act-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold;color:var(--accent)">${r.expRolls}</td>
-          <td id="adj-acc-${idx}" style="padding:7px 10px;text-align:center;font-size:11px;font-weight:bold;color:var(--accent2)">✓ ACCURATE</td>
-          <td id="adj-cacc-${idx}" style="padding:7px 10px;text-align:center;font-weight:bold;color:var(--accent2)">100%</td>
-          <td style="padding:7px 10px">
-            <input id="adj-notes-${idx}" type="text" value="${r.notes||''}" placeholder="Notes..."
-              style="width:160px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">
-          </td>
-        </tr>`;
-    });
-
-    html += `
-      </tbody>
+      <tbody id="adj-tbody"></tbody>
       <tfoot>
         <tr style="background:var(--surface2);font-weight:bold;font-size:12px">
           <td style="padding:8px 10px">GRAND TOTAL</td>
@@ -5727,6 +5714,7 @@ function showCCAdjustments(sessionId) {
     window._ccLastSession  = session;
     window._ccAdjSession   = session;
     window._ccAdjRows      = rows;
+    renderAdjTable();
     updateAdjRow();
   };
 
@@ -5741,17 +5729,124 @@ function showCCAdjustments(sessionId) {
   }
 }
 
+// Locations offered in the "Add Location" datalist: every known warehouse
+// location plus anything currently in inventory or this session.
+function getAdjLocationOptions() {
+  const set = new Set();
+  (window._ccHistoricLocs || []).forEach(l => l && set.add(l));
+  (state.inventory || []).forEach(r => { if (r.location) set.add(r.location); });
+  const sess = window._ccAdjSession;
+  if (sess && sess.locations) sess.locations.forEach(l => l && set.add(l));
+  (window._ccAdjRows || []).forEach(r => { if (r.loc) set.delete(r.loc); }); // hide ones already in the grid
+  return [...set].sort();
+}
+
+// Read current input values from the DOM back into _ccAdjRows so a re-render
+// (e.g. after adding a location) doesn't lose what the user already typed.
+function syncAdjInputs() {
+  const rows = window._ccAdjRows || [];
+  rows.forEach((r, idx) => {
+    const a = document.getElementById('adj-add-'+idx);
+    const m = document.getElementById('adj-miss-'+idx);
+    const n = document.getElementById('adj-notes-'+idx);
+    if (a) r.adjAdd  = parseInt(a.value)  || 0;
+    if (m) r.adjMiss = parseInt(m.value)  || 0;
+    if (n) r.notes   = n.value || '';
+  });
+}
+
+// Build the adjustments table body from _ccAdjRows. Every row (including empty
+// locations and added locations) is rendered and uses its FULL-array index for
+// input IDs, so render / updateAdjRow / saveAdjustments stay in lock-step.
+function renderAdjTable() {
+  const tbody = document.getElementById('adj-tbody');
+  if (!tbody) return;
+  const rows = window._ccAdjRows || [];
+  const inputStyle = 'width:65px;text-align:center;border:1.5px solid;border-radius:5px;padding:5px 6px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;-webkit-appearance:none;-moz-appearance:textfield;appearance:none;';
+  let html = '';
+  rows.forEach((r, idx) => {
+    const isZero   = (r.expRolls || 0) === 0;
+    const emptyTag = isZero ? '<span style="font-size:9px;font-weight:700;color:var(--text2);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;letter-spacing:1px">EMPTY</span>' : '';
+    // MISSING can't apply to a location that expected 0 rolls — disable it there.
+    const missAttrs = isZero ? 'value="0" disabled title="No rolls expected here"' : 'value="'+(r.adjMiss||0)+'"';
+    const missStyle = isZero ? inputStyle+'background:var(--surface2);border-color:var(--border);opacity:.5;cursor:not-allowed;' : inputStyle+'background:rgba(224,62,62,0.06);border-color:var(--danger);';
+    const removeBtn = r.added ? '<button onclick="removeAdjLocation('+idx+')" title="Remove this added location" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:2px 4px;margin-left:4px">✕</button>' : '';
+    html += `
+      <tr style="border-bottom:1px solid var(--border)${r.added?';background:rgba(26,158,122,0.04)':''}">
+        <td style="padding:7px 10px;font-weight:bold;color:var(--accent);white-space:nowrap">${r.loc}${emptyTag}</td>
+        <td style="padding:7px 10px;text-align:right;font-weight:bold">${r.expRolls||0}</td>
+        <td style="padding:7px 10px;text-align:center">
+          <input id="adj-add-${idx}" type="text" inputmode="numeric" pattern="[0-9]*" value="${r.adjAdd||0}"
+            oninput="updateAdjRow()"
+            style="${inputStyle}background:rgba(26,158,122,0.06);border-color:var(--accent2);">
+        </td>
+        <td style="padding:7px 10px;text-align:center">
+          <input id="adj-miss-${idx}" type="text" inputmode="numeric" pattern="[0-9]*" ${missAttrs}
+            oninput="updateAdjRow()"
+            style="${missStyle}">
+        </td>
+        <td id="adj-net-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold">—</td>
+        <td id="adj-act-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold;color:var(--accent)">${r.expRolls||0}</td>
+        <td id="adj-acc-${idx}" style="padding:7px 10px;text-align:center;font-size:11px;font-weight:bold;color:var(--accent2)">✓ ACCURATE</td>
+        <td id="adj-cacc-${idx}" style="padding:7px 10px;text-align:center;font-weight:bold;color:var(--accent2)">100%</td>
+        <td style="padding:7px 10px;white-space:nowrap">
+          <input id="adj-notes-${idx}" type="text" value="${(r.notes||'').replace(/"/g,'&quot;')}" placeholder="Notes..."
+            style="width:150px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">${removeBtn}
+        </td>
+      </tr>`;
+  });
+  tbody.innerHTML = html;
+}
+
+// Add a location (typically empty / uncounted) so found inventory can be recorded.
+function addAdjLocation() {
+  const input = document.getElementById('adj-add-loc');
+  if (!input) return;
+  const loc = (input.value || '').trim().toUpperCase();
+  if (!loc) { showAlert('Enter a location code first.','warning'); return; }
+  syncAdjInputs();
+  const rows = window._ccAdjRows || (window._ccAdjRows = []);
+  const existingIdx = rows.findIndex(r => r.loc === loc);
+  if (existingIdx !== -1) {
+    input.value = '';
+    showAlert('Location ' + loc + ' is already in the grid.','warning');
+    const el = document.getElementById('adj-add-'+existingIdx);
+    if (el) { el.focus(); el.select(); }
+    return;
+  }
+  rows.push({ loc, expRolls:0, adjAdd:0, adjMiss:0, notes:'', isEmpty:true, added:true });
+  input.value = '';
+  renderAdjTable();
+  updateAdjRow();
+  const dl = document.getElementById('adj-loc-options');
+  if (dl) dl.innerHTML = getAdjLocationOptions().map(l=>'<option value="'+l+'">').join('');
+  const newIdx = rows.length - 1;
+  const el = document.getElementById('adj-add-'+newIdx);
+  if (el) { el.focus(); el.select(); }
+  showAlert('✓ Added ' + loc + ' — enter the rolls found.','success');
+}
+
+function removeAdjLocation(idx) {
+  const rows = window._ccAdjRows || [];
+  if (!rows[idx] || !rows[idx].added) return; // only added locations can be removed
+  syncAdjInputs();
+  rows.splice(idx, 1);
+  renderAdjTable();
+  updateAdjRow();
+  const dl = document.getElementById('adj-loc-options');
+  if (dl) dl.innerHTML = getAdjLocationOptions().map(l=>'<option value="'+l+'">').join('');
+}
+
 
 
 
 
 function updateAdjRow(idx, expRolls) {
   const rows = window._ccAdjRows || [];
-  const dataRows = rows.filter(r => !r.isEmpty);
 
-  let totalAdd=0, totalMiss=0, totalExp=0, totalAct=0, accurateCount=0;
+  let totalAdd=0, totalMiss=0, totalExp=0, totalAct=0, accurateCount=0, lineCount=0;
 
-  dataRows.forEach((r, i) => {
+  rows.forEach((r, i) => {
     const addEl  = document.getElementById('adj-add-'+i);
     const missEl = document.getElementById('adj-miss-'+i);
     if (!addEl || !missEl) return;
@@ -5767,9 +5862,14 @@ function updateAdjRow(idx, expRolls) {
     totalMiss += miss;
     totalExp  += exp;
     totalAct  += act;
+    lineCount++;
     if (isAccurate) accurateCount++;
 
-    const countPct = exp > 0 ? Math.max(0, Math.round((1 - (add + miss)/exp)*100)) : 100;
+    // Count accuracy: for expected>0 use the usual formula; for an empty location,
+    // finding rolls (add>0) is a 0% count, otherwise it's 100%.
+    const countPct = exp > 0
+      ? Math.max(0, Math.round((1 - (add + miss)/exp)*100))
+      : (add > 0 ? 0 : 100);
     const netEl    = document.getElementById('adj-net-'+i);
     const actEl    = document.getElementById('adj-act-'+i);
     const accEl    = document.getElementById('adj-acc-'+i);
@@ -5782,7 +5882,7 @@ function updateAdjRow(idx, expRolls) {
   });
 
   const totalNet = totalAdd - totalMiss;
-  const binPct   = dataRows.length > 0 ? Math.round(accurateCount/dataRows.length*100) : 100;
+  const binPct   = lineCount > 0 ? Math.round(accurateCount/lineCount*100) : 100;
   const caccPct  = totalExp > 0 ? Math.max(0, Math.round((1 - (totalAdd + totalMiss)/totalExp)*100)) : 100;
   const caccColor= caccPct>=100?'var(--accent2)':caccPct>=90?'var(--warning)':'var(--danger)';
   const binColor = binPct>=100?'var(--accent2)':binPct>=90?'var(--warning)':'var(--danger)';
@@ -5794,7 +5894,7 @@ function updateAdjRow(idx, expRolls) {
   set('rt-miss', totalMiss);                                         setColor('rt-miss', totalMiss>0?'var(--danger)':'var(--text2)');
   set('rt-net',  (totalNet>=0?'+':'')+totalNet);                     setColor('rt-net',  totalNet===0?'var(--text2)':totalNet>0?'var(--accent2)':'var(--danger)');
   set('rt-act',  totalAct);
-  set('rt-acc',  accurateCount+'/'+dataRows.length+' ('+binPct+'%)'); setColor('rt-acc',  binColor);
+  set('rt-acc',  accurateCount+'/'+lineCount+' ('+binPct+'%)');      setColor('rt-acc',  binColor);
   set('rt-cacc', caccPct+'%');                                        setColor('rt-cacc', caccColor);
 
   // Grand total row
@@ -5811,7 +5911,7 @@ function saveAdjustments() {
   const session = window._ccAdjSession;
   if (!session || !db) { showAlert('Nothing to save.','warning'); return; }
 
-  const rows    = (window._ccAdjRows||[]).filter(r=>!r.isEmpty);
+  const rows = window._ccAdjRows || [];
   const adjustments = rows.map((r, i) => {
     const add   = parseInt(document.getElementById('adj-add-'+i)?.value)  || 0;
     const miss  = parseInt(document.getElementById('adj-miss-'+i)?.value) || 0;
