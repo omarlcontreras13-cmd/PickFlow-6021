@@ -250,6 +250,7 @@ const BU_MAP = {
   '729': 'CATALYST',
   '312': 'CATALYST',
   'ATL': 'ATL UPM',
+  'MAX': 'MAXXON',
 };
 
 const BU_SEQ_DEFAULT = {
@@ -263,6 +264,7 @@ const BU_SEQ_DEFAULT = {
   '727':'FIFO','730':'FIFO','IPG':'FIFO','732':'FIFO','400':'FIFO','402':'FIFO',
   '821':'FIFO','450':'FIFO','403':'FIFO','401':'FIFO','729':'FIFO','312':'FIFO',
   'ATL':'FIFO',
+  'MAX':'FIFO',
 };
 
 const BU_ZMO_DEFAULT = {
@@ -1196,7 +1198,20 @@ function buildStatCards() {
     ? state.inventory.filter(r=>r.lot && state.dirData[r.lot] && state.dirData[r.lot].zmo).length
     : 0;
 
-  let h = '<div class="stats-grid" style="grid-template-columns:repeat(6,1fr)">';
+  // Today's Orders: open pick tickets dated today. Resets to 0 as tickets are archived and starts fresh each date.
+  const todayKey = new Date().toLocaleDateString();
+  const ticketDayKey = (t) => {
+    if (t.ticketDate) { const d = new Date(t.ticketDate.length===10 ? t.ticketDate+'T00:00:00' : t.ticketDate); if (!isNaN(d)) return d.toLocaleDateString(); }
+    return t.created ? new Date(t.created).toLocaleDateString() : '';
+  };
+  const ordersToday = state.tickets.filter(t => ticketDayKey(t) === todayKey).length;
+
+  let h = '<div class="stats-grid" style="grid-template-columns:repeat(7,1fr)">';
+  h += '<div class="stat-card" title="Open pick tickets dated today — resets to 0 once archived and starts fresh each date">';
+  h += '<div class="stat-label">Today\'s Orders</div>';
+  h += '<div class="stat-value" style="color:var(--accent)">'+ordersToday+'</div>';
+  h += '<div style="font-size:10px;color:var(--text2);margin-top:2px">'+todayKey+'</div>';
+  h += '</div>';
   h += '<div class="stat-card"><div class="stat-label">Total Rolls</div><div class="stat-value">'+state.inventory.length.toLocaleString()+'</div></div>';
   h += '<div class="stat-card"><div class="stat-label">Customers</div><div class="stat-value green">'+customers+'</div></div>';
   h += '<div class="stat-card"><div class="stat-label">Locations</div><div class="stat-value">'+locations+'</div></div>';
@@ -6389,35 +6404,58 @@ function saveEodSettings() {
   showAlert('✓ Settings saved.','success');
 }
 
-function archiveAll(silent=false) {
-  if (!isAdmin()) return;
+function archiveAll(silent=false, isAuto=false) {
+  // Manual archiving stays admin-only. The automated EOD job is a system action
+  // and must run no matter which user happens to have the app open at the time.
+  if (!isAuto && !isAdmin()) return;
   const count=state.tickets.length;
-  state.tickets.forEach(t=>{ t.archivedAt=Date.now(); t.archivedBy=state.currentUser?state.currentUser.name:'EOD Auto'; state.archivedTickets.push(t); });
+  state.tickets.forEach(t=>{ t.archivedAt=Date.now(); t.archivedBy=isAuto?'EOD Auto':(state.currentUser?state.currentUser.name:'EOD Auto'); state.archivedTickets.push(t); });
   state.tickets=[];
   state.activeTicket=null;
   const cutoff=Date.now()-(90*24*60*60*1000);
   state.archivedTickets=state.archivedTickets.filter(t=>t.archivedAt>cutoff);
-  saveTickets(); saveArchive(); updateTicketList(); showDashboard();
+  saveTickets(); saveArchive(); updateTicketList();
+  // Don't yank a user off their current screen during an automatic archive.
+  if (!isAuto || state.currentView==='dashboard') showDashboard();
   if (!silent) showAlert(`✓ ${count} tickets archived.`,'success');
 }
 
 // ─── EOD TIMER ────────────────────────────────────────────────────────────────
-let eodFired=false;
+// Fires once per Eastern day at or after the configured EOD time, on whichever
+// logged-in client is open. A per-day Firebase lock (eodLock) guarantees a single
+// archive across all open clients. Using ">= the scheduled time" (instead of an
+// exact-minute match) makes it resilient to background-tab throttling, a sleeping
+// machine, or a client that opens shortly after the EOD minute — it catches up the
+// first time any client sees the clock at/after the time that day.
+let eodLastKey = null;
 function getEasternTime() { return new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'})); }
+function eodCheck() {
+  if (!state.eodEnabled || !state.currentUser || !db) return;
+  const et = getEasternTime();
+  const parts = (state.eodTime||'17:00').split(':').map(Number);
+  const h = parts[0], m = parts[1];
+  if (isNaN(h) || isNaN(m)) return;
+  const nowMin = et.getHours()*60 + et.getMinutes();
+  const schedMin = h*60 + m;
+  if (nowMin < schedMin) return;                       // not yet EOD today
+  const dateKey = et.toLocaleDateString().replace(/\//g,'-');
+  const lockKey = dateKey + '_' + (state.eodTime||'17:00').replace(':','-');
+  if (eodLastKey === lockKey) return;                  // already handled this session today
+  eodLastKey = lockKey;                                // optimistic guard before async call
+  db.ref('6021/eodLock/'+lockKey).transaction(cur => (cur===null ? true : undefined))
+    .then(r => {
+      if (r.committed && r.snapshot && r.snapshot.val()===true) {
+        const n = state.tickets.length;
+        if (n) { archiveAll(true, true); showAlert('EOD: '+n+' open tickets auto-archived.','success'); }
+      }
+    })
+    .catch(() => { eodLastKey = null; });               // allow retry after a transient error
+}
 function setupEodTimer() {
-  if (eodTimer) clearInterval(eodTimer); eodFired=false;
-  eodTimer=setInterval(()=>{
-    if (!state.eodEnabled||!state.currentUser) return;
-    const et=getEasternTime();
-    const [h,m]=state.eodTime.split(':').map(Number);
-    if (et.getHours()===h&&et.getMinutes()===m&&et.getSeconds()<59&&!eodFired) {
-      eodFired=true;
-      db.ref('6021/eodLock/'+et.toLocaleDateString().replace(/\//g,'-')+'_'+state.eodTime.replace(':','-')).transaction(cur=>{
-        if (cur===null) return true;
-      }).then(r=>{ if (r.committed) { archiveAll(true); showAlert('EOD: Tickets auto-archived.','success'); } }).catch(()=>{});
-    }
-    if (!(et.getHours()===h&&et.getMinutes()===m)) eodFired=false;
-  },10000);
+  if (eodTimer) clearInterval(eodTimer);
+  eodLastKey = null;
+  eodTimer = setInterval(eodCheck, 20000);
+  eodCheck();                                           // run immediately (catch up if opened after EOD)
 }
 
 // ─── UTILS ────────────────────────────────────────────────────────────────────
