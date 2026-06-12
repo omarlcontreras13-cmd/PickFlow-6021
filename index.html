@@ -333,6 +333,14 @@ function inventoryAccuracyStats() {
   return { total, ghost, cc, off: ghost + cc, pct };
 }
 
+// Unit of measure noun. MAXXON inventory is counted in skids; everyone else in rolls.
+// (Weight is always tons, regardless of unit.) ctx may be a customer/BU string or a roll object.
+function unitNoun(ctx) {
+  const cust = (ctx && typeof ctx === 'object') ? (ctx.customer || ctx.bu || '') : (ctx || '');
+  return /MAXXON/i.test(cust) ? 'skids' : 'rolls';
+}
+function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperCase() + u.slice(1); }
+
 const USERS = [
   { id:'Ocontreras', name:'Omar Contreras', password:null, role:'admin' },
 ];
@@ -1285,7 +1293,7 @@ function showDashboard() {
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.destination||''}${t.appt?' · '+t.appt:''} · ${t.clerk||''}</div>
               </div>
               <div style="text-align:right">
-                <div style="font-size:12px;color:var(--accent2);font-weight:bold">${(t.selectedRolls||[]).length} rolls</div>
+                <div style="font-size:12px;color:var(--accent2);font-weight:bold">${(t.selectedRolls||[]).length} ${unitNoun(t.customer)}</div>
                 <div style="font-size:11px;color:var(--text2)">${new Date(t.created).toLocaleDateString()}</div>
               </div>
             </div>
@@ -1431,7 +1439,7 @@ function updateTicketList() {
     listHtml += '<div class="ticket-card ' + active + '" data-tid="' + t.id + '" onclick="handleTicketClick(this)">';
     listHtml += '<div class="ticket-id">' + t.id + '</div>';
     listHtml += '<div style="font-size:11px;color:var(--text);margin-top:2px">' + (t.refNum||'—') + ' · ' + (t.customer||'—') + '</div>';
-    listHtml += '<div style="font-size:10px;color:var(--text2)">' + rolls + ' rolls · ' + (t.clerk||'') + '</div>';
+    listHtml += '<div style="font-size:10px;color:var(--text2)">' + rolls + ' ' + unitNoun(t.customer) + ' · ' + (t.clerk||'') + '</div>';
     listHtml += '</div>';
   });
   list.innerHTML = listHtml;
@@ -1439,7 +1447,7 @@ function updateTicketList() {
 
 function renderSkuLineSectionTitle(ticket, totalRolls, totalWt, totalTons, totalQty) {
   const pct = totalQty > 0 ? Math.min(100, Math.round(totalRolls/totalQty*100)) : null;
-  return '<div class="section-title">SELECTED ROLLS (' + totalRolls +
+  return '<div class="section-title">SELECTED ' + unitNoun(ticket.customer).toUpperCase() + ' (' + totalRolls +
     (totalQty>0 ? ' / ' + totalQty + ' QTY' : '') + ') · ' +
     totalWt.toLocaleString() + ' lbs · ' + totalTons.toFixed(1) + ' tons</div>';
 }
@@ -1470,7 +1478,7 @@ function renderSkuLinesSections(ticket, id) {
     html += '<div style="display:flex;align-items:center;gap:16px;padding:10px 14px;border-bottom:1px solid var(--border)">';
     html += '<div style="font-size:13px;font-weight:bold;color:var(--accent)">' + (line.sku||'No SKU') + '</div>';
     if (line.bu) html += '<div style="font-size:11px;color:var(--text2)">BU: <strong>' + line.bu + '</strong></div>';
-    html += '<div style="font-size:11px;color:'+color+'"><strong>' + lineRolls.length + '</strong>' + (line.qty>0?' / '+line.qty+' rolls':' rolls') + '</div>';
+    html += '<div style="font-size:11px;color:'+color+'"><strong>' + lineRolls.length + '</strong>' + (line.qty>0?' / '+line.qty+' '+unitNoun(ticket.customer):' '+unitNoun(ticket.customer)) + '</div>';
     html += '<div style="font-size:11px;color:var(--text2)">' + lineWt.toLocaleString() + ' lbs · ' + lineTons.toFixed(1) + ' tons</div>';
     html += '</div>';
 
@@ -1699,7 +1707,7 @@ function viewTicket(id) {
   // Grand total
   if (totalRolls>0) {
     h += '<div style="text-align:right;padding:8px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-weight:bold;font-size:12px;margin-top:8px">';
-    h += 'GRAND TOTAL: '+totalRolls+' rolls · '+totalWt.toLocaleString()+' lbs · '+totalTons.toFixed(1)+' tons';
+    h += 'GRAND TOTAL: '+totalRolls+' '+unitNoun(ticket.customer)+' · '+totalWt.toLocaleString()+' lbs · '+totalTons.toFixed(1)+' tons';
     h += '</div>';
   }
 
@@ -1720,13 +1728,13 @@ function showSkuRollSelector(id) {
   if (ticket.skuLines.length===1) {
     openGroupedSelector(id, 0);
   } else {
-    let ph = '<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>📋 SELECT ROLLS — CHOOSE SKU LINE</h2><div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">';
+    let ph = '<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>📋 SELECT '+unitNoun(ticket.customer).toUpperCase()+' — CHOOSE SKU LINE</h2><div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">';
     ticket.skuLines.forEach((line,li) => {
       const cnt = (line.selectedRolls||[]).length;
       const col = cnt>=(line.qty||0)&&line.qty>0 ? 'var(--accent2)' : 'var(--warning)';
       ph += '<button class="btn" data-id="'+id+'" data-li="'+li+'" onclick="openGroupedSelector(this.dataset.id,parseInt(this.dataset.li))" style="justify-content:space-between;padding:12px 16px">';
       ph += '<span style="font-weight:bold;color:var(--accent)">'+(line.sku||'No SKU')+(line.bu?' · '+line.bu:'')+'</span>';
-      ph += '<span style="color:'+col+'">'+cnt+(line.qty>0?' / '+line.qty:'')+ ' rolls</span></button>';
+      ph += '<span style="color:'+col+'">'+cnt+(line.qty>0?' / '+line.qty:'')+ ' '+unitNoun(ticket.customer)+'</span></button>';
     });
     ph += '</div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button></div></div></div>';
     document.getElementById('modal-container').innerHTML = ph;
@@ -1758,6 +1766,8 @@ function openGroupedSelector(id, lineIdx) {
   const group = getCustomerGroup(ticket.customer, line.bu);
   const dateLabel = group==='FEFO' ? 'Expiration Date' : 'Receipt Date';
   const targetQty = line.qty || 0;
+  const UNIT = unitNoun(ticket.customer);
+  const UNIT_CAP = unitNounCap(ticket.customer);
 
   // Filter inventory by customer + BU + SKU + ZMO (if ZMO entered)
   const lineZmoClean = line.zmo ? line.zmo.toString().trim().toUpperCase() : '';
@@ -1826,8 +1836,8 @@ function openGroupedSelector(id, lineIdx) {
   h += '<div class="modal" style="width:980px;max-width:97vw">';
   h += '<h2>📋 '+(line.sku||'All SKUs')+(line.bu?' · '+line.bu:'')+' — '+group+' by '+dateLabel+'</h2>';
   h += '<div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">';
-  h += '<span style="font-size:11px;color:var(--text2)">'+rolls.length+' rolls in '+dateKeys.length+' date group'+(dateKeys.length!==1?'s':'')+'</span>';
-  if (targetQty>0) h += '<span style="font-size:12px;font-weight:bold;color:var(--accent)">Target: '+targetQty+' rolls</span>';
+  h += '<span style="font-size:11px;color:var(--text2)">'+rolls.length+' '+UNIT+' in '+dateKeys.length+' date group'+(dateKeys.length!==1?'s':'')+'</span>';
+  if (targetQty>0) h += '<span style="font-size:12px;font-weight:bold;color:var(--accent)">Target: '+targetQty+' '+UNIT+'</span>';
   h += '<div style="flex:1"></div>';
   h += '<span id="roll-sel-count" style="font-size:12px;font-weight:bold;color:var(--accent2)">'+selectedSkids.size+' selected</span>';
   h += '<button class="btn btn-sm" onclick="clearAllRollSel()">Clear All</button>';
@@ -1870,7 +1880,7 @@ function openGroupedSelector(id, lineIdx) {
     // Show distinct ZMO values for this date group
     const grpZmos = [...new Set(gr.map(r=>r.zmo||(r.lot&&state.dirData[r.lot]?state.dirData[r.lot].zmo:'')||'').filter(Boolean))];
     if (grpZmos.length) h += '<span style="font-size:11px;font-weight:bold;color:var(--accent2)">ZMO: '+grpZmos.join(', ')+'</span>';
-    h += '<span style="font-size:11px;color:var(--text2)">'+gr.length+' rolls &middot; '+gWt.toLocaleString()+' lbs &middot; '+gTons.toFixed(1)+' tons</span>';
+    h += '<span style="font-size:11px;color:var(--text2)">'+gr.length+' '+UNIT+' &middot; '+gWt.toLocaleString()+' lbs &middot; '+gTons.toFixed(1)+' tons</span>';
     h += '<div style="flex:1"></div>';
     h += '<button class="btn btn-sm" style="font-size:10px" data-gi="'+gi+'" onclick="event.stopPropagation();selGrp(+this.dataset.gi)">Select All</button>';
     h += '<button class="btn btn-sm btn-danger" style="font-size:10px" data-gi="'+gi+'" onclick="event.stopPropagation();clrGrp(+this.dataset.gi)">Clear</button>';
@@ -1883,12 +1893,12 @@ function openGroupedSelector(id, lineIdx) {
       const cTons = ch.reduce((s,r)=>s+(r.tons||0),0);
       const cAllChk = ch.every(r=>window._rollSelected.has(String(r.skidId)));
       const cOpen = false; // all collapsed on initial view
-      const cLabel = chunks.length>1 ? 'Rolls '+(gi*0+ci*CHUNK+1)+'&#8211;'+(ci*CHUNK+ch.length) : '';
+      const cLabel = chunks.length>1 ? UNIT_CAP+' '+(gi*0+ci*CHUNK+1)+'&#8211;'+(ci*CHUNK+ch.length) : '';
       h += '<div style="border:1px solid var(--border);border-radius:6px;margin-bottom:6px;overflow:hidden">';
       h += '<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--bg,var(--surface2));cursor:pointer" data-cid="'+cId+'" onclick="toggleChunk(this.dataset.cid)">';
       h += '<span id="carr-'+cId+'" style="font-size:10px;color:var(--text2)">'+(cOpen?'&#9660;':'&#9654;')+'</span>';
       if (cLabel) h += '<span style="font-weight:bold;font-size:12px;color:var(--accent2)">'+cLabel+'</span>';
-      h += '<span style="font-size:11px;color:var(--text2)">'+ch.length+' rolls &middot; '+cWt.toLocaleString()+' lbs &middot; '+cTons.toFixed(1)+' tons</span>';
+      h += '<span style="font-size:11px;color:var(--text2)">'+ch.length+' '+UNIT+' &middot; '+cWt.toLocaleString()+' lbs &middot; '+cTons.toFixed(1)+' tons</span>';
       h += '<div style="flex:1"></div>';
       h += '<button class="btn btn-sm" style="font-size:10px" data-cid="'+cId+'" onclick="event.stopPropagation();selChunk(this.dataset.cid)">Select All</button>';
       h += '<button class="btn btn-sm btn-danger" style="font-size:10px" data-cid="'+cId+'" onclick="event.stopPropagation();clrChunk(this.dataset.cid)">Clear</button>';
@@ -2060,10 +2070,11 @@ function updateRollSelCount() {
   const ticket = state.tickets.find(t=>t.id===window._rollTicketId);
   const line = ticket&&ticket.skuLines ? ticket.skuLines[window._rollLineIdx] : null;
   const target = line ? (line.qty||0) : 0;
+  const UNIT = unitNoun(ticket ? ticket.customer : '');
   const msg = document.getElementById('roll-short-msg');
   if (msg && target>0) {
-    if (cnt>=target) { msg.style.color='var(--accent2)'; msg.textContent='✓ Target met: '+cnt+' / '+target+' rolls selected'; }
-    else { msg.style.color='var(--warning)'; msg.textContent='⚠ Short: '+cnt+' of '+target+' rolls selected ('+( target-cnt)+' remaining)'; }
+    if (cnt>=target) { msg.style.color='var(--accent2)'; msg.textContent='✓ Target met: '+cnt+' / '+target+' '+UNIT+' selected'; }
+    else { msg.style.color='var(--warning)'; msg.textContent='⚠ Short: '+cnt+' of '+target+' '+UNIT+' selected ('+( target-cnt)+' remaining)'; }
   }
 }
 
@@ -2259,7 +2270,7 @@ function renderArchiveList(filterDate='') {
       html+=`<div class="archive-item" onclick="viewArchivedTicket('${t.id}')">
         <div style="font-size:11px;color:var(--accent)">${t.id}</div>
         <div style="font-size:12px;color:var(--text)">${t.refNum||'—'} · ${t.customer||'—'}</div>
-        <div style="font-size:10px;color:var(--text2)">${(t.selectedRolls||[]).length} rolls · ${t.archivedBy||'—'}</div>
+        <div style="font-size:10px;color:var(--text2)">${(t.selectedRolls||[]).length} ${unitNoun(t.customer)} · ${t.archivedBy||'—'}</div>
       </div>`;
     });
   });
@@ -2997,11 +3008,11 @@ function showInventorySummary() {
   const grand = {}; allCols.forEach(s => grand[s] = emptyBucket());
   inv.forEach(r => { const s=getStatus(r); addTo(grand[s],r); addTo(grand['TOTAL'],r); });
 
-  const cell = (d, isTotal=false, color='') => {
+  const cell = (d, isTotal=false, color='', unit='rolls') => {
     if (!d||(!d.tons&&!d.rolls)) return `<td style="text-align:right;color:var(--text2);opacity:0.35;${isTotal?'font-weight:bold;border-left:2px solid var(--border)':''}">${isTotal?'0':'—'}</td>`;
     return `<td style="text-align:right;font-weight:${isTotal?'bold':'normal'};color:${color||statusColors['AVAILABLE']};${isTotal?'border-left:2px solid var(--border)':''}">
       <div style="font-weight:bold;font-size:${isTotal?'14px':'inherit'}">${d.tons.toFixed(0)}</div>
-      <div style="font-size:9px;color:var(--text2)">${d.rolls.toLocaleString()} rolls</div>
+      <div style="font-size:9px;color:var(--text2)">${d.rolls.toLocaleString()} ${unit}</div>
     </td>`;
   };
 
@@ -3040,7 +3051,7 @@ function showInventorySummary() {
     <tr style="background:${altBg?'var(--surface)':''}">
       <td style="font-weight:bold">${c}</td>
       ${accCell(map[c])}
-      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s])).join('')}
+      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s], unitNoun(c))).join('')}
     </tr>`;
 
   // Build all rows
