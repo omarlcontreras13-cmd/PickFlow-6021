@@ -312,6 +312,27 @@ const CYCLE_COUNT_PATTERN = 'CYC_CNT'; // locations containing CYC_CNT are Cycle
 const FIFO_ACCOUNTS = ['COVINGTON XDK','CBM','NORCROSS XDK','BLANK'];
 const FEFO_ACCOUNTS = ['SCI GAMES','HBH','CONWAY','LANET'];
 
+// Single source of truth for roll status classification (matches Inventory Summary).
+// Priority: PICKED → GHOST → DAMAGED → CYCLE COUNT → AVAILABLE.
+function classifyRoll(r) {
+  if ((r.pcsPending||0) > 0) return 'PICKED';
+  const loc = (r.location||'').toUpperCase();
+  const st  = (r.status||'').toUpperCase();
+  if (loc === '23-GHOST-00' || st === 'GHOST') return 'GHOST';
+  if (st === 'DAMAGED' || loc.includes('23-QH')) return 'DAMAGED';
+  if (loc.includes('CYC_CNT') || loc.includes('CYC-CNT') || st === 'CYCLE COUNT') return 'CYCLE COUNT';
+  return 'AVAILABLE';
+}
+// Inventory Accuracy (by roll count): (Total - Cycle Count - Ghost) / Total.
+function inventoryAccuracyStats() {
+  const inv = state.inventory || [];
+  let ghost = 0, cc = 0;
+  inv.forEach(r => { const s = classifyRoll(r); if (s==='GHOST') ghost++; else if (s==='CYCLE COUNT') cc++; });
+  const total = inv.length;
+  const pct = total > 0 ? (total - ghost - cc) / total * 100 : null;
+  return { total, ghost, cc, off: ghost + cc, pct };
+}
+
 const USERS = [
   { id:'Ocontreras', name:'Omar Contreras', password:null, role:'admin' },
 ];
@@ -1206,13 +1227,25 @@ function buildStatCards() {
   };
   const ordersToday = state.tickets.filter(t => ticketDayKey(t) === todayKey).length;
 
-  let h = '<div class="stats-grid" style="grid-template-columns:repeat(7,1fr)">';
+  // Inventory Accuracy = clean rolls / total, using the shared classification so it
+  // always matches the Inventory Summary and Cycle Count screens.
+  const _accStats = inventoryAccuracyStats();
+  const ghostRolls = _accStats.ghost, ccRolls = _accStats.cc, totalRolls = _accStats.total;
+  const invAcc = _accStats.pct != null ? _accStats.pct : 0;
+  const invAccColor = invAcc >= 98 ? 'var(--accent2)' : invAcc >= 95 ? 'var(--warning)' : 'var(--danger)';
+
+  let h = '<div class="stats-grid" style="grid-template-columns:repeat(8,1fr)">';
   h += '<div class="stat-card" title="Open pick tickets dated today — resets to 0 once archived and starts fresh each date">';
   h += '<div class="stat-label">Today\'s Orders</div>';
   h += '<div class="stat-value" style="color:var(--accent)">'+ordersToday+'</div>';
   h += '<div style="font-size:10px;color:var(--text2);margin-top:2px">'+todayKey+'</div>';
   h += '</div>';
   h += '<div class="stat-card"><div class="stat-label">Total Rolls</div><div class="stat-value">'+state.inventory.length.toLocaleString()+'</div></div>';
+  h += '<div class="stat-card" title="Inventory Accuracy = (Total Rolls − Ghost − Cycle Count) ÷ Total Rolls">';
+  h += '<div class="stat-label">Inventory Accuracy</div>';
+  h += '<div class="stat-value" style="color:'+invAccColor+'">'+invAcc.toFixed(1)+'%</div>';
+  h += '<div style="font-size:10px;color:var(--text2);margin-top:2px">'+ghostRolls+' ghost · '+ccRolls+' cyc-cnt</div>';
+  h += '</div>';
   h += '<div class="stat-card"><div class="stat-label">Customers</div><div class="stat-value green">'+customers+'</div></div>';
   h += '<div class="stat-card"><div class="stat-label">Locations</div><div class="stat-value">'+locations+'</div></div>';
   h += '<div class="stat-card"><div class="stat-label">Damaged</div><div class="stat-value orange">'+dmgRolls+'</div></div>';
@@ -2972,6 +3005,23 @@ function showInventorySummary() {
     </td>`;
   };
 
+  // Inventory Accuracy (by roll count): (Total - Cycle Count - Ghost) / Total.
+  const accPct = (m) => {
+    const tot = (m && m['TOTAL'] && m['TOTAL'].rolls) || 0;
+    if (!tot) return null;
+    const off = ((m['CYCLE COUNT']&&m['CYCLE COUNT'].rolls)||0) + ((m['GHOST']&&m['GHOST'].rolls)||0);
+    return (tot - off) / tot * 100;
+  };
+  const accColor = (a) => a>=98 ? 'var(--accent2)' : (a>=95 ? 'var(--warning)' : 'var(--danger)');
+  const accCell = (m, big=false) => {
+    const a = accPct(m);
+    if (a===null) return '<td style="text-align:right;color:var(--text2);opacity:0.35">—</td>';
+    return '<td style="text-align:right;font-weight:bold;color:'+accColor(a)+';font-size:'+(big?'14px':'inherit')+'">'+a.toFixed(1)+'%</td>';
+  };
+  const grandAcc = accPct(grand);
+  const grandOff = ((grand['CYCLE COUNT']&&grand['CYCLE COUNT'].rolls)||0) + ((grand['GHOST']&&grand['GHOST'].rolls)||0);
+  const grandTotRolls = (grand['TOTAL']&&grand['TOTAL'].rolls)||0;
+
   const sortedBUs = Object.keys(buMap).sort();
   const expanded = window._summarySmurfitExpanded;
 
@@ -2989,6 +3039,7 @@ function showInventorySummary() {
   const renderCustomerRow = (c, ci, altBg) => `
     <tr style="background:${altBg?'var(--surface)':''}">
       <td style="font-weight:bold">${c}</td>
+      ${accCell(map[c])}
       ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s])).join('')}
     </tr>`;
 
@@ -3010,6 +3061,7 @@ function showInventorySummary() {
         SMURFIT WESTROCK
         <span style="font-size:10px;color:var(--text2);margin-left:6px">${expanded?'(collapse)':'(expand by BU)'}</span>
       </td>
+      ${accCell(smurfitTotal)}
       ${allCols.map(s=>cell(smurfitTotal[s], s==='TOTAL', statusColors[s])).join('')}
     </tr>`;
 
@@ -3018,6 +3070,7 @@ function showInventorySummary() {
       rows += `
       <tr class="smurfit-bu-row" style="display:${expanded?'table-row':'none'};background:rgba(61,92,230,0.03)">
         <td style="padding-left:28px;color:var(--accent);font-size:11px">↳ ${bu}</td>
+        ${accCell(buMap[bu])}
         ${allCols.map(s=>cell(buMap[bu][s], s==='TOTAL', statusColors[s])).join('')}
       </tr>`;
     });
@@ -3025,6 +3078,7 @@ function showInventorySummary() {
     rows += `
     <tr class="smurfit-bu-row" style="display:${expanded?'table-row':'none'};background:rgba(61,92,230,0.1);border-top:2px solid rgba(61,92,230,0.3)">
       <td style="padding-left:14px;font-weight:bold;color:var(--accent);font-size:12px">▶ SMURFIT WESTROCK TOTAL</td>
+      ${accCell(smurfitTotal, true)}
       ${allCols.map(s=>cell(smurfitTotal[s], true, statusColors[s])).join('')}
     </tr>`;
   }
@@ -3040,7 +3094,12 @@ function showInventorySummary() {
     </div>
   </div>
 
-  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:20px">
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:20px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center" title="Inventory Accuracy = (Total - Cycle Count - Ghost) / Total, by roll count">
+      <div style="font-size:9px;color:var(--accent);letter-spacing:1px;font-weight:bold;margin-bottom:4px">INV ACCURACY</div>
+      <div style="font-size:20px;font-weight:bold;color:${grandAcc!=null?accColor(grandAcc):'var(--text2)'}">${grandAcc!=null?grandAcc.toFixed(1)+'%':'—'}</div>
+      <div style="font-size:10px;color:var(--text2)">${grandOff.toLocaleString()} of ${grandTotRolls.toLocaleString()} off</div>
+    </div>
     ${allCols.map(s=>`
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center">
         <div style="font-size:9px;color:${statusColors[s]};letter-spacing:1px;font-weight:bold;margin-bottom:4px">${s}</div>
@@ -3054,6 +3113,7 @@ function showInventorySummary() {
     <thead>
       <tr>
         <th style="text-align:left;min-width:200px">CUSTOMER / BU</th>
+        <th style="text-align:right;color:var(--accent)">ACCURACY</th>
         ${allCols.map(s=>`<th style="text-align:right;color:${statusColors[s]}">${s}</th>`).join('')}
       </tr>
     </thead>
@@ -3061,6 +3121,7 @@ function showInventorySummary() {
     <tfoot>
       <tr style="background:var(--surface2);border-top:3px solid var(--border)">
         <td style="font-weight:bold;font-size:16px;letter-spacing:1px">GRAND TOTAL</td>
+        ${accCell(grand, true)}
         ${allCols.map(s=>`<td style="text-align:right;font-weight:bold;color:${statusColors[s]}">
           <div style="font-size:20px;font-weight:bold">${(grand[s]?.tons||0).toFixed(0)}</div>
           <div style="font-size:10px;color:var(--text2)">${(grand[s]?.rolls||0).toLocaleString()} rolls</div>
@@ -4688,6 +4749,7 @@ function showCycleCountStart() {
     });
     const binAcc = totalLines>0 ? Math.round(accurateLines/totalLines*100) : null;
     const cntAcc = totalAdjExp>0 ? Math.max(0,Math.round((1-(totalAdjAdd+totalAdjMiss)/totalAdjExp)*100)) : null;
+    const invAcc = inventoryAccuracyStats().pct;
 
     let html = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
@@ -4703,12 +4765,13 @@ function showCycleCountStart() {
     </div>
 
     <!-- Summary cards -->
-    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:16px">
+    <div style="display:grid;grid-template-columns:repeat(8,1fr);gap:8px;margin-bottom:16px">
       ${[
         {label:'TOTAL LOCATIONS', val:storageLocs.length, color:'var(--text)'},
         {label:'COUNTED', val:countedLocsArr.length, color:'var(--accent2)'},
         {label:'NOT COUNTED', val:uncountedLocs.length, color:uncountedLocs.length>0?'var(--danger)':'var(--accent2)'},
         {label:'SESSIONS', val:monthSessions.length, color:'var(--accent)'},
+        {label:'INV ACCURACY', val:invAcc!==null?invAcc.toFixed(1)+'%':'—', color:invAcc===null?'var(--text2)':invAcc>=98?'var(--accent2)':invAcc>=95?'var(--warning)':'var(--danger)'},
         {label:'BIN ACCURACY', val:binAcc!==null?binAcc+'%':'—', color:binAcc===null?'var(--text2)':binAcc>=100?'var(--accent2)':binAcc>=95?'var(--warning)':'var(--danger)'},
         {label:'COUNT ACCURACY', val:cntAcc!==null?cntAcc+'%':'—', color:cntAcc===null?'var(--text2)':cntAcc>=100?'var(--accent2)':cntAcc>=90?'var(--warning)':'var(--danger)'},
         {label:'WORK DAYS LEFT', val:wdRemaining, color:wdRemaining<=3?'var(--danger)':wdRemaining<=7?'var(--warning)':'var(--accent2)'}
@@ -5042,6 +5105,8 @@ function showCCTracker() {
     const pct = storageLocs.length > 0 ? Math.round(countedLocs.length/storageLocs.length*100) : 0;
     const pctColor = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
     const wdColor  = remainWorkDays<=3?'var(--danger)':remainWorkDays<=7?'var(--warning)':'var(--accent2)';
+    const invAcc   = inventoryAccuracyStats().pct;
+    const invAccColor = invAcc===null?'var(--text2)':invAcc>=98?'var(--accent2)':invAcc>=95?'var(--warning)':'var(--danger)';
 
     // Build calendar day headers
     const calDays = [];
@@ -5061,12 +5126,13 @@ function showCCTracker() {
     </div>
 
     <!-- Summary bar -->
-    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:20px">
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:20px">
       ${[
         {l:'TOTAL LOCATIONS', v:storageLocs.length, c:'var(--text)'},
         {l:'COUNTED', v:countedLocs.length, c:'var(--accent2)'},
         {l:'REMAINING', v:uncountedLocs.length, c:uncountedLocs.length>0?'var(--danger)':'var(--accent2)'},
         {l:'% COMPLETE', v:pct+'%', c:pctColor},
+        {l:'INV ACCURACY', v:invAcc!==null?invAcc.toFixed(1)+'%':'—', c:invAccColor},
         {l:'WORK DAYS DONE', v:passedWorkDays+'/'+totalWorkDays, c:'var(--text2)'},
         {l:'WORK DAYS LEFT', v:remainWorkDays, c:wdColor}
       ].map(x=>`
@@ -5139,6 +5205,7 @@ function showCCTracker() {
       countedLocs: countedLocs.slice(),
       uncountedLocs: uncountedLocs.slice(),
       pct,
+      invAcc,
       passedWorkDays, totalWorkDays, remainWorkDays,
       sessions
     };
@@ -5192,9 +5259,10 @@ function exportCCTrackerReport() {
     ['Counted', T.countedLocs.length],
     ['Remaining', T.uncountedLocs.length],
     ['% Complete', T.pct + '%'],
+    ['Count Accuracy', pctTxt(aggCount)],
     ['Bin Accuracy', pctTxt(aggBin)],
-    ['Count Accuracy', pctTxt(aggCount)]
-  ].map(c => '<div class="card"><div class="lbl">'+c[0]+'</div><div class="val">'+c[1]+'</div></div>').join('');
+    ['Inventory Accuracy', (T.invAcc!=null ? T.invAcc.toFixed(1)+'%' : '—'), 'flex:0 0 auto;margin-left:auto;margin-right:auto;min-width:200px;text-align:center']
+  ].map(c => '<div class="card" style="'+(c[2]||'')+'"><div class="lbl">'+c[0]+'</div><div class="val">'+c[1]+'</div></div>').join('');
 
   const sessionTable = sessionRows.length
     ? `<table>
