@@ -3425,6 +3425,27 @@ function showEDIImportFile() {
         const totLF = g.lots.reduce(function(s,l){return s+(parseFloat(l.qtyMlf)||0);},0).toFixed(3);
         const totWt = g.lots.reduce(function(s,l){return s+(l.grossWt||0);},0).toLocaleString();
         const dq = dq2;
+        // Build expandable detail rows (Exp Date column = file export date, short format)
+        const expDispSci = new Date().toLocaleDateString('en-US');
+        const detailId = 'sci-detail-' + key.replace(/[^a-zA-Z0-9_-]/g, '_');
+        let sciDetailRows = '';
+        g.lots.forEach(function(l, ri) {
+          const rbg = ri%2!==0 ? 'rgba(0,0,0,0.03)' : '';
+          const pd = l._pd || l.purchDoc || '';
+          const pi = l._pi || l.purchItem || '';
+          const poNum = pd ? (pd + (pi ? '-' + pi : '')) : (l.po || '');
+          const wtTxt = l.grossWt ? (+l.grossWt).toLocaleString() : '—';
+          const lfTxt = l.qtyMlf ? (+l.qtyMlf).toFixed(3) : '—';
+          sciDetailRows += '<tr style='+dq+'background:'+rbg+';border-bottom:1px solid var(--border)'+dq+'>'
+            +'<td style='+dq+'padding:4px 8px;font-weight:bold;color:var(--accent2);white-space:nowrap'+dq+'>'+(l.lot||'—')+'</td>'
+            +'<td style='+dq+'padding:4px 8px'+dq+'>'+(l.material||'')+'</td>'
+            +'<td style='+dq+'padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'+dq+'>'+(l.matDesc||'')+'</td>'
+            +'<td style='+dq+'padding:4px 8px;color:var(--accent);white-space:nowrap'+dq+'>'+(poNum||'—')+'</td>'
+            +'<td style='+dq+'padding:4px 8px;text-align:right'+dq+'>'+lfTxt+'</td>'
+            +'<td style='+dq+'padding:4px 8px;text-align:right'+dq+'>'+wtTxt+'</td>'
+            +'<td style='+dq+'padding:4px 8px;white-space:nowrap'+dq+'>'+expDispSci+'</td>'
+            +'</tr>';
+        });
         h += '<div style='+dq+'border-bottom:1px solid var(--border)'+dq+'>'
           +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
           +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked onchange='+dq+'onEDISciChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
@@ -3437,7 +3458,26 @@ function showEDIImportFile() {
           +' style='+dq+'background:var(--accent2);color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px'+dq+'>Export</button>'
           +'<button onclick='+dq+'deleteEDISciLoad(&quot;'+key+'&quot;)'+dq
           +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
-          +'</div></div>';
+          +'<button id='+dq+detailId+'-btn'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq
+          +' style='+dq+'background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px'+dq+'>▼</button>'
+          +'</div>'
+          +'<div id='+dq+detailId+dq+' style='+dq+'display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:320px;overflow-y:auto'+dq+'>'
+          +'<table style='+dq+'width:100%;border-collapse:collapse;font-size:10px'+dq+'>'
+          +'<thead><tr style='+dq+'background:var(--surface2)'+dq+'>'
+          +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>LOT #</th>'
+          +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>SKU</th>'
+          +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PRODUCT ID</th>'
+          +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>PO#</th>'
+          +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>LF</th>'
+          +'<th style='+dq+'padding:5px 8px;text-align:right;color:var(--text2)'+dq+'>WEIGHT</th>'
+          +'<th style='+dq+'padding:5px 8px;text-align:left;color:var(--text2)'+dq+'>EXP DATE</th>'
+          +'</tr></thead><tbody>'+sciDetailRows
+          +'<tr style='+dq+'background:rgba(46,160,67,0.08);font-weight:bold'+dq+'>'
+          +'<td colspan='+dq+'4'+dq+' style='+dq+'padding:5px 8px;color:var(--accent2)'+dq+'>TOTAL — '+g.lots.length+' rolls</td>'
+          +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--accent2)'+dq+'>'+totLF+'</td>'
+          +'<td style='+dq+'padding:5px 8px;text-align:right;color:var(--accent2)'+dq+'>'+totWt+'</td>'
+          +'<td></td></tr>'
+          +'</tbody></table></div></div>';
         alt = !alt;
       });
       h += '</div>';
@@ -3461,9 +3501,8 @@ function showEDIImportFile() {
       let detailRows = '';
       (load.rows||[]).forEach(function(r, ri) {
         const bg = ri%2!==0 ? 'rgba(0,0,0,0.03)' : '';
-        const expDisp = r.expDate ? (typeof r.expDate === 'number'
-          ? new Date((r.expDate - 25569)*86400000).toLocaleDateString('en-US')
-          : r.expDate) : '—';
+        // Exp Date column carries the file creation date (today) in short format, per HBH EDI spec.
+        const expDisp = new Date().toLocaleDateString('en-US');
         detailRows += '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
           +'<td style="padding:4px 8px;font-weight:bold;color:var(--accent);white-space:nowrap">'+(r.lot||'—')+'</td>'
           +'<td style="padding:4px 8px">'+(r.sku||'')+'</td>'
@@ -4098,9 +4137,12 @@ function buildEDISheet_SciGames(group) {
     ['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
   ];
 
+  // Exp Date = the date the file is exported (today), short date format — same for every row.
+  // Build from the local calendar date (not time-of-day) so it never drifts a day.
+  const _now = new Date();
+  const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate()) / 86400000) + 25569;
   lots.forEach(l => {
     const poNum     = getLotPO(l);
-    const expSerial = dateToExcelSerial(l.expDate);
     const weight    = l.grossWt || 0;
     const lf        = l.qtyMlf ? +l.qtyMlf.toFixed(3) : 0;
 
@@ -4114,7 +4156,7 @@ function buildEDISheet_SciGames(group) {
       'ROLLS',
       lf, 1,
       l.width || 0,
-      expSerial || ''
+      fileDateSerial || ''
     ]);
   });
 
@@ -4159,15 +4201,18 @@ function buildEDISheet_HBH(load) {
     ['SKU','Product ID','Lot#','Prod ID 2','STO','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
   ];
 
+  // Exp Date = the date the file is created (today), short date format — same for every row.
+  // Build the serial from the local calendar date (not time-of-day) so the date never drifts a day.
+  const _now = new Date();
+  const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate()) / 86400000) + 25569;
   load.rows.forEach(r => {
-    const expSerial = dateToExcelSerial(r.expDate);
     const wt = typeof r.weight === 'string' ? parseFloat(r.weight.replace(/,/g,''))||0 : (r.weight||0);
     const gw = typeof r.grossWeight === 'string' ? parseFloat(r.grossWeight.replace(/,/g,''))||0 : (r.grossWeight||0);
     aoa.push([
       r.sku, r.productId, r.lot, r.prodId2, r.po5,
       wt, gw, r.uom || 'ROLLS',
       r.lf || 0, r.pcs || 1, r.width || 0,
-      expSerial || ''
+      fileDateSerial || ''
     ]);
   });
 
