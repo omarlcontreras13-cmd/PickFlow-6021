@@ -823,6 +823,8 @@ function handleFileImport(e) {
         dirExpDate: r.dirExpDate ? r.dirExpDate.getTime() : null,
       }));
       db.ref('6021/inventory').set(compact).catch(()=>{});
+      state.lastImport = Date.now();
+      db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
       updateImportStamp();
       showDashboard();
       return;
