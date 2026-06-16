@@ -3485,6 +3485,9 @@ function showEDIImportFile() {
     h += '</div>';
   }
 
+  // ── TWIN RIVERS section ──────────────────────────────────────────────────────
+  h += renderTRSection();
+
   if (_ediHBHLoads.length) {
     const totalHBHRolls = _ediHBHLoads.reduce((s,l)=>s+l.rows.length,0);
     h += `<div style="font-size:10px;color:var(--text2)">${_ediHBHLoads.length} loads loaded &nbsp;·&nbsp; ${totalHBHRolls.toLocaleString()} rolls total
@@ -4244,6 +4247,348 @@ function exportSingleSci(key) {
   window._ediStamps[safeName.replace(/[.#$[\]]/g,'_')] = {exportedAt:Date.now(),exportedBy:state.currentUser||''};
   showAlert('✓ Exported ' + fname, 'success');
   showEDIImportFile();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TWIN RIVERS EDI — import (FRAPAP Excel + rpt020 manifest PDF) → pack-collapsed export
+// Engine validated against ground-truth inbound reports (MD216629, MD215352) and
+// pack counts (MD211242, incl. 3-packs). Packs grouped by LEAD ROLL ID; weight/LF
+// summed from the Excel; Pcs = pack size; Product ID via TR_TABLE; Exp Date = today.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// SKU → Description (authoritative customer TABLE; matches receiving reports incl. typos/trailing spaces)
+const TR_TABLE = {
+  '810897':'ACADIA WAX WS MGP 18.0 241', '811240':'ACADIA WAX WS MGP 18.0 241',
+  '812091':'ECO CHOICE OGR SWS 1S 20.0 241', '812129':'ECO CHOICE OGR SWS 1S 20.0 241',
+  '812137':'ECO CHOICE OGR SWS 1S 20.0 241', 'A018568/922-94061':'ALLIANCE SC REL 40.7 208',
+  '812054':'ECO CHOICE OGR SWS 1S 20.0 241', '812089':'ECO CHOICE OGR SWS 1S 20.0 241',
+  '810412':'ACADIA 30.0 241 ', '830025':'ACADIA WAX WS 30.0 241', '823116':'ACADIA WAX WS 30.0 241',
+  '812750':'ECO CHOICE OGR 1S 20.0 241', '812532':'ECHO CHOICE OGR 18.0 241',
+  '812043':'ECO CHOICE OGR SWS 1S 20.0 241', '812240':'ECHO CHOICE OGR SWS 25.0 241',
+  '812124':'ECO CHOICE OGR SWS 1S 20.0 241', '823439':'ACADIA 35.0 241',
+  '812765':'ECO PLUS NAT OGR 1S 25.0 406', '812489':'ECO CHOICE OGR SWS 1S 20.0 241'
+};
+
+// Lazy-load pdf.js (manifest PDFs are real text — no OCR needed)
+let _trPdfReady = null;
+function ensurePdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (_trPdfReady) return _trPdfReady;
+  _trPdfReady = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => {
+      try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; } catch (e) {}
+      resolve(window.pdfjsLib);
+    };
+    s.onerror = () => reject(new Error('Could not load pdf.js (check internet connection)'));
+    document.head.appendChild(s);
+  });
+  return _trPdfReady;
+}
+
+function trFrac(s) {
+  s = (s || '').trim();
+  let m = s.match(/^(\d+)\s+(\d+)\/(\d+)$/); if (m) return +m[1] + (+m[2]) / (+m[3]);
+  m = s.match(/^(\d+)\/(\d+)$/); if (m) return (+m[1]) / (+m[2]);
+  const f = parseFloat(s); return isNaN(f) ? 0 : f;
+}
+
+// Reconstruct text lines from a PDF (group by y, sort by x) — mirrors pdfplumber/engine
+async function trExtractPdfLines(arrayBuffer) {
+  const pdfjsLib = await ensurePdfJs();
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+  const lines = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const tc = await (await pdf.getPage(i)).getTextContent();
+    const rows = [];
+    tc.items.forEach(it => {
+      if (!it.str || !it.str.trim()) return;
+      const y = Math.round(it.transform[5]);
+      let row = rows.find(r => Math.abs(r.y - y) <= 2);
+      if (!row) { row = { y, items: [] }; rows.push(row); }
+      row.items.push({ x: it.transform[4], s: it.str });
+    });
+    rows.sort((a, b) => b.y - a.y).forEach(r => {
+      const line = r.items.sort((a, b) => a.x - b.x).map(o => o.s).join(' ').replace(/\s+/g, ' ').trim();
+      if (line) lines.push(line);
+    });
+  }
+  return lines;
+}
+
+// Parse the shipping manifest (rpt020): per order-item attrs + roll→lead map
+function trParseManifest(lines) {
+  let load = null, veh = null, cur = null, wantPart = false;
+  const ois = {}, order = [], rl = {}, ro = {};
+  const OI  = /^([A-Z0-9]+-\d{2})\s+(.+?)\s+(\d+(?:\s+\d+\/\d+)?)\s+in\s+(\d+(?:\s+\d+\/\d+)?)\s+in$/;
+  const ROW = /^(MD\w+)\s+(\d+)\s+(MD\w+)\s/;
+  lines.forEach(line => {
+    let m = line.match(/LOAD\s+(MD\w+)\s+CARRIER/); if (m) load = m[1];
+    m = line.match(/VEHICLE NO\.\s+(\S+)/); if (m) veh = m[1];
+    m = line.match(OI);
+    if (m) {
+      const oi = m[1]; cur = oi;
+      if (!ois[oi]) { ois[oi] = { oi, desc: m[2].trim(), width: trFrac(m[3]), diam: trFrac(m[4]), part: null, po: null, ordno: oi.replace(/-\d+$/, '') }; order.push(oi); }
+      wantPart = false; return;
+    }
+    if (line.indexOf('CUSTOMER PART NUMBER') >= 0) { wantPart = true; return; }
+    if (wantPart && cur && line && !ois[cur].part) { ois[cur].part = line.split(/\s+/)[0]; wantPart = false; }
+    m = line.match(ROW);
+    if (m && cur) { rl[m[1]] = m[3]; ro[m[1]] = cur; }
+  });
+  // PO pass: "MD <ordno> <customer order>" → match by derived ord no
+  lines.forEach(line => {
+    const m = line.match(/\bMD\s+(\S+)\s+(.+?)\s*$/);
+    if (m) order.forEach(oi => { if (ois[oi].ordno === m[1] && !ois[oi].po) ois[oi].po = m[2].trim(); });
+  });
+  return { load, veh, ois, order, rl, ro };
+}
+
+// Parse the Straight Bill of Lading (rpt040): load-level totals for cross-checking
+function trParseBOL(lines) {
+  const txt = lines.join(' ');
+  const out = { rolls: null, wt: null, deliv: null };
+  let m = txt.match(/Total:\s*([\d,]+)\s*Rolls\s*([\d,]+)\s*LB/i);
+  if (m) { out.rolls = parseInt(m[1].replace(/,/g, ''), 10); out.wt = parseInt(m[2].replace(/,/g, ''), 10); }
+  m = txt.match(/DELIVERY DATE:\s*(\d{1,2}-[A-Za-z]{3}-\d{2,4})/i);
+  if (m) out.deliv = m[1];
+  return out;
+}
+
+// Parse the FRAPAP roll list: PO#, ITEM#(BWT-WIDTH), ROLL ID, WT, LF, DIA, SID
+function trParseExcel(arrayBuffer) {
+  const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
+  const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+  const ex = {};
+  for (let i = 1; i < aoa.length; i++) {
+    const r = aoa[i]; if (!r || !r[2]) continue;
+    ex[String(r[2]).trim()] = {
+      wt: parseFloat(r[3]) || 0, lf: parseFloat(r[4]) || 0,
+      width: parseFloat(String(r[1]).split('-')[1]) || 0
+    };
+  }
+  return ex;
+}
+
+// Join + collapse by LEAD ROLL ID → one row per pack
+function trBuildLoad(parsed, ex) {
+  const { load, veh, ois, order, rl, ro } = parsed;
+  const packs = {}, packOrder = [];
+  Object.keys(ex).forEach(rid => {
+    const lead = rl[rid], oi = ro[rid];
+    if (!lead) return;
+    let p = packs[lead];
+    if (!p) { p = packs[lead] = { lead, oi, wt: 0, lf: 0, pcs: 0, width: ex[rid].width }; packOrder.push(lead); }
+    p.wt += ex[rid].wt; p.lf += ex[rid].lf; p.pcs++;
+  });
+  const rows = packOrder.map(lead => {
+    const p = packs[lead], o = ois[p.oi] || {};
+    return {
+      sku: o.part || '', productId: TR_TABLE[String(o.part || '').trim()] || o.desc || '',
+      lot: lead, prodId2: p.oi || '', po: o.po || '',
+      weight: Math.round(p.wt), lf: Math.round(p.lf), pcs: p.pcs, width: p.width || 0
+    };
+  });
+  const ordnos = [...new Set(order.map(oi => ois[oi].ordno))].join(', ');
+  return { load, vehicle: veh, ordnos, rows, rollCount: Object.keys(ex).length, packCount: rows.length };
+}
+
+// Build the 12-column EDI export sheet (same template as HBH/Sci; Exp Date = today)
+function buildEDISheet_TwinRivers(load) {
+  const aoa = [
+    [],
+    ['Receiver', load.load, null, 'Total Rolls', load.rows.length, null, null, 'Fraction  Decimal'],
+    ['PO #', 'TWIN RIVERS ' + load.load + (load.vehicle ? ' ' + load.vehicle : ''), null, null, null, null, null, 0.5, 0.5],
+    ['Invoice #', load.ordnos],
+    ['Truck #', load.vehicle || '', null, null, null, null, null, 'Piper IBD Order #'],
+    [], [],
+    ['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
+  ];
+  const _now = new Date();
+  const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate()) / 86400000) + 25569;
+  load.rows.forEach(r => {
+    aoa.push([r.sku, r.productId, r.lot, r.prodId2, r.po, r.weight, r.weight, 'ROLLS', r.lf, r.pcs, r.width, fileDateSerial || '']);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  for (let ri = 8; ri < aoa.length; ri++) {
+    const ref = XLSX.utils.encode_cell({ r: ri, c: 11 });
+    if (ws[ref] && ws[ref].v) { ws[ref].t = 'n'; ws[ref].z = 'm/d/yyyy'; }
+  }
+  return ws;
+}
+
+function exportSingleTR(key) {
+  const load = (window._ediTRLoads || {})[key];
+  if (!load || !load.rows.length) return;
+  const wb = XLSX.utils.book_new();
+  const ws = buildEDISheet_TwinRivers(load);
+  const safeName = String(load.load).substring(0, 31);
+  XLSX.utils.book_append_sheet(wb, ws, safeName);
+  XLSX.writeFile(wb, 'EDI_TwinRivers_' + safeName + '.xlsx');
+  window._ediTRStamps = window._ediTRStamps || {};
+  window._ediTRStamps[key] = { exportedAt: Date.now(), exportedBy: state.currentUser || '' };
+  showAlert('✓ Exported EDI_TwinRivers_' + safeName + '.xlsx', 'success');
+  showEDIImportFile();
+}
+
+function deleteTRLoad(key) {
+  if (window._ediTRLoads) delete window._ediTRLoads[key];
+  showEDIImportFile();
+}
+
+// Multi-file ingest: FRAPAP Excel(s) + manifest PDF(s); BOL (rpt040) is ignored
+async function processTRFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  // Standard Twin Rivers set: Straight Bill of Lading + Shipping Manifest + FRAPAP Excel.
+  // Stage files so they can be dropped together OR one at a time.
+  const pend = window._ediTRPending = window._ediTRPending || { excels: [], pdfs: [] };
+  const ignored = [];
+  files.forEach(f => {
+    if (/\.xls[xmb]?$/i.test(f.name)) { if (!pend.excels.some(x => x.name === f.name)) pend.excels.push(f); }
+    else if (/\.pdf$/i.test(f.name)) { if (!pend.pdfs.some(x => x.name === f.name)) pend.pdfs.push(f); }
+    else ignored.push(f.name);
+  });
+  if (ignored.length) showAlert('Twin Rivers: ignored (need .xls/.xlsx or .pdf): ' + ignored.join(', '), 'warning');
+
+  // Wait until the Excel and BOTH PDFs (Bill of Lading + Shipping Manifest) are staged
+  if (!pend.excels.length || pend.pdfs.length < 2) {
+    showEDIImportFile(); // refresh dropzone so it shows what's staged
+    const needs = [];
+    if (!pend.excels.length) needs.push('the FRAPAP Excel');
+    if (pend.pdfs.length < 2) needs.push((2 - pend.pdfs.length) + ' more PDF (Bill of Lading + Shipping Manifest)');
+    showAlert('Twin Rivers: staged ' + pend.excels.length + ' Excel + ' + pend.pdfs.length + ' PDF — still need ' + needs.join(' and ') + '.', 'info');
+    return;
+  }
+
+  showAlert('Reading Twin Rivers load…', 'info');
+  try {
+    const ex = {};
+    for (const f of pend.excels) { Object.assign(ex, trParseExcel(await f.arrayBuffer())); }
+    let parsed = null, bol = null;
+    for (const f of pend.pdfs) {
+      const lines = await trExtractPdfLines(await f.arrayBuffer());
+      const isManifest = lines.some(l => /Shipping Manifest/i.test(l)) || lines.some(l => /^MD\w+\s+\d+\s+MD\w+/.test(l));
+      const isBOL = !isManifest && lines.some(l => /BILL OF LADING/i.test(l));
+      if (isManifest) {
+        const p = trParseManifest(lines);
+        if (!parsed) parsed = p;
+        else {
+          Object.assign(parsed.ois, p.ois); Object.assign(parsed.rl, p.rl); Object.assign(parsed.ro, p.ro);
+          p.order.forEach(o => { if (parsed.order.indexOf(o) < 0) parsed.order.push(o); });
+        }
+      } else if (isBOL) {
+        bol = trParseBOL(lines);
+      }
+    }
+    if (!parsed) { showAlert('Twin Rivers: the Shipping Manifest (rpt020) wasn’t found among the PDFs — add it.', 'warning'); return; }
+    if (!bol)    { showAlert('Twin Rivers: the Straight Bill of Lading (rpt040) wasn’t found among the PDFs — add it.', 'warning'); return; }
+    const built = trBuildLoad(parsed, ex);
+    if (!built.load) { showAlert('Twin Rivers: could not read the LOAD number from the manifest PDF.', 'warning'); return; }
+    if (!built.rows.length) { showAlert('Twin Rivers: 0 rolls matched between the Excel and the manifest — check both are for the same load.', 'warning'); return; }
+    // Cross-check the build against the Bill of Lading totals
+    const sumWt = built.rows.reduce((s, r) => s + (r.weight || 0), 0);
+    let xchk = '';
+    if (bol.rolls != null) {
+      const rollsOk = bol.rolls === built.rollCount;
+      const wtOk = bol.wt == null || Math.abs(bol.wt - sumWt) <= Math.max(5, bol.wt * 0.001);
+      xchk = (rollsOk && wtOk) ? ' (matches BOL)' : ' ⚠ BOL: ' + bol.rolls + ' rolls / ' + (bol.wt != null ? bol.wt.toLocaleString() + ' lb' : '?');
+    }
+    built.bol = bol;
+    window._ediTRLoads = window._ediTRLoads || {};
+    window._ediTRLoads[built.load] = built;
+    window._ediTRPending = { excels: [], pdfs: [] }; // clear staging on success
+    showAlert('✓ Twin Rivers ' + built.load + ' — ' + built.rollCount + ' rolls → ' + built.packCount + ' packs' + xchk, 'success');
+    showEDIImportFile();
+  } catch (e) {
+    showAlert('Twin Rivers parse error: ' + (e && e.message ? e.message : e), 'danger');
+  }
+}
+function handleTRDrop(e)   { processTRFiles(e.dataTransfer.files); }
+function handleTRUpload(e) { processTRFiles(e.target.files); }
+
+function renderTRSection() {
+  const sectionStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px';
+  const loads = window._ediTRLoads || {};
+  const keys = Object.keys(loads);
+  const stamps = window._ediTRStamps || {};
+  // Staged-files indicator (the set is Bill of Lading + Shipping Manifest + FRAPAP Excel)
+  const pend = window._ediTRPending || { excels: [], pdfs: [] };
+  const manStaged = pend.pdfs.some(f => /rpt020|manifest/i.test(f.name));
+  const bolStaged = pend.pdfs.some(f => /rpt040|bill|bol/i.test(f.name));
+  const pdfsUnnamed = pend.pdfs.filter(f => !/rpt020|manifest|rpt040|bill|bol/i.test(f.name)).length;
+  const tick = ok => ok ? '<span style="color:var(--accent2)">✓</span>' : '<span style="color:var(--text2)">○</span>';
+  const pendStr = (pend.excels.length || pend.pdfs.length)
+    ? `<div style="font-size:10px;color:var(--warning);text-align:center;font-weight:bold">Staged — Bill of Lading: ${tick(bolStaged)} &nbsp; Shipping Manifest: ${tick(manStaged)} &nbsp; FRAPAP Excel: ${tick(pend.excels.length>0)}${pdfsUnnamed ? ' &nbsp;(' + pdfsUnnamed + ' more PDF)' : ''}<button onclick="window._ediTRPending={excels:[],pdfs:[]};showEDIImportFile()" style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;text-decoration:underline">clear</button></div>`
+    : '';
+  let body;
+  if (!keys.length) {
+    body = `<div style="border:2px dashed var(--border);border-radius:6px;padding:18px;text-align:center;color:var(--text2);font-size:12px">No Twin Rivers loads imported yet</div>`;
+  } else {
+    const totalPacks = keys.reduce((s, k) => s + loads[k].packCount, 0);
+    const items = keys.map((key, idx) => {
+      const ld = loads[key];
+      const stamp = stamps[key];
+      const stampStr = stamp ? `<div style="font-size:9px;color:var(--accent2)">✓ Exported: ${new Date(stamp.exportedAt).toLocaleString()}</div>` : '';
+      const detailId = 'tr-detail-' + String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const expDispTR = new Date().toLocaleDateString('en-US');
+      const drows = ld.rows.map((r, ri) => `<tr style="background:${ri % 2 !== 0 ? 'rgba(0,0,0,0.03)' : ''};border-bottom:1px solid var(--border)">
+          <td style="padding:4px 8px;font-weight:bold;color:var(--accent2);white-space:nowrap">${r.lot || '—'}</td>
+          <td style="padding:4px 8px">${r.sku || ''}</td>
+          <td style="padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.productId || ''}</td>
+          <td style="padding:4px 8px;color:var(--accent);white-space:nowrap">${r.po || '—'}</td>
+          <td style="padding:4px 8px;text-align:right">${r.lf ? r.lf.toLocaleString() : '—'}</td>
+          <td style="padding:4px 8px;text-align:right">${r.weight ? r.weight.toLocaleString() : '—'}</td>
+          <td style="padding:4px 8px;white-space:nowrap">${expDispTR}</td></tr>`).join('');
+      const totLf = ld.rows.reduce((s, r) => s + r.lf, 0).toLocaleString();
+      const totWt = ld.rows.reduce((s, r) => s + r.weight, 0).toLocaleString();
+      return `<div style="border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${idx % 2 !== 0 ? 'var(--surface2)' : 'var(--surface)'}">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:bold;color:var(--accent2);font-size:12px">${ld.load}${ld.vehicle ? ' &nbsp;·&nbsp; ' + ld.vehicle : ''}</div>
+            <div style="font-size:10px;color:var(--text2)">${ld.rollCount} rolls → ${ld.packCount} packs</div>
+            ${stampStr}
+          </div>
+          <button onclick="exportSingleTR(&quot;${key}&quot;)" style="background:var(--accent2);color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px">Export</button>
+          <button onclick="deleteTRLoad(&quot;${key}&quot;)" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px" title="Remove load">✕</button>
+          <button id="${detailId}-btn" onclick="toggleEDIDetail(&quot;${detailId}&quot;)" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px">▼</button>
+        </div>
+        <div id="${detailId}" style="display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:340px;overflow-y:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:10px">
+            <thead><tr style="background:var(--surface2)">
+              <th style="padding:5px 8px;text-align:left;color:var(--text2)">LOT #</th>
+              <th style="padding:5px 8px;text-align:left;color:var(--text2)">SKU</th>
+              <th style="padding:5px 8px;text-align:left;color:var(--text2)">PRODUCT ID</th>
+              <th style="padding:5px 8px;text-align:left;color:var(--text2)">PO#</th>
+              <th style="padding:5px 8px;text-align:right;color:var(--text2)">LF</th>
+              <th style="padding:5px 8px;text-align:right;color:var(--text2)">WEIGHT</th>
+              <th style="padding:5px 8px;text-align:left;color:var(--text2)">EXP DATE</th>
+            </tr></thead><tbody>${drows}
+            <tr style="background:rgba(46,160,67,0.08);font-weight:bold">
+              <td colspan="4" style="padding:5px 8px;color:var(--accent2)">TOTAL — ${ld.rollCount} rolls</td>
+              <td style="padding:5px 8px;text-align:right;color:var(--accent2)">${totLf}</td>
+              <td style="padding:5px 8px;text-align:right;color:var(--accent2)">${totWt}</td>
+              <td></td>
+            </tr></tbody></table>
+        </div>
+      </div>`;
+    }).join('');
+    body = `<div style="font-size:10px;color:var(--text2)">${keys.length} load(s) &nbsp;·&nbsp; ${totalPacks} packs total</div>
+      <div style="max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">${items}</div>`;
+  }
+  return `<div style="${sectionStyle};order:6">
+    <div><div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent2)">🌲 TWIN RIVERS LOADS</div>
+    <div style="font-size:10px;color:var(--text2);margin-top:2px">Drop the Straight Bill of Lading + Shipping Manifest + FRAPAP Excel</div></div>
+    <div ondragover="event.preventDefault();this.style.borderColor='var(--accent2)';this.style.background='rgba(46,160,67,0.08)'" ondragleave="this.style.borderColor='';this.style.background=''" ondrop="event.preventDefault();this.style.borderColor='';this.style.background='';handleTRDrop(event)" onclick="document.getElementById('tr-file-input').click()" style="border:2px dashed var(--border);border-radius:8px;padding:18px;text-align:center;cursor:pointer;user-select:none">
+      <div style="font-size:22px;margin-bottom:6px">📂</div>
+      <div style="font-size:12px;font-weight:bold;color:var(--accent2)">Drop Twin Rivers files here</div>
+      <div style="font-size:10px;color:var(--text2);margin-top:4px">Bill of Lading + Shipping Manifest (.pdf) + FRAPAP (.xls) &nbsp;·&nbsp; together or one at a time</div>
+      <input type="file" id="tr-file-input" accept=".xls,.xlsx,.pdf" multiple onchange="handleTRUpload(event)" style="display:none">
+    </div>
+    ${pendStr}
+    ${body}
+  </div>`;
 }
 
 function exportSingleHBH(idx) {
