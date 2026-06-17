@@ -378,6 +378,7 @@ let state = {
   buSeqMap: {},
   buZmoMap: {},
   ipgWidthTable: {},
+  hbhWidthTable: {},
   importMode: 'inventory',
   lastImport: null
 };
@@ -525,6 +526,11 @@ function listenToFirebase() {
     const data = snap.val();
     state.ipgWidthTable = data || {};
     updateIPGWidthCount(); // refresh count if the EDI section is open
+  });
+  db.ref('6021/hbhWidthTable').on('value', snap => {
+    const data = snap.val();
+    state.hbhWidthTable = data || {};
+    updateHBHWidthCount(); // refresh count if the EDI section is open
   });
 
   // cycleCount6021 connection loaded on demand
@@ -3388,6 +3394,16 @@ function showEDIImportFile() {
         <div style="font-size:12px;font-weight:bold;color:var(--warning)">Drop GS load file here</div>
         <div style="font-size:10px;color:var(--text2);margin-top:4px">.xls or .xlsx &nbsp;·&nbsp; click to browse</div>
         <input type="file" id="hbh-file-input" accept=".xls,.xlsx" onchange="handleHBHUpload(event)" style="display:none">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px">
+        <span style="font-size:10px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Width &rarr; SKU Table</span>
+        <button onclick="document.getElementById('hbh-width-input').click()"
+          style="background:var(--surface);color:var(--warning);border:1.5px solid var(--warning);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:700">&#8593; Import Table</button>
+        <button onclick="downloadHBHWidthTemplate()"
+          style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600">&#8595; Download Current / Template</button>
+        <span id="hbh-width-count" style="font-size:10px;color:var(--text2)"></span>
+        <input type="file" id="hbh-width-input" accept=".xlsx,.xls" style="display:none"
+          onchange="if(this.files[0])handleHBHWidthFile(this.files[0])">
       </div>`;
 
 
@@ -3607,6 +3623,7 @@ function showEDIImportFile() {
   // Restore IPG loads if any are in memory (panel rebuild would clear the list div)
   if (_ipgLoads && _ipgLoads.length) renderIPGLoads();
   updateIPGWidthCount();
+  updateHBHWidthCount();
 }
 
 
@@ -3981,7 +3998,11 @@ function handleHBHUpload(e) {
 }
 
 // ─── HBH SKU CONVERSION ──────────────────────────────────────────────────────
-// Width → attachment suffix mapping (SKU = material + "." + attachment)
+// Width → attachment suffix mapping (SKU = material + "." + code).
+// HBH_SKU_MAP holds the built-in DEFAULTS. The table is user-maintainable: import
+// a spreadsheet to add/override width→code entries (persisted to Firebase at
+// 6021/hbhWidthTable). Imported entries overlay these defaults, so an imported
+// table that is missing an old width never breaks existing conversions.
 const HBH_SKU_MAP = [
   [26,      '2600'],  [29.5,   '2950'],  [31,     '3100'],
   [33.875,  '3314'],  [36,     '3600'],  [38,     '3800'],
@@ -3990,11 +4011,108 @@ const HBH_SKU_MAP = [
   [54,      '5400'],  [56,     '5600'],  [56.25,  '5625']
 ];
 
+// Returns the effective width→code list: built-in defaults with any imported
+// entries (from state/Firebase) layered on top. Imported entries are stored as a
+// LIST of {w, code} records in Firebase — NOT keyed by width, because widths like
+// "33.875" contain "." which Firebase forbids in keys. An imported entry whose
+// width matches a default (within 0.001) overrides that default.
+function getHbhWidthTable() {
+  const merged = HBH_SKU_MAP.map(e => [e[0], e[1]]); // clone defaults
+  const imported = (state && state.hbhWidthTable) ? state.hbhWidthTable : null;
+  if (imported) {
+    const records = Array.isArray(imported) ? imported : Object.values(imported);
+    records.forEach(rec => {
+      if (!rec || rec.w === undefined || rec.w === null) return;
+      const w = parseFloat(rec.w);
+      if (isNaN(w)) return;
+      const code = (rec.code == null ? '' : rec.code).toString();
+      const hit = merged.find(e => Math.abs(e[0] - w) < 0.001);
+      if (hit) hit[1] = code;        // override matching default width
+      else merged.push([w, code]);   // add a brand-new width
+    });
+  }
+  return merged;
+}
+
+// Count of imported (non-default) mappings, handling array or object form.
+function hbhImportedCount() {
+  const imported = (state && state.hbhWidthTable) ? state.hbhWidthTable : null;
+  if (!imported) return 0;
+  return Array.isArray(imported) ? imported.length : Object.keys(imported).length;
+}
+
 function getHBHSku(material, width) {
   const w      = parseFloat(width) || 0;
-  const entry  = HBH_SKU_MAP.find(([mw]) => Math.abs(mw - w) < 0.001);
+  const entry  = getHbhWidthTable().find(([mw]) => Math.abs(mw - w) < 0.001);
   if (!entry || !material) return material || '';
   return material + '.' + entry[1];
+}
+
+// Import a Width → code table from a spreadsheet.
+// Expected columns (row 1 = header, skipped): Import Width | New Width
+function importHBHWidthTable(wb) {
+  const ws   = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+  const records = [];
+  rows.forEach((row, i) => {
+    if (i === 0) return; // skip header
+    const w    = parseFloat((row[0] || '').toString().trim());
+    const code = (row[1] == null ? '' : row[1]).toString().trim();
+    if (isNaN(w) || !code) return;
+    records.push({ w: w, code: code });
+  });
+  if (!records.length) {
+    showAlert('No width mappings found. Expected columns: Import Width | New Width', 'warning');
+    return;
+  }
+  state.hbhWidthTable = records;
+  if (db) {
+    db.ref('6021/hbhWidthTable').set(records)
+      .catch(err => showAlert('Loaded locally, but cloud sync failed: ' + err.message, 'warning'));
+  }
+  showAlert('✓ HBH width table loaded — ' + records.length + ' mapping(s). Re-drop your GS file to apply.', 'success');
+  updateHBHWidthCount();
+}
+
+function handleHBHWidthFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, {type:'binary'});
+      importHBHWidthTable(wb);
+    } catch(err) {
+      showAlert('Width table import failed: ' + err.message, 'danger');
+      console.error(err);
+    }
+  };
+  reader.readAsBinaryString(file);
+}
+
+// Export the current effective table (defaults + imported) as an editable
+// spreadsheet — doubles as the import template so the format is self-documenting.
+function downloadHBHWidthTemplate() {
+  const table = getHbhWidthTable();
+  const aoa = [['Import Width', 'New Width']];
+  table.forEach(e => aoa.push([e[0], e[1]]));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Force the New Width column to text so any leading zeros survive in Excel.
+  for (let i = 2; i <= aoa.length; i++) {
+    const cell = ws['B' + i];
+    if (cell) { cell.t = 's'; cell.z = '@'; }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'HBH Width Table');
+  XLSX.writeFile(wb, 'HBH_Widths_Table.xlsx');
+}
+
+function updateHBHWidthCount() {
+  const el = document.getElementById('hbh-width-count');
+  if (!el) return;
+  const total = getHbhWidthTable().length;
+  const imported = hbhImportedCount();
+  el.textContent = imported
+    ? total + ' mappings (' + imported + ' imported + defaults)'
+    : total + ' mappings (defaults only)';
 }
 
 
@@ -4002,12 +4120,16 @@ function processHBHFile(file) {
   const reader = new FileReader();
   reader.onload = ev => {
     try {
+      if (!state.dirData || Object.keys(state.dirData).length === 0) {
+        showAlert('⚠ No data loaded yet — Product ID, Customer, Width, and SKU codes will be blank. Import or Preview your data file first, then re-drop the HBH file.', 'warning');
+      }
       const wb = XLSX.read(ev.target.result, {type:'binary', raw:true});
       // Append to existing loads (support multiple file drops)
       const invByLot = {};
       state.inventory.forEach(r => { if (r.lot) invByLot[r.lot] = r; });
 
       const hbhPrefix = s => ('HBH ' + s).replace(/^HBH\s+HBH\s+/i, 'HBH ');
+      const nz = v => (v == null ? '' : v.toString()).replace(/\u0000/g, '').trim(); // strip NUL bytes from raw file values
 
       wb.SheetNames.forEach(sn => {
         const ws   = wb.Sheets[sn];
@@ -4017,18 +4139,18 @@ function processHBHFile(file) {
         const gsGroups = {};
         rows.forEach(r => {
           if (!r || !r[0]) return;
-          const gsNum    = (r[0]||'').toString().trim();
+          const gsNum    = nz(r[0]);
           if (!gsNum) return;
-          const wrdBatch = (r[6]||'').toString().trim();
+          const wrdBatch = nz(r[6]);
           if (!wrdBatch) return;
           const batch    = wrdBatch.startsWith('WRD') ? '5' + wrdBatch.slice(3) : wrdBatch;
-          const truck    = (r[1]||'').toString().trim();
-          const stoDoc   = (r[18]||'').toString().trim().replace(/^0+/,'') || '';
-          const stoItem  = (r[19]||'').toString().trim().replace(/^0+/,'') || '';
+          const truck    = nz(r[1]);
+          const stoDoc   = nz(r[18]).replace(/^0+/,'') || '';
+          const stoItem  = nz(r[19]).replace(/^0+/,'') || '';
           const sto      = stoDoc + (stoItem ? '-'+stoItem : '');
           const weight   = parseFloat(r[9]) || 0;
           const lf       = parseFloat(r[12]) || 0;
-          const skuFile  = (r[21]||'').toString().trim();
+          const skuFile  = nz(r[21]);
           const d        = state.dirData[batch] || {};
           const inv      = invByLot[batch] || {};
           // custName: strip leading "HBH " if already present
@@ -4732,8 +4854,8 @@ function showPendingPutAway() {
           bodyRows += `<tr style="background:${altBg?'var(--surface)':''}">
             <td>${dt}</td>
             <td style="font-weight:bold;color:var(--accent)">${bol}</td>
-            <td style="font-size:10px">${locs}</td>
             <td style="font-size:10px;color:var(--text2)">${bus}</td>
+            <td style="font-size:10px">${locs}</td>
             <td style="cursor:pointer;user-select:none" onclick="paSkuToggle('${rowId}')">
               <span style="color:var(--accent);font-weight:bold">${sku}</span>
               <span id="${rowId}-chev" style="font-size:10px;color:var(--accent2);margin-left:6px">▶ ${skuRolls.length} lots</span>
@@ -4783,8 +4905,8 @@ function showPendingPutAway() {
           <thead><tr>
             <th style="text-align:left">DATE REC'D</th>
             <th style="text-align:left">INBOUND BOL</th>
-            <th style="text-align:left">LOCATION</th>
             <th style="text-align:left">BU</th>
+            <th style="text-align:left">LOCATION</th>
             <th style="text-align:left">SKU (click to expand lots)</th>
             <th style="text-align:right">ROLLS</th>
             <th style="text-align:right">TONS</th>
