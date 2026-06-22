@@ -340,6 +340,24 @@ function unitNoun(ctx) {
   return /MAXXON/i.test(cust) ? 'skids' : 'rolls';
 }
 function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperCase() + u.slice(1); }
+// MAXXON is counted in skids; everyone else in rolls. Resolve the unit for a cycle count
+// from the customer of the counted locations (falls back to the session's stored BU codes).
+function ccUnitForLocs(locs) {
+  if (!locs || !locs.length) return 'rolls';
+  const set = new Set(locs);
+  const rows = (state.inventory||[]).filter(r => set.has(r.location));
+  if (rows.length && rows.every(r => unitNoun(r.customer)==='skids')) return 'skids';
+  return 'rolls';
+}
+function ccSessionUnit(session) {
+  if (!session) return 'rolls';
+  const locs = session.locations || (session.entries||[]).map(e=>e.loc);
+  if (ccUnitForLocs(locs)==='skids') return 'skids';
+  const bus = [];
+  (session.entries||[]).forEach(e => (e.rows||[]).forEach(r => { if (r && r.bu) bus.push(resolveBU(r.bu)); }));
+  if (bus.length && bus.every(b => /MAXXON/i.test(b))) return 'skids';
+  return 'rolls';
+}
 
 const USERS = [
   { id:'Ocontreras', name:'Omar Contreras', password:null, role:'admin' },
@@ -4868,7 +4886,7 @@ function showPendingPutAway() {
           bodyRows += `<tr id="${rowId}-lot-hdr" style="display:none;background:rgba(61,92,230,0.08)">
             <td style="padding-left:28px;font-size:9px;font-weight:bold;color:var(--text2);letter-spacing:1px" colspan="4">↳ LOTS</td>
             <td style="font-size:9px;font-weight:bold;color:var(--accent);letter-spacing:1px;text-align:right;padding-right:12px">LOT #</td>
-            <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">ROLLS</td>
+            <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">${unitNoun(cust).toUpperCase()}</td>
             <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">TONS</td>
           </tr>`;
           // Individual lot rows (hidden by default)
@@ -4896,7 +4914,7 @@ function showPendingPutAway() {
            onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
         <span id="pa-chev-${ci}" style="color:var(--accent);font-size:13px">▶</span>
         <span style="font-weight:bold;font-size:13px;flex:1">${cust}</span>
-        <span style="font-size:11px;color:var(--text2)">${custRolls.length} rolls</span>
+        <span style="font-size:11px;color:var(--text2)">${custRolls.length} ${unitNoun(cust)}</span>
         <span style="font-size:11px;color:var(--accent2);margin-left:8px">${custBOLs} BOLs</span>
         <span style="font-size:13px;font-weight:bold;color:var(--warning);margin-left:8px">${Math.round(custTons).toLocaleString()} tons</span>
       </div>
@@ -4908,7 +4926,7 @@ function showPendingPutAway() {
             <th style="text-align:left">BU</th>
             <th style="text-align:left">LOCATION</th>
             <th style="text-align:left">SKU (click to expand lots)</th>
-            <th style="text-align:right">ROLLS</th>
+            <th style="text-align:right">${unitNoun(cust).toUpperCase()}</th>
             <th style="text-align:right">TONS</th>
           </tr></thead>
           <tbody>${bodyRows}</tbody>
@@ -5024,7 +5042,7 @@ function showLastPutAway(filterDate='') {
              onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
           <span id="lpa-chev-${ci}" style="color:var(--accent);font-size:13px">▶</span>
           <span style="font-weight:bold;font-size:13px;flex:1">${cust}</span>
-          <span style="font-size:11px;color:var(--text2)">${custRolls.length} rolls</span>
+          <span style="font-size:11px;color:var(--text2)">${custRolls.length} ${unitNoun(cust)}</span>
           <span style="font-size:13px;font-weight:bold;color:var(--warning);margin-left:8px">${Math.round(custTons).toLocaleString()} tons</span>
         </div>
         <div id="lpa-${ci}" style="display:none">
@@ -5032,7 +5050,7 @@ function showLastPutAway(filterDate='') {
             <thead><tr>
               <th style="text-align:left">LOCATION</th>
               <th style="text-align:left">LOT #</th>
-              <th style="text-align:right">ROLLS</th>
+              <th style="text-align:right">${unitNoun(cust).toUpperCase()}</th>
               <th style="text-align:right">TONS</th>
             </tr></thead>
             <tbody>`;
@@ -5733,7 +5751,7 @@ function showCCTracker() {
             const rolls = inv.filter(r=>(r.pcsPending||0)===0).length;
             return `<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;border-radius:6px;margin-bottom:3px;background:${i%2!==0?'var(--surface2)':'rgba(224,62,62,0.05)'}">
               <span style="font-weight:bold;color:var(--accent);font-size:12px">${loc}</span>
-              <span style="font-size:11px;color:var(--text2)">${rolls?rolls+' rolls':'Empty'}</span>
+              <span style="font-size:11px;color:var(--text2)">${rolls?rolls+' '+ccUnitForLocs([loc]):'Empty'}</span>
             </div>`;
           }).join('')}
           </div>`
@@ -5967,6 +5985,7 @@ function loadCCHistory(inline=false) {
 function startCycleCount() {
   const selected = [...document.querySelectorAll('.cc-loc-chk:checked')].map(c=>c.value);
   if (!selected.length) { showAlert('Select at least one location.','warning'); return; }
+  const ccU = ccUnitForLocs(selected);
 
   // Build per-location skid detail (excluding picked)
   const locData = {};
@@ -6026,7 +6045,7 @@ function startCycleCount() {
       <div style="overflow-x:auto">
       <table class="data-table" style="font-size:11px;margin:0"><thead><tr>
         <th>SKU</th><th>BU</th><th>PRODUCT ID</th><th>LOT #</th><th>SKID ID</th><th>DATE REC'D</th>
-        <th style="text-align:center">ROLLS</th><th style="text-align:right">PCS</th><th>COUNT NOTES</th>
+        <th style="text-align:center">${ccU.toUpperCase()}</th><th style="text-align:right">PCS</th><th>COUNT NOTES</th>
       </tr></thead><tbody>`;
 
     if (locEntries.length===0 || locEntries[0].empty) {
@@ -6143,7 +6162,7 @@ function _renderCCPrintWindow(session) {
       <table class="loc-header-table">
         <tr>
           <td class="loc-name">📍 ${loc}</td>
-          <td class="loc-summary">${locRolls} rolls &nbsp;·&nbsp; ${locPcs.toLocaleString()} pcs</td>
+          <td class="loc-summary">${locRolls} ${ccU} &nbsp;·&nbsp; ${locPcs.toLocaleString()} pcs</td>
         </tr>
       </table>
       <table class="count-table">
@@ -6161,7 +6180,7 @@ function _renderCCPrintWindow(session) {
             <th class="chk-hdr">✓</th>
             <th>SKID ID</th>
             <th>REC'D DATE</th>
-            <th class="num">ROLLS</th>
+            <th class="num">${ccU.toUpperCase()}</th>
             <th class="num">PCS</th>
             <th class="wide">COUNT NOTES</th>
           </tr>
@@ -6304,6 +6323,7 @@ function _renderCCPrintWindow(session) {
 
 function showCCReport(session) {
   state.currentView = 'ccreport';
+  const ccU = ccSessionUnit(session);
   const adjs = session.adjustments||[];
   const getAdj = (loc) => adjs.find(a=>a.loc===loc);
 
@@ -6348,7 +6368,7 @@ function showCCReport(session) {
   <div class="stats-grid" style="margin-bottom:20px">
     <div class="stat-card"><div class="stat-label">LOCATIONS</div><div class="stat-value">${session.locations.length}</div></div>
     <div class="stat-card"><div class="stat-label">EXPECTED PLT</div><div class="stat-value">${totExpPlt}</div></div>
-    <div class="stat-card"><div class="stat-label">ACTUAL ROLLS</div><div class="stat-value ${hasAdj?totVarPlt===0?'green':totVarPlt>0?'yellow':'red':''}">${hasAdj?totActPlt:'—'}</div></div>
+    <div class="stat-card"><div class="stat-label">ACTUAL ${ccU.toUpperCase()}</div><div class="stat-value ${hasAdj?totVarPlt===0?'green':totVarPlt>0?'yellow':'red':''}">${hasAdj?totActPlt:'—'}</div></div>
     <div class="stat-card"><div class="stat-label">VARIANCE PLT</div><div class="stat-value ${totVarPlt===0?'green':totVarPlt>0?'yellow':'red'}">${hasAdj?(totVarPlt>=0?'+':'')+totVarPlt:'—'}</div></div>
     <div class="stat-card"><div class="stat-label">BIN ACCURACY</div><div class="stat-value ${binAcc>=100?'green':binAcc>=95?'yellow':'red'}">${accurateLines7}/${totalLines7}<br><span style="font-size:18px">${binAcc}%</span></div></div>
     <div class="stat-card"><div class="stat-label">VARIANCES</div><div class="stat-value ${adjCount>0?'yellow':'green'}">${adjCount}</div></div>
@@ -6445,7 +6465,7 @@ function showCCReport(session) {
           <thead><tr>
             <th>SKU</th><th>PRODUCT ID</th><th>PO #</th><th>LOT #</th><th>SKID ID</th>
             <th style="text-align:center">PLT</th><th style="text-align:right">PCS</th>
-            ${hasAdj?'<th style="text-align:right;color:var(--warning)">ADJ PLT</th><th style="text-align:right;color:var(--accent2)">ACTUAL ROLLS</th><th style="text-align:right">VAR PCS</th><th>BIN ACC</th>':'<th>COUNT NOTES</th>'}
+            ${hasAdj?'<th style="text-align:right;color:var(--warning)">ADJ PLT</th><th style="text-align:right;color:var(--accent2)">ACTUAL ${ccU.toUpperCase()}</th><th style="text-align:right">VAR PCS</th><th>BIN ACC</th>':'<th>COUNT NOTES</th>'}
           </tr></thead>
           <tbody>${detailRows}</tbody>
         </table>
@@ -6461,6 +6481,7 @@ function showCCCountSheetView(sessionId) {
   state.currentView = 'ccsheet';
   const load = (session) => {
     window._ccLastSession = session;
+    const ccU = ccSessionUnit(session);
 
     let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <div>
@@ -6482,7 +6503,7 @@ function showCCCountSheetView(sessionId) {
         <div style="background:var(--surface);padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
           <div>
             <span style="font-size:13px;font-weight:bold;color:var(--accent)">📍 ${loc}</span>
-            <span style="font-size:11px;color:var(--text2);margin-left:12px">${locRolls} rolls · ${locPcs.toLocaleString()} pcs</span>
+            <span style="font-size:11px;color:var(--text2);margin-left:12px">${locRolls} ${ccU} · ${locPcs.toLocaleString()} pcs</span>
           </div>
         </div>
         <div style="overflow-x:auto">
@@ -6495,7 +6516,7 @@ function showCCCountSheetView(sessionId) {
             <th style="text-align:center">✓</th>
             <th>SKID ID</th>
             <th>REC'D DATE</th>
-            <th style="text-align:center">ROLLS</th>
+            <th style="text-align:center">${ccU.toUpperCase()}</th>
             <th style="text-align:right">PCS</th>
             <th>COUNT NOTES</th>
           </tr></thead>
@@ -6509,7 +6530,7 @@ function showCCCountSheetView(sessionId) {
           if (!rows.length) {
             html += `<tr>
               <td style="color:var(--accent);font-weight:bold">${e.sku}</td>
-              <td colspan="7" style="color:var(--text2);font-size:10px">No roll detail available</td>
+              <td colspan="7" style="color:var(--text2);font-size:10px">No ${ccU.slice(0,-1)} detail available</td>
               <td style="text-align:right">${e.expectedPcs.toLocaleString()}</td><td></td>
             </tr>`;
           } else {
@@ -6563,6 +6584,7 @@ function showCCAdjustments(sessionId) {
   state.currentView = 'ccadjust';
   const load = (session) => {
     const adjs   = session.adjustments || [];
+    const ccU = ccSessionUnit(session); window._ccAdjUnit = ccU;
     const getAdj = (loc) => adjs.find(a => a.loc === loc);
 
     // One row per LOCATION (not per SKU)
@@ -6606,8 +6628,8 @@ function showCCAdjustments(sessionId) {
 
     <!-- Info banner -->
     <div style="background:rgba(79,110,247,0.07);border:1px solid rgba(79,110,247,0.2);border-radius:6px;padding:8px 14px;font-size:11px;color:var(--text2);margin-bottom:14px">
-      <strong style="color:var(--accent)">ADD</strong> = extra rolls found (over expected) &nbsp;·&nbsp;
-      <strong style="color:var(--danger)">MISSING</strong> = rolls not found (under expected) &nbsp;·&nbsp;
+      <strong style="color:var(--accent)">ADD</strong> = extra ${ccU} found (over expected) &nbsp;·&nbsp;
+      <strong style="color:var(--danger)">MISSING</strong> = ${ccU} not found (under expected) &nbsp;·&nbsp;
       Net = Add − Missing
     </div>
 
@@ -6622,7 +6644,7 @@ function showCCAdjustments(sessionId) {
     <!-- Summary bar -->
     <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:16px">
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
-        <div style="font-size:9px;color:var(--text2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">EXP ROLLS</div>
+        <div style="font-size:9px;color:var(--text2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">EXP ${ccU.toUpperCase()}</div>
         <div id="rt-exp" style="font-size:22px;font-weight:bold;color:var(--text)">${totalExp}</div>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
@@ -6634,11 +6656,11 @@ function showCCAdjustments(sessionId) {
         <div id="rt-miss" style="font-size:22px;font-weight:bold;color:var(--danger)">0</div>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
-        <div style="font-size:9px;color:var(--text2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">NET ADJ ROLLS</div>
+        <div style="font-size:9px;color:var(--text2);letter-spacing:1px;font-weight:bold;margin-bottom:4px">NET ADJ ${ccU.toUpperCase()}</div>
         <div id="rt-net" style="font-size:22px;font-weight:bold;color:var(--text)">+0</div>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
-        <div style="font-size:9px;color:var(--accent);letter-spacing:1px;font-weight:bold;margin-bottom:4px">ACTUAL ROLLS</div>
+        <div style="font-size:9px;color:var(--accent);letter-spacing:1px;font-weight:bold;margin-bottom:4px">ACTUAL ${ccU.toUpperCase()}</div>
         <div id="rt-act" style="font-size:22px;font-weight:bold;color:var(--accent)">${totalExp}</div>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">
@@ -6655,7 +6677,7 @@ function showCCAdjustments(sessionId) {
 
     <!-- Add a location not in the count (e.g. inventory found in an empty location) -->
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-      <span style="font-size:11px;color:var(--text2)">Found rolls in an empty / uncounted location?</span>
+      <span style="font-size:11px;color:var(--text2)">Found ${ccU} in an empty / uncounted location?</span>
       <input list="adj-loc-options" id="adj-add-loc" placeholder="Location code (e.g. 23-02-09)"
         onkeydown="if(event.key==='Enter'){event.preventDefault();addAdjLocation();}"
         style="padding:6px 10px;border:1.5px solid var(--accent);border-radius:6px;font-family:var(--font);font-size:12px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:200px;text-transform:uppercase">
@@ -6669,11 +6691,11 @@ function showCCAdjustments(sessionId) {
       <thead>
         <tr style="background:var(--surface2)">
           <th style="padding:8px 10px;text-align:left;white-space:nowrap">LOCATION</th>
-          <th style="padding:8px 10px;text-align:right;white-space:nowrap">EXP ROLLS</th>
+          <th style="padding:8px 10px;text-align:right;white-space:nowrap">EXP ${ccU.toUpperCase()}</th>
           <th style="padding:8px 10px;text-align:center;color:var(--accent2);white-space:nowrap">ADD ↑</th>
           <th style="padding:8px 10px;text-align:center;color:var(--danger);white-space:nowrap">MISSING ↓</th>
           <th style="padding:8px 10px;text-align:right;white-space:nowrap">NET ADJ</th>
-          <th style="padding:8px 10px;text-align:right;white-space:nowrap">ACTUAL ROLLS</th>
+          <th style="padding:8px 10px;text-align:right;white-space:nowrap">ACTUAL ${ccU.toUpperCase()}</th>
           <th style="padding:8px 10px;text-align:center;white-space:nowrap">BIN ACCURACY</th>
           <th style="padding:8px 10px;text-align:center;white-space:nowrap">COUNT ACCURACY</th>
           <th style="padding:8px 10px;text-align:left">NOTES</th>
@@ -6754,7 +6776,7 @@ function renderAdjTable() {
     const isZero   = (r.expRolls || 0) === 0;
     const emptyTag = isZero ? '<span style="font-size:9px;font-weight:700;color:var(--text2);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;letter-spacing:1px">EMPTY</span>' : '';
     // MISSING can't apply to a location that expected 0 rolls — disable it there.
-    const missAttrs = isZero ? 'value="0" disabled title="No rolls expected here"' : 'value="'+(r.adjMiss||0)+'"';
+    const missAttrs = isZero ? 'value="0" disabled title="No '+(window._ccAdjUnit||'rolls')+' expected here"' : 'value="'+(r.adjMiss||0)+'"';
     const missStyle = isZero ? inputStyle+'background:var(--surface2);border-color:var(--border);opacity:.5;cursor:not-allowed;' : inputStyle+'background:rgba(224,62,62,0.06);border-color:var(--danger);';
     const removeBtn = r.added ? '<button onclick="removeAdjLocation('+idx+')" title="Remove this added location" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:2px 4px;margin-left:4px">✕</button>' : '';
     html += `
@@ -6810,7 +6832,7 @@ function addAdjLocation() {
   const newIdx = rows.length - 1;
   const el = document.getElementById('adj-add-'+newIdx);
   if (el) { el.focus(); el.select(); }
-  showAlert('✓ Added ' + loc + ' — enter the rolls found.','success');
+  showAlert('✓ Added ' + loc + ' — enter the '+(window._ccAdjUnit||'rolls')+' found.','success');
 }
 
 function removeAdjLocation(idx) {
