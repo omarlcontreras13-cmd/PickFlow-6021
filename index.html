@@ -346,17 +346,18 @@ function ccUnitForLocs(locs) {
   if (!locs || !locs.length) return 'rolls';
   const set = new Set(locs);
   const rows = (state.inventory||[]).filter(r => set.has(r.location));
-  if (rows.length && rows.every(r => unitNoun(r.customer)==='skids')) return 'skids';
+  if (rows.length && rows.every(r => unitNoun(r.customer)==='skids')) return 'pallets';
   return 'rolls';
 }
 function ccSessionUnit(session) {
   if (!session) return 'rolls';
-  const locs = session.locations || (session.entries||[]).map(e=>e.loc);
-  if (ccUnitForLocs(locs)==='skids') return 'skids';
+  // Unit comes from the customer/BU recorded in the count itself, so a saved count
+  // always displays and prints correctly regardless of later inventory moves.
   const bus = [];
-  (session.entries||[]).forEach(e => (e.rows||[]).forEach(r => { if (r && r.bu) bus.push(resolveBU(r.bu)); }));
-  if (bus.length && bus.every(b => /MAXXON/i.test(b))) return 'skids';
-  return 'rolls';
+  (session.entries||[]).forEach(e => { if (e && !e.empty) (e.rows||[]).forEach(r => { if (r && r.bu) bus.push(resolveBU(r.bu)); }); });
+  const named = bus.filter(Boolean);
+  if (named.length) return named.every(b => /MAXXON/i.test(b)) ? 'pallets' : 'rolls';
+  return ccUnitForLocs(session.locations || (session.entries||[]).map(e=>e.loc));
 }
 
 const USERS = [
@@ -6150,6 +6151,7 @@ function printCCCurrentSheet() {
 }
 
 function _renderCCPrintWindow(session) {
+  const ccU = ccSessionUnit(session);
   let rows = '';
   let grandTotalRolls = 0, grandTotalPcs = 0;
 
@@ -6280,7 +6282,7 @@ function _renderCCPrintWindow(session) {
   <div class="page-header">
     <div>
       <h1>CYCLE COUNT — ${session.id}</h1>
-      <p>Date: ${dateStr} &nbsp;·&nbsp; ${session.locations.length} locations &nbsp;·&nbsp; ${grandTotalRolls} rolls${session.counterName?` &nbsp;·&nbsp; Counter: <strong>${session.counterName}</strong>`:''}</p>
+      <p>Date: ${dateStr} &nbsp;·&nbsp; ${session.locations.length} locations &nbsp;·&nbsp; ${grandTotalRolls} ${ccU}${session.counterName?` &nbsp;·&nbsp; Counter: <strong>${session.counterName}</strong>`:''}</p>
     </div>
     <div class="right">
       <strong>PICKFLOW 6021</strong><br>
@@ -6292,7 +6294,7 @@ function _renderCCPrintWindow(session) {
 
   <div class="grand-total-block">
     <div class="gt-label">GRAND TOTAL — ALL LOCATIONS</div>
-    <div class="gt-vals">${grandTotalRolls} Rolls &nbsp;&nbsp; ${grandTotalPcs.toLocaleString()} Pcs</div>
+    <div class="gt-vals">${grandTotalRolls} ${ccU.charAt(0).toUpperCase()+ccU.slice(1)} &nbsp;&nbsp; ${grandTotalPcs.toLocaleString()} Pcs</div>
   </div>
 
   <div class="signature-block">
@@ -6453,7 +6455,7 @@ function showCCReport(session) {
            onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
         <span id="loc-chevron-${li}" style="color:var(--accent2);font-size:13px">▶</span>
         <span style="font-weight:bold;color:var(--accent);font-size:13px">${loc}</span>
-        <span style="font-size:11px;color:var(--text2)">${locSkus.length} SKU${locSkus.length!==1?'s':''} · ${locExpPlt} exp plt · ${locExpPcs.toLocaleString()} pcs</span>
+        <span style="font-size:11px;color:var(--text2)">${locSkus.length} SKU${locSkus.length!==1?'s':''} · ${locExpPlt} exp ${ccU} · ${locExpPcs.toLocaleString()} pcs</span>
         ${hasAdj?`
         <span style="font-size:11px;font-weight:bold;color:${varColor}">${locVarPlt===0?'—':(locVarPlt>0?'+':'')+locVarPlt} var</span>
         <span style="font-size:11px;font-weight:bold;color:${varColor}">${hasAdj?locActPlt+' act':'—'}</span>
@@ -6466,8 +6468,8 @@ function showCCReport(session) {
         <table class="data-table" style="font-size:11px;margin:0">
           <thead><tr>
             <th>SKU</th><th>PRODUCT ID</th><th>PO #</th><th>LOT #</th><th>SKID ID</th>
-            <th style="text-align:center">PLT</th><th style="text-align:right">PCS</th>
-            ${hasAdj?'<th style="text-align:right;color:var(--warning)">ADJ PLT</th><th style="text-align:right;color:var(--accent2)">ACTUAL ${ccU.toUpperCase()}</th><th style="text-align:right">VAR PCS</th><th>BIN ACC</th>':'<th>COUNT NOTES</th>'}
+            <th style="text-align:center">${ccU.toUpperCase()}</th><th style="text-align:right">PCS</th>
+            ${hasAdj?'<th style="text-align:right;color:var(--warning)">ADJ ${ccU.toUpperCase()}</th><th style="text-align:right;color:var(--accent2)">ACTUAL ${ccU.toUpperCase()}</th><th style="text-align:right">VAR PCS</th><th>BIN ACC</th>':'<th>COUNT NOTES</th>'}
           </tr></thead>
           <tbody>${detailRows}</tbody>
         </table>
