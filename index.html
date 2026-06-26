@@ -5537,7 +5537,7 @@ function showPendingPutAway() {
 
     let bodyRows = '';
 
-    Object.keys(custData).sort().forEach(dt => {
+    Object.keys(custData).sort((a,b)=>{const ta=new Date(a).getTime(),tb=new Date(b).getTime();if(isNaN(ta)&&isNaN(tb))return 0;if(isNaN(ta))return 1;if(isNaN(tb))return -1;return ta-tb;}).forEach(dt => {
       Object.keys(custData[dt]).sort().forEach(bol => {
         Object.keys(custData[dt][bol]).sort().forEach((sku, si) => {
           const skuRolls = custData[dt][bol][sku];
@@ -5551,8 +5551,8 @@ function showPendingPutAway() {
           // SKU summary row — clickable to expand lots
           bodyRows += `<tr style="background:${altBg?'var(--surface)':''}">
             <td>${dt}</td>
-            <td style="font-weight:bold;color:var(--accent)">${bol}</td>
             <td style="font-size:10px;color:var(--text2)">${bus}</td>
+            <td style="font-weight:bold;color:var(--accent)">${bol}</td>
             <td style="font-size:10px">${locs}</td>
             <td style="cursor:pointer;user-select:none" onclick="paSkuToggle('${rowId}')">
               <span style="color:var(--accent);font-weight:bold">${sku}</span>
@@ -5602,8 +5602,8 @@ function showPendingPutAway() {
         <table class="data-table" style="font-size:11px;margin:0">
           <thead><tr>
             <th style="text-align:left">DATE REC'D</th>
-            <th style="text-align:left">INBOUND BOL</th>
             <th style="text-align:left">BU</th>
+            <th style="text-align:left">INBOUND BOL</th>
             <th style="text-align:left">LOCATION</th>
             <th style="text-align:left">SKU (click to expand lots)</th>
             <th style="text-align:right">${unitNoun(cust).toUpperCase()}</th>
