@@ -205,6 +205,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
         <button class="btn" id="tons-btn" onclick="showInventorySummary()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📦 Customer Ton View</button>
         <button class="btn" id="cc-btn" onclick="showCycleCountStart()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">🔢 Cycle Counts</button>
         <button class="btn" id="edi-btn" onclick="showEDIImportFile()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📄 EDI Import File</button>
+        <button class="btn" id="nexus-btn" onclick="showNexusReceipt()" style="font-size:11px;background:var(--surface2);border-color:var(--border)">Nexus Inbound</button>
         <button class="btn" id="putaway-btn" onclick="showPendingPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📥 Pending Put Away</button>
         <button class="btn" id="lastputaway-btn" onclick="showLastPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📋 Last Put Away</button>
         <button class="btn" id="archive-settings-btn" onclick="showArchiveSettings()" style="font-size:11px;display:none">📁 Archive Settings</button>
@@ -251,6 +252,7 @@ const BU_MAP = {
   '312': 'CATALYST',
   'ATL': 'ATL UPM',
   'MAX': 'MAXXON',
+  'PA0': 'NEXUS CIRCULAR',   // Nexus PO prefix -> BU
 };
 
 const BU_SEQ_DEFAULT = {
@@ -393,6 +395,7 @@ let state = {
   dataLoaded: false,
   currentView: 'dashboard', // tracks active screen to prevent unwanted re-renders
   buMap: {},
+  nexusReceipts: [],   // Nexus Circular inbound receipts
   lastDirImport: null,
   buSeqMap: {},
   buZmoMap: {},
@@ -600,6 +603,12 @@ function listenToFirebase() {
       });
       state.dirData = data;
     }
+  });
+
+  db.ref('6021/nexusReceipts').on('value', snap => {
+    const data = snap.val() || {};
+    state.nexusReceipts = Object.values(data).sort((a,b) => (b.created||0)-(a.created||0));
+    if (document.getElementById('nx-saved')) nxRenderSaved();
   });
 }
 
@@ -7959,6 +7968,354 @@ function confirmDeleteSession(sessionId) {
   h += '</div></div></div>';
   document.getElementById('modal-container').innerHTML = h;
 }
+
+// ===================== NEXUS CIRCULAR (ported from PickFlow 6049) =====================
+// Inbound receipt / EDI builder for the Nexus Circular account. Additive module;
+// receipts persist to Firebase '6021/nexusReceipts'. Pick tickets use 6021's own
+// PO-filtered creator; Nexus inventory is categorized via BU_MAP key "PA0".
+const NEXUS_SKUS = ['RMBEST','RMBETTER','RMGOOD'];
+const NEXUS_UOMS = [['P','P - Pallets'],['G','G - Gaylord'],['B','B - Bale']];
+function isNexusSku(sku){ return NEXUS_SKUS.includes((sku||'').trim().toUpperCase()); }
+
+const NX = { lines: [], exportRows: [], activeId: null };
+const NX_GRADES = ['RMBEST','RMBETTER','RMGOOD'];
+const NX_UOMS = ['P','G','B'];
+const nxPad4 = n => String(n).padStart(4,'0');
+const nxLot = (po,refLine,seq) => `${po}${refLine}${nxPad4(seq)}`;
+const nxEsc = s => String(s==null?'':s).replace(/"/g,'&quot;');
+function nxAlloc(total,qty){ const per=Math.round((total/qty)*10000)/10000,out=[]; let acc=0; for(let i=1;i<=qty;i++){ if(i<qty){out.push(per);acc+=per;} else out.push(Math.round((total-acc)*10000)/10000);} return out; }
+function nxSerial(d){ return Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/86400000 + 25569; }
+function nxFmt(n){ return (Math.round(n*10000)/10000).toLocaleString(undefined,{maximumFractionDigits:4}); }
+function nxGv(id){ return (document.getElementById(id)||{}).value||''; }
+function nxStatus(msg,color){ const el=document.getElementById('nx-status'); if(el){ el.textContent=msg||''; el.style.color=color||'var(--text2)'; } }
+
+function syncNexusToFirebase(){
+  if(!db){ return; }
+  const map={}; state.nexusReceipts.forEach(r=>{ map[r.id]=r; });
+  setSyncStatus('pending');
+  db.ref('6021/nexusReceipts').set(map).then(()=>setSyncStatus('ok')).catch(()=>setSyncStatus('err'));
+}
+
+function showNexusReceipt(id){
+  state.currentView = 'nexus';
+  document.getElementById('modal-container').innerHTML = `
+  <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="width:1120px;max-width:97vw">
+      <style>
+        .nx-stage{border:1px solid var(--border);border-radius:10px;margin-bottom:16px;overflow:hidden}
+        .nx-shead{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2);border-bottom:1px solid var(--border)}
+        .nx-num{width:20px;height:20px;border-radius:5px;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:bold}
+        .nx-shead h3{font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:0}
+        .nx-shead .nx-hint{margin-left:auto;font-size:10px;color:var(--text2)}
+        .nx-sbody{padding:14px}
+        .nx-grid{display:grid;gap:12px;grid-template-columns:repeat(4,1fr)}
+        @media(max-width:760px){.nx-grid{grid-template-columns:1fr 1fr}}
+        .nx-grid label{display:block;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text2);margin-bottom:4px}
+        .nx-grid input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--text);font-family:var(--font);font-size:12px;outline:none}
+        .nx-hdr{margin-top:12px;border:1px dashed var(--accent);background:rgba(61,92,230,0.06);border-radius:8px;padding:10px 12px}
+        .nx-hdr .l{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);font-weight:bold;margin-bottom:4px}
+        .nx-hdr .v{font-size:11px;display:flex;flex-wrap:wrap;gap:14px}
+        .nx-hdr .v b{color:var(--text)}
+        .nx-tbl{width:100%;border-collapse:collapse;font-size:12px}
+        .nx-tbl th{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);text-align:left;padding:6px 8px;border-bottom:2px solid var(--border);white-space:nowrap}
+        .nx-tbl td{padding:5px 8px;border-bottom:1px solid var(--surface2);vertical-align:middle;white-space:nowrap}
+        .nx-tbl input,.nx-tbl select{background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 6px;color:var(--text);font-family:var(--font);font-size:11px;outline:none}
+        .nx-nospin::-webkit-inner-spin-button,.nx-nospin::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+        .nx-nospin{-moz-appearance:textfield}
+        .nx-empty{padding:18px;text-align:center;color:var(--text2);font-style:italic}
+        .nx-note{background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.3);border-left:3px solid var(--warning);border-radius:6px;padding:8px 11px;font-size:11px;color:#7a4d08;margin-top:12px}
+        .nx-saved{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+        .nx-chip{font-size:11px;padding:4px 9px;border:1px solid var(--border);border-radius:14px;background:var(--bg);cursor:pointer}
+        .nx-chip:hover{border-color:var(--accent);color:var(--accent)}
+        .nx-chip.on{border-color:var(--accent);background:rgba(61,92,230,0.12);color:var(--accent)}
+        .nx-sum{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:10px}
+        .nx-sum b{font-size:18px;color:var(--accent);display:block} .nx-sum span{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
+        .nx-req{color:var(--danger)}
+        .nx-up{text-transform:uppercase}
+        .nx-wrap{display:flex;gap:14px;align-items:flex-start}
+        .nx-side{width:240px;flex-shrink:0;border:1px solid var(--border);border-radius:10px;display:flex;flex-direction:column;max-height:72vh;background:var(--surface)}
+        .nx-side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)}
+        .nx-side-list{flex:1;overflow-y:auto;padding:8px}
+        .nx-main{flex:1;min-width:0;max-height:72vh;overflow-y:auto;padding-right:4px}
+        .nx-item{position:relative;padding:9px 30px 9px 11px;border:1px solid var(--border);border-radius:8px;margin-bottom:7px;cursor:pointer;background:var(--bg)}
+        .nx-item:hover{border-color:var(--accent)}
+        .nx-item.on{border-color:var(--accent);background:rgba(61,92,230,0.10)}
+        .nx-item .po{font-size:12px;color:var(--text);font-weight:bold}
+        .nx-item .meta{font-size:10px;color:var(--text2);margin-top:2px}
+        .nx-item-del{position:absolute;top:50%;right:7px;transform:translateY(-50%);width:20px;height:20px;border:none;border-radius:5px;background:transparent;color:var(--text2);cursor:pointer;font-size:13px;line-height:1;display:grid;place-items:center;padding:0}
+        .nx-item-del:hover{background:rgba(220,38,38,0.12);color:var(--danger)}
+        .nx-side-empty{padding:16px 10px;text-align:center;color:var(--text2);font-size:11px;font-style:italic}
+        @media(max-width:760px){.nx-wrap{flex-direction:column}.nx-side{width:100%;max-height:200px}.nx-main{max-height:none;overflow:visible}}
+      </style>
+
+      <h2>📥 NEXUS CIRCULAR · NEW RECEIPT</h2>
+      <div class="nx-wrap">
+        <div class="nx-side">
+          <div class="nx-side-head"><span>Saved Receipts</span><button class="btn btn-sm btn-success" onclick="nxNew()" style="font-size:11px;padding:3px 9px">+ New</button></div>
+          <div class="nx-side-list" id="nx-saved"></div>
+        </div>
+        <div class="nx-main">
+      <div class="nx-stage">
+        <div class="nx-shead"><span class="nx-num">1</span><h3>File Header</h3><span class="nx-hint">maps to export header cells</span></div>
+        <div class="nx-sbody">
+          <div class="nx-grid">
+            <div><label>PO #</label><input id="nx-po" class="nx-up" oninput="this.value=this.value.toUpperCase();nxSyncPO()" placeholder="PA00001425"></div>
+            <div><label>Vendor Name</label><input id="nx-vendor" class="nx-up" oninput="this.value=this.value.toUpperCase();nxHdr()" placeholder="TKO RESOURCES LLC"></div>
+            <div><label>Export Date (Exp Date)</label><input id="nx-date" type="date"></div>
+            <div><label>Total Load Weight</label><input id="nx-loadwt" class="nx-nospin" type="number" step="0.0001" placeholder="0" oninput="nxDistribute()"></div>
+          </div>
+          <div class="nx-hdr">
+            <div class="l">Export Header → Sheet1</div>
+            <div class="v" id="nx-hdrprev"></div>
+            <div style="font-size:10px;color:var(--text2);margin-top:5px">Total Rolls (E2) auto-fills with the export row count on Generate.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="nx-stage">
+        <div class="nx-shead"><span class="nx-num">2</span><h3>Inventory Line Details</h3><span class="nx-hint">Add lines one at a time</span></div>
+        <div class="nx-sbody">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-sm btn-primary" onclick="nxAddLine()">+ Add Receiving Lines</button>
+            <button class="btn btn-sm" onclick="nxClear()">Clear Lines</button>
+            <span id="nx-src" style="font-size:11px;color:var(--text2)"></span>
+          </div>
+          <div style="overflow:auto;margin-top:12px">
+            <table class="nx-tbl">
+              <thead><tr><th>PO#</th><th>Ref Line</th><th>Item Description</th><th>Mfg Item</th><th>SKU<span class="nx-req">*</span></th><th>UOM</th><th>Qty<span class="nx-req">*</span></th><th>Weight<span class="nx-req">*</span></th><th>Lot Start</th><th></th></tr></thead>
+              <tbody id="nx-lines"><tr><td colspan="10" class="nx-empty">No lines yet — click “Add Receiving Lines”.</td></tr></tbody>
+            </table>
+          </div>
+          <div class="nx-note"><b>Manual entry:</b> PO# auto-references the header. Enter Ref Line, description, Mfg item, SKU, UOM, and qty per line. <b>Total Load Weight</b> (above) feeds each line’s weight by qty share — type in a line’s weight to override it.</div>
+        </div>
+      </div>
+
+      <div class="nx-stage">
+        <div class="nx-shead"><span class="nx-num">3</span><h3>Generate, Save &amp; Export</h3><span class="nx-hint">One row per bale/pallet</span></div>
+        <div class="nx-sbody">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            <button class="btn btn-primary" id="nx-gen" onclick="nxGenerate()" disabled>Generate Rows</button>
+            <button class="btn btn-success" id="nx-save" onclick="nxSave()" disabled>Save Receipt</button>
+            <button class="btn" id="nx-export" onclick="nxExport()" disabled>Export EDI (.xlsx)</button>
+            <span id="nx-status" style="font-size:11px;align-self:center"></span>
+          </div>
+          <div class="nx-sum" id="nx-sum" style="display:none">
+            <div><b id="nx-rows">0</b><span>Export Rows</span></div>
+            <div><b id="nx-wt">0</b><span>Total Weight</span></div>
+            <div><b id="nx-ln">0</b><span>Lines</span></div>
+          </div>
+          <div style="overflow:auto;border:1px solid var(--border);border-radius:8px;display:none" id="nx-prevwrap">
+            <table class="nx-tbl"><thead><tr><th>SKU</th><th>Product ID</th><th>Lot#</th><th>Prod ID 2</th><th>PO#</th><th>Weight</th><th>Gross Weight</th><th>UOM</th><th>LF</th><th>Pcs</th><th>Width</th><th>Exp Date</th></tr></thead><tbody id="nx-prev"></tbody></table>
+          </div>
+          <div class="nx-empty" id="nx-prevempty">Generate rows to preview the export.</div>
+        </div>
+      </div>
+        </div>
+      </div>
+
+      <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+    </div>
+  </div>`;
+  (function(){ const d=new Date(),p=n=>String(n).padStart(2,'0'); document.getElementById('nx-date').value=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; })();
+  // uppercase the two metadata inputs too
+  ['nx-customer'].forEach(idv=>{ const e=document.getElementById(idv); if(e) e.addEventListener('input',()=>{ e.value=e.value.toUpperCase(); }); });
+  nxRenderSaved();
+  if(id){ nxLoad(id); } else { nxNew(); }
+}
+
+function nxB3(){
+  const po=nxGv('nx-po').trim().toUpperCase();
+  const vendor=nxGv('nx-vendor').trim().toUpperCase();
+  const bol=nxGv('nx-bol').trim().toUpperCase();
+  return [po,vendor,bol].filter(Boolean).join(' ');
+}
+function nxHdr(){
+  const el=document.getElementById('nx-hdrprev'); if(!el) return;
+  const b3=nxB3();
+  el.innerHTML=`<span>B3 PO# / Vendor: <b>${b3||'—'}</b></span>`;
+}
+function nxSyncPO(){
+  const po=nxGv('nx-po').trim().toUpperCase();
+  const _i=document.getElementById('nx-po'); if(_i&&_i.value!==po)_i.value=po;
+  NX.lines.forEach(ln=>ln.po=po);
+  document.querySelectorAll('#nx-lines td[data-po]').forEach(td=>td.textContent=po||'—');
+  nxHdr();
+}
+function nxRenderLines(){
+  const tb=document.getElementById('nx-lines'); if(!tb) return; tb.innerHTML='';
+  if(!NX.lines.length){ tb.innerHTML='<tr><td colspan="10" class="nx-empty">No lines yet — click “Add Receiving Lines”.</td></tr>'; }
+  NX.lines.forEach((ln,i)=>{
+    const g=NX_GRADES.map(x=>`<option ${x===ln.grade?'selected':''}>${x}</option>`).join('');
+    const u=NX_UOMS.map(x=>`<option value="${x}" ${x===ln.uom?'selected':''}>${x}</option>`).join('');
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td data-po style="color:var(--text2)">${ln.po||'—'}</td>
+      <td><input type="text" class="nx-up" value="${nxEsc(ln.refLine)}" placeholder="1" oninput="this.value=this.value.toUpperCase();nxEdit(${i},'refLine',this.value)" style="width:60px"></td>
+      <td><input type="text" class="nx-up" value="${nxEsc(ln.desc)}" placeholder="FEEDSTOCK, GRADE BEST" oninput="this.value=this.value.toUpperCase();nxEdit(${i},'desc',this.value)" style="width:190px"></td>
+      <td><input type="text" class="nx-up" value="${nxEsc(ln.mfrItem)}" placeholder="VE00628-1991-1" oninput="this.value=this.value.toUpperCase();nxEdit(${i},'mfrItem',this.value)" style="width:150px"></td>
+      <td><select onchange="nxEdit(${i},'grade',this.value)"><option value="">—</option>${g}</select></td>
+      <td><select onchange="nxEdit(${i},'uom',this.value)">${u}</select></td>
+      <td><input class="nx-nospin" type="number" value="${ln.qty||''}" placeholder="0" oninput="nxEdit(${i},'qty',this.value)" style="width:68px;text-align:right"></td>
+      <td><input class="nx-nospin nx-wt" data-i="${i}" type="number" step="0.0001" value="${ln.weight||''}" placeholder="0" oninput="nxEdit(${i},'weight',this.value)" style="width:96px;text-align:right"></td>
+      <td><input type="number" min="1" step="1" value="${ln.lotStart||1}" oninput="nxEdit(${i},'lotStart',this.value)" style="width:62px;text-align:right"></td>
+      <td><button onclick="nxRemoveLine(${i})" title="Remove line" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 6px">✕</button></td>`;
+    tb.appendChild(tr);
+  });
+  const src=document.getElementById('nx-src'); if(src) src.textContent=NX.lines.length?`${NX.lines.length} line(s)`:'';
+  const gb=document.getElementById('nx-gen'); if(gb) gb.disabled=!NX.lines.length;
+}
+function nxEdit(i,k,v){
+  if(k==='qty'){ NX.lines[i].qty=(v===''?'':+v); nxDistribute(); }
+  else if(k==='weight'||k==='lotStart'){ NX.lines[i][k]=(v===''?'':+v); }
+  else { NX.lines[i][k]=(typeof v==='string'?v.toUpperCase():v); }
+}
+function nxAddLine(){
+  const po=nxGv('nx-po').trim();
+  NX.lines.push({ po, refLine:'', desc:'', mfrItem:'', grade:'', uom:'P', qty:'', weight:'', lotStart:1 });
+  nxRenderLines(); nxResetPreview(); nxDistribute();
+}
+function nxRemoveLine(i){ NX.lines.splice(i,1); nxRenderLines(); nxResetPreview(); nxDistribute(); }
+function nxClear(){ NX.lines=[]; nxRenderLines(); nxResetPreview(); nxDistribute(); }
+
+function nxDistribute(){
+  const lw=parseFloat(nxGv('nx-loadwt'));
+  const ind=document.getElementById('nx-perunit');
+  const lines=NX.lines.map((ln,i)=>({ln,i})).filter(x=>x.ln.qty&&+x.ln.qty>0);
+  if(!lw||lw<=0){ return; }
+  const totalQty=lines.reduce((s,x)=>s+(+x.ln.qty),0);
+  if(totalQty<=0){ return; }
+  const per=lw/totalQty; let acc=0;
+  lines.forEach((x,k)=>{
+    let w;
+    if(k<lines.length-1){ w=Math.round(per*(+x.ln.qty)*10000)/10000; acc+=w; }
+    else { w=Math.round((lw-acc)*10000)/10000; }
+    x.ln.weight=w;
+    const inp=document.querySelector(`.nx-wt[data-i="${x.i}"]`); if(inp) inp.value=w;
+  });
+}
+
+function nxResetPreview(){ NX.exportRows=[]; const w=document.getElementById('nx-prevwrap'); if(w)w.style.display='none'; const s=document.getElementById('nx-sum'); if(s)s.style.display='none'; const e=document.getElementById('nx-prevempty'); if(e)e.style.display='block'; const ex=document.getElementById('nx-export'); if(ex)ex.disabled=true; const sv=document.getElementById('nx-save'); if(sv)sv.disabled=true; }
+function nxGenerate(){
+  const active=NX.lines.map((ln,i)=>({ln,i})).filter(x=>x.ln.qty && +x.ln.qty>0);
+  if(!active.length){ nxStatus('Enter a qty on at least one line','var(--danger)'); return; }
+  const missing=[]; active.forEach(({ln,i})=>{ if(!ln.grade)missing.push(`line ${i+1} SKU`); if(ln.weight===''||ln.weight==null)missing.push(`line ${i+1} weight`); });
+  if(missing.length){ nxStatus('Fill: '+missing.slice(0,3).join(', ')+(missing.length>3?'…':''),'var(--danger)'); return; }
+  const dv=nxGv('nx-date'), expDate=dv?new Date(dv+'T00:00:00'):new Date();
+  NX.exportRows=[];
+  active.forEach(({ln})=>{ const qty=+ln.qty,total=+ln.weight,start=+ln.lotStart||1,w=nxAlloc(total,qty);
+    const productID=[ln.desc,ln.mfrItem].filter(Boolean).join(' ');
+    for(let k=0;k<qty;k++){ NX.exportRows.push({ sku:ln.grade, productID, lot:nxLot(ln.po,ln.refLine,start+k), prodID2:ln.po, po:ln.po, weight:w[k], gross:w[k], uom:ln.uom||'P', lf:'', pcs:1, width:'', expDate:expDate.getTime() }); }
+  });
+  nxRenderPreview(); nxStatus(`Generated ${NX.exportRows.length} row(s)`,'var(--accent2)');
+}
+function nxRenderPreview(){
+  const tb=document.getElementById('nx-prev'); tb.innerHTML=''; let tot=0;
+  const ds=ms=>{const d=new Date(ms);return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;};
+  NX.exportRows.forEach(r=>{ tot+=r.weight; const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${r.sku}</td><td>${r.productID}</td><td>${r.lot}</td><td>${r.prodID2}</td><td>${r.po}</td><td style="text-align:right">${nxFmt(r.weight)}</td><td style="text-align:right">${nxFmt(r.gross)}</td><td>${r.uom}</td><td style="text-align:right">${r.uom}</td><td style="text-align:right">${r.pcs}</td><td style="text-align:right">0</td><td>${ds(r.expDate)}</td>`;
+    tb.appendChild(tr);
+  });
+  const tr=document.createElement('tr'); tr.style.fontWeight='bold'; tr.style.background='var(--surface2)';
+  tr.innerHTML=`<td colspan="5">TOTAL · ${NX.exportRows.length} rows</td><td style="text-align:right">${nxFmt(tot)}</td><td style="text-align:right">${nxFmt(tot)}</td><td colspan="5"></td>`;
+  tb.appendChild(tr);
+  document.getElementById('nx-prevwrap').style.display='block'; document.getElementById('nx-prevempty').style.display='none'; document.getElementById('nx-sum').style.display='flex';
+  document.getElementById('nx-rows').textContent=NX.exportRows.length; document.getElementById('nx-wt').textContent=nxFmt(tot);
+  document.getElementById('nx-ln').textContent=new Set(NX.exportRows.map(r=>r.po+'|'+r.lot.slice(0,-4))).size;
+  document.getElementById('nx-export').disabled=false; document.getElementById('nx-save').disabled=false;
+}
+function nxNew(){ NX.activeId=null; NX.lines=[]; nxResetPreview(); ['nx-bol','nx-po','nx-invoice','nx-truck','nx-customer','nx-vendor','nx-loadwt'].forEach(id=>{const e=document.getElementById(id); if(e)e.value='';}); nxRenderLines(); nxHdr(); nxRenderSaved(); nxStatus(''); }
+function nxSave(){
+  if(!NX.exportRows.length){ nxStatus('Generate rows first','var(--danger)'); return; }
+  const id=NX.activeId || ('NX'+Date.now().toString(36).toUpperCase());
+  const existing=state.nexusReceipts.find(r=>r.id===id);
+  const U=id=>nxGv(id).trim().toUpperCase();
+  const rec={ id, bol:U('nx-bol'), po:U('nx-po'), invoice:U('nx-invoice'), truck:U('nx-truck'),
+    customer:U('nx-customer'), vendor:U('nx-vendor'), loadWeight:nxGv('nx-loadwt'),
+    expDate:NX.exportRows[0].expDate, totalRolls:NX.exportRows.length,
+    lines:JSON.parse(JSON.stringify(NX.lines)), rows:JSON.parse(JSON.stringify(NX.exportRows)),
+    createdBy: state.currentUser?state.currentUser.name:'—', created: existing?existing.created:Date.now() };
+  const idx=state.nexusReceipts.findIndex(r=>r.id===id);
+  if(idx>=0) state.nexusReceipts[idx]=rec; else state.nexusReceipts.unshift(rec);
+  NX.activeId=id; nxRenderSaved();
+  syncNexusToFirebase();
+  nxStatus('✓ Receipt saved'+(db?' & synced':' (offline)'),'var(--accent2)');
+}
+function nxRenderSaved(){
+  const box=document.getElementById('nx-saved'); if(!box) return;
+  if(!state.nexusReceipts.length){ box.innerHTML='<div class="nx-side-empty">No saved receipts yet.<br>Click “+ New” to start.</div>'; return; }
+  box.innerHTML=state.nexusReceipts.map(r=>{
+    const d=r.expDate?new Date(r.expDate).toLocaleDateString():'';
+    const rolls=(r.rows||[]).length;
+    return `<div class="nx-item ${r.id===NX.activeId?'on':''}" onclick="nxLoad('${r.id}')">`
+      +`<div class="po">${r.po||'(no PO)'}</div>`
+      +`<div class="meta">${r.truck?'TR'+r.truck+' · ':''}${rolls} roll${rolls===1?'':'s'}${d?' · '+d:''}</div>`
+      +`<button class="nx-item-del" title="Delete receipt" onclick="event.stopPropagation();nxDelete('${r.id}')">✕</button>`
+      +`</div>`;
+  }).join('');
+}
+function nxDelete(id){
+  const r=state.nexusReceipts.find(x=>x.id===id); if(!r) return;
+  if(!confirm(`Delete saved receipt ${r.po||id}? This cannot be undone.`)) return;
+  state.nexusReceipts=state.nexusReceipts.filter(x=>x.id!==id);
+  if(NX.activeId===id){ nxNew(); } else { nxRenderSaved(); }
+  syncNexusToFirebase();
+  nxStatus('Receipt deleted','var(--text2)');
+}
+function nxLoad(id){
+  const r=state.nexusReceipts.find(x=>x.id===id); if(!r) return;
+  NX.activeId=id;
+  const set=(eid,v)=>{const e=document.getElementById(eid); if(e)e.value=v||'';};
+  set('nx-bol',r.bol); set('nx-po',r.po); set('nx-invoice',r.invoice); set('nx-truck',r.truck);
+  set('nx-customer', r.customer!=null?r.customer:(r.mfr||'')); set('nx-vendor',r.vendor); set('nx-loadwt',r.loadWeight||'');
+  const d=new Date(r.expDate),p=n=>String(n).padStart(2,'0'); set('nx-date',`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`);
+  nxHdr();
+  NX.lines=JSON.parse(JSON.stringify(r.lines||[])); nxRenderLines(); nxDistribute();
+  NX.exportRows=JSON.parse(JSON.stringify(r.rows||[]));
+  if(NX.exportRows.length) nxRenderPreview(); else nxResetPreview();
+  nxRenderSaved(); nxStatus('');
+}
+
+// ── Export — EXACT match to Export_Template.xlsx (Sheet1) ────────────────────
+function nxExport(){
+  if(!NX.exportRows.length) return;
+  const rows=NX.exportRows;
+  const expDate=new Date(rows[0].expDate), serial=nxSerial(expDate);
+  const ws={};
+  const LBL=(addr,v)=>{ ws[addr]={t:'s',v:v}; };                  // static template labels
+  const PUT=(addr,v)=>{                                           // value cell — 0 if empty
+    if(v===''||v==null){ ws[addr]={t:'n',v:0}; }
+    else if(typeof v==='number'){ ws[addr]={t:'n',v}; }
+    else { ws[addr]={t:'s',v:String(v)}; }
+  };
+  const DATE=(addr)=>{ ws[addr]={t:'n', v:serial, z:'m/d/yy'}; }; // Excel built-in Short Date (numFmt 14)
+  // header block — exact template cells
+  LBL('A2','Receiver');          PUT('B2', nxGv('nx-bol').trim().toUpperCase());
+  LBL('D2','Total Rolls');       PUT('E2', rows.length);
+  LBL('H2','Fraction  Decimal');
+  LBL('A3','PO #');              PUT('B3', nxB3());
+  PUT('H3',0.5);                 PUT('I3',0.5);
+  LBL('A4','Invoice #');         PUT('B4', nxGv('nx-invoice').trim().toUpperCase());
+  LBL('A5','Truck #');           PUT('B5', nxGv('nx-truck').trim().toUpperCase());
+  LBL('H5','Piper IBD Order #');
+  // data headers (row 8)
+  const HDR=['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date'];
+  const COL=['A','B','C','D','E','F','G','H','I','J','K','L'];
+  HDR.forEach((h,i)=>LBL(COL[i]+'8',h));
+  // data rows from row 9 — empties (LF, Width, blank Product ID, etc.) become 0
+  rows.forEach((r,ri)=>{ const R=9+ri;
+    PUT('A'+R,r.sku); PUT('B'+R,r.productID); PUT('C'+R,r.lot); PUT('D'+R,r.prodID2); PUT('E'+R,r.po);
+    PUT('F'+R,r.weight); PUT('G'+R,r.gross); PUT('H'+R,r.uom); PUT('I'+R,0); PUT('J'+R,r.pcs); PUT('K'+R,r.width);
+    DATE('L'+R);
+  });
+  ws['!ref']='A1:L'+(8+rows.length);
+  ws['!cols']=[{wch:8.71},{wch:30.57},{wch:13.43},{wch:10.29},{wch:8.71},{wch:7},{wch:12.57},{wch:16.57},{wch:6},{wch:4.14},{wch:6.14},{wch:8.43}];
+  const wb=XLSX.utils.book_new();
+  wb.SheetNames.push('Sheet1'); wb.Sheets['Sheet1']=ws;
+  const po=nxGv('nx-po').trim()||'NEXUS';
+  XLSX.writeFile(wb,`Nexus_EDI_${po}_${expDate.getFullYear()}${String(expDate.getMonth()+1).padStart(2,'0')}${String(expDate.getDate()).padStart(2,'0')}.xlsx`);
+  nxStatus('EDI file exported','var(--accent2)');
+}
+// =================== END NEXUS CIRCULAR ===================
 
 function showDataPreview() {
   state.currentView = 'preview';
