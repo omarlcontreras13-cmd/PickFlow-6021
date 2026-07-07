@@ -2188,7 +2188,7 @@ function editTicket(id) {
   const t = state.tickets.find(t=>t.id===id); if (!t) return;
   const customers = [...new Set(state.inventory.map(r=>r.customer).filter(Boolean))].sort();
   const customerNames = new Set(state.inventory.map(r=>r.customer));
-  const allBUs = [...new Set(state.inventory.filter(r=>r.bu&&!customerNames.has(r.bu)).map(r=>r.bu))].sort();
+  const allBUs = [...new Set(state.inventory.filter(r=>r.bu).map(r=>r.bu))].sort();   // include customer-named BUs (e.g. CATALYST is both a customer and a BU)
 
   let h = '<div class="modal-overlay" onclick="if(event.target===this)closeModal()">';
   h += '<div class="modal" style="width:620px">';
