@@ -530,17 +530,9 @@ function listenToFirebase() {
     const data = snap.val();
     if (data && Object.keys(data).length) {
       state.buMap = data;
-      if (state.inventory.length) {
-        reResolveBUs();
-        // Persist corrected BU values back to Firebase so all users benefit
-        const compact = state.inventory.map(r=>({
-          ...r,
-          dateRecd: r.dateRecd ? r.dateRecd.getTime() : null,
-          expDate: r.expDate ? r.expDate.getTime() : null,
-          dirExpDate: r.dirExpDate ? r.dirExpDate.getTime() : null,
-        }));
-        db.ref('6021/inventory').set(compact).catch(()=>{});
-      }
+      // Re-resolve BU display names LOCALLY only. A BU-reference change must never write the
+      // inventory node  otherwise a stale local copy could clobber inventory (import isolation).
+      if (state.inventory.length) reResolveBUs();
     }
   });
   db.ref('6021/buSeqMap').on('value', snap => {
@@ -856,14 +848,10 @@ function handleFileImport(e) {
       const total = results.reduce((s,r)=>s+r.added,0);
       const customers = results.map(r=>r.customer).filter(Boolean).join(', ');
       showAlert('✓ Imported '+files.length+' file'+(files.length>1?'s':'')+': '+total+' rolls. Customers: '+customers,'success');
-      // Save final inventory to Firebase
-      const compact = state.inventory.map(r=>({
-        ...r,
-        dateRecd: r.dateRecd ? r.dateRecd.getTime() : null,
-        expDate: r.expDate ? r.expDate.getTime() : null,
-        dirExpDate: r.dirExpDate ? r.dirExpDate.getTime() : null,
-      }));
-      db.ref('6021/inventory').set(compact).catch(()=>{});
+      // Merge-safe save: union of all customers across the imported files.
+      const _union = new Set();
+      results.forEach(r => (r.customers||[]).forEach(c => _union.add(c)));
+      commitInventoryFresh6021(_union);
       state.lastImport = Date.now();
       db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
       updateImportStamp();
@@ -1026,14 +1014,9 @@ function importDIR(wb) {
         if (dir.grossWt && !r.grossWt) r.grossWt = dir.grossWt;
       }
     });
-    // Re-save inventory with updated DIR data
-    const compact = state.inventory.map(r=>({
-      ...r,
-      dateRecd: r.dateRecd?r.dateRecd.getTime():null,
-      expDate: r.expDate?r.expDate.getTime():null,
-      dirExpDate: r.dirExpDate?r.dirExpDate.getTime():null,
-    }));
-    db.ref('6021/inventory').set(compact).catch(()=>{});
+    // NOTE: intentionally NOT writing the inventory node here. ZMO/date reads fall back to
+    // state.dirData at display time (getRollZmo), so a DIR update affects inventory display
+    // without ever overwriting/clobbering the inventory node (import isolation).
   }
 
   if (db) {
@@ -1044,6 +1027,26 @@ function importDIR(wb) {
   const zmoCount = Object.values(state.dirData).filter(d=>d.zmo).length;
   showAlert('✓ DIR loaded — '+Object.keys(state.dirData).length+' batch records ('+zmoCount+' ZMO).','success');
   closeModal();
+}
+
+// Merge-safe inventory write: replace ONLY the customers in this import, merged against the
+// FRESHEST Firebase copy  so an import from a device whose local copy was behind can never
+// clobber inventory another device imported. Falls back to a local write if the read fails.
+function commitInventoryFresh6021(incomingCustomers) {
+  const inc = (incomingCustomers instanceof Set) ? incomingCustomers : new Set(incomingCustomers||[]);
+  const toCompact = r => ({ ...r,
+    dateRecd: r.dateRecd ? r.dateRecd.getTime() : null,
+    expDate:  r.expDate  ? r.expDate.getTime()  : null,
+    dirExpDate: r.dirExpDate ? r.dirExpDate.getTime() : null });
+  if (!db) return;
+  if (!inc.size) { db.ref('6021/inventory').set(state.inventory.map(toCompact)).catch(()=>{}); return; }
+  const mine = state.inventory.filter(r => inc.has(r.customer)).map(toCompact);
+  db.ref('6021/inventory').once('value').then(snap => {
+    const val = snap.val();
+    const fresh = Array.isArray(val) ? val : (val ? Object.values(val) : []);
+    const kept = fresh.filter(r => r && !inc.has(r.customer||''));
+    db.ref('6021/inventory').set(kept.concat(mine)).catch(()=>{});
+  }).catch(() => { db.ref('6021/inventory').set(state.inventory.map(toCompact)).catch(()=>{}); });
 }
 
 function importInventory(wb, filename, batchMode=false) {
@@ -1178,15 +1181,15 @@ function importInventory(wb, filename, batchMode=false) {
   enableAppButtons();
 
   if (!batchMode) {
-    // Single file — save to Firebase immediately and notify
-    db.ref('6021/inventory').set(compact).catch(()=>{});
+    // Single file — merge-safe save to Firebase immediately and notify
+    commitInventoryFresh6021(incomingCustomers);
     db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
     updateImportStamp();
     showAlert(`✓ ${filename}: ${added} rolls imported for ${[...incomingCustomers].join(', ')}. Total: ${state.inventory.length} rolls.`,'success');
     showDashboard();
   }
   // Return result for batch aggregation
-  return { added, customer: [...incomingCustomers].join(', ') };
+  return { added, customer: [...incomingCustomers].join(', '), customers: [...incomingCustomers] };
 }
 
 function parseDate(v) {
