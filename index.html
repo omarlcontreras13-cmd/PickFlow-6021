@@ -1358,8 +1358,11 @@ function _poMatch(prod2, poQ){
 // A roll is Nexus inventory if its resolved BU is NEXUS CIRCULAR (Nexus PO prefix e.g. PA0 -> NEXUS CIRCULAR).
 function _isNexusRoll(r){
   if (((r.bu||'')+'').toUpperCase() === 'NEXUS CIRCULAR') return true;
-  const rb = (resolveBU(r.buRaw||r.bu) || '').toString().toUpperCase();
-  return rb === 'NEXUS CIRCULAR';
+  if ((resolveBU(r.buRaw||r.bu) || '').toString().toUpperCase() === 'NEXUS CIRCULAR') return true;
+  // The PO lives in Prod ID 2 (e.g. PA00001639-1). Resolve its prefix the way import derives BU,
+  // so a Nexus PO in Prod ID 2 marks the roll as Nexus even when its BU column resolves elsewhere.
+  const p2 = (r.prod2||'').toString().trim();
+  return !!p2 && (resolveBU(p2) || '').toString().toUpperCase() === 'NEXUS CIRCULAR';
 }
 
 // PO gate for a roll on a pick-ticket line.
