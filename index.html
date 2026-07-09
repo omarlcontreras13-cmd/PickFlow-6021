@@ -338,7 +338,13 @@ function inventoryAccuracyStats() {
 // Unit of measure noun. MAXXON inventory is counted in skids; everyone else in rolls.
 // (Weight is always tons, regardless of unit.) ctx may be a customer/BU string or a roll object.
 function unitNoun(ctx) {
-  const cust = (ctx && typeof ctx === 'object') ? (ctx.customer || ctx.bu || '') : (ctx || '');
+  const isObj = ctx && typeof ctx === 'object';
+  const cust = isObj ? (ctx.customer || ctx.bu || '') : (ctx || '');
+  // Nexus inventory is counted in pallets. Detect by roll/BU for objects; for a customer/BU
+  // string, by name OR by that customer's inventory resolving to Nexus (BU = NEXUS CIRCULAR).
+  const nexus = isObj ? _isNexusRoll(ctx)
+    : (/NEXUS/i.test(cust) || (state.inventory||[]).some(r => (r.customer||'') === cust && _isNexusRoll(r)));
+  if (nexus) return 'pallets';
   return /MAXXON/i.test(cust) ? 'skids' : 'rolls';
 }
 function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperCase() + u.slice(1); }
@@ -348,6 +354,7 @@ function ccUnitForLocs(locs) {
   if (!locs || !locs.length) return 'rolls';
   const set = new Set(locs);
   const rows = (state.inventory||[]).filter(r => set.has(r.location));
+  if (rows.length && rows.every(r => _isNexusRoll(r))) return 'pallets';
   if (rows.length && rows.every(r => unitNoun(r.customer)==='skids')) return 'pallets';
   return 'rolls';
 }
@@ -358,7 +365,7 @@ function ccSessionUnit(session) {
   const bus = [];
   (session.entries||[]).forEach(e => { if (e && !e.empty) (e.rows||[]).forEach(r => { if (r && r.bu) bus.push(resolveBU(r.bu)); }); });
   const named = bus.filter(Boolean);
-  if (named.length) return named.every(b => /MAXXON/i.test(b)) ? 'pallets' : 'rolls';
+  if (named.length) return named.every(b => /MAXXON/i.test(b) || /NEXUS/i.test(b)) ? 'pallets' : 'rolls';
   return ccUnitForLocs(session.locations || (session.entries||[]).map(e=>e.loc));
 }
 
@@ -1338,6 +1345,32 @@ function showDashboard() {
 }
 
 // ─── NEW TICKET ───────────────────────────────────────────────────────────────
+// PO # filter for pick-ticket SKU lines. Prod ID 2 (r.prod2) carries the PO, e.g. "PA00001639-1".
+// Empty query = no filter. Trailing-digit guard so "-1" does not match "-10".
+function _poMatch(prod2, poQ){
+  const q = (poQ||'').toString().trim().toUpperCase();
+  if(!q) return true;
+  const p2 = (prod2||'').toString().toUpperCase();
+  const idx = p2.indexOf(q);
+  return idx !== -1 && !/[0-9]/.test(p2.charAt(idx + q.length));
+}
+
+// A roll is Nexus inventory if its resolved BU is NEXUS CIRCULAR (Nexus PO prefix e.g. PA0 -> NEXUS CIRCULAR).
+function _isNexusRoll(r){
+  if (((r.bu||'')+'').toUpperCase() === 'NEXUS CIRCULAR') return true;
+  const rb = (resolveBU(r.buRaw||r.bu) || '').toString().toUpperCase();
+  return rb === 'NEXUS CIRCULAR';
+}
+
+// PO gate for a roll on a pick-ticket line.
+//  - No PO entered: hide ALL Nexus inventory (Nexus must be selected by PO), show everything else.
+//  - PO entered: keep only rolls whose Prod ID 2 matches the PO (e.g. PA00001639-1).
+function _poGate(r, poQ){
+  const q = (poQ||'').toString().trim();
+  if (!q) return !_isNexusRoll(r);
+  return _poMatch(r.prod2, q);
+}
+
 function showNewTicket() {
   const customers = [...new Set(state.inventory.map(r=>r.customer).filter(Boolean))].sort();
   const today = new Date().toISOString().split('T')[0];
@@ -1638,12 +1671,13 @@ function viewTicket(id) {
   h += '<div style="font-size:11px;font-weight:bold;letter-spacing:1px;color:var(--text2)">SKU LINES</div>';
   h += '<button class="btn btn-sm" data-tid="'+id+'" onclick="addSkuLineToTicket(this.dataset.tid)">+ Add SKU</button>';
   h += '</div>';
-  h += '<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr auto;gap:8px;margin-bottom:4px;text-align:center;padding:0 2px">';
+  h += '<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr auto;gap:8px;margin-bottom:4px;text-align:center;padding:0 2px">';
   const hd = 'font-size:11px;color:var(--text2);font-weight:bold;letter-spacing:1px';
   h += '<div style="'+hd+'">SKU</div>';
   h += '<div style="'+hd+'">ZMO</div>';
   h += '<div style="'+hd+'">VPO</div>';
   h += '<div style="'+hd+'">ORDER #</div>';
+  h += '<div style="'+hd+'">PO #</div>';
   h += '<div style="'+hd+'">QTY</div>';
   h += '<div></div>';
   h += '</div>';
@@ -1666,6 +1700,8 @@ function viewTicket(id) {
         const tokens = _ordQ.toUpperCase().split(/\s+/).filter(Boolean);
         if (!tokens.some(t => p2.includes(t))) return false;
       }
+      // PO # filter  Prod ID 2 (e.g. PA00001639-1); one SKU may span multiple POs
+      if (!_poGate(r, line.po)) return false;
       return true;
     }).map(r=>r.sku))].sort();
     const lineSelected = (line.selectedRolls||[]).length;
@@ -1689,12 +1725,13 @@ function viewTicket(id) {
         const tokens = line.orderNum.toString().trim().toUpperCase().split(/\s+/).filter(Boolean);
         if (!tokens.some(t => p2.includes(t))) return false;
       }
+      if (!_poGate(r, line.po)) return false; // PO # filter (Prod ID 2)
       if ((r.pcsPending||0) > 0) return false; // already picked
       if ((r.status||'') === 'GHOST') return false; // ghost not available
       return true;
     }).length;
     const showZmo = true;
-    const gridCols = '2fr 1fr 1fr 1fr 1fr auto';
+    const gridCols = '2fr 1fr 1fr 1fr 1fr 1fr auto';
     const inp = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 8px;color:var(--text);font-family:var(--font);font-size:14px;font-weight:bold;outline:none;text-align:center;width:100%';
     h += '<div style="display:grid;grid-template-columns:'+gridCols+';gap:8px;margin-bottom:6px;align-items:start">';
     h += '<div>';
@@ -1708,6 +1745,7 @@ function viewTicket(id) {
     // Order # — active only for Twin Rivers, greyed out otherwise
     const isTwinRivers = (line.bu||'').toUpperCase().includes('TWIN RIVERS') || (line.bu||'').toUpperCase().includes('CATALYST');
     h += '<input type="text" data-tid="'+id+'" data-li="'+li+'" class="sku-edit-ordernum" value="'+(line.orderNum||'')+'" placeholder="Order #" onchange="updateTicketSkuLine(this)" title="Twin Rivers: filter by Prod ID 2 order reference" style="'+inp+(isTwinRivers?'':';opacity:0.3;pointer-events:none')+'">';
+    h += '<input type="text" data-tid="'+id+'" data-li="'+li+'" class="sku-edit-po" value="'+(line.po||'')+'" placeholder="PO #" onchange="updateTicketSkuLine(this)" title="Filter inventory by PO (matches Prod ID 2, e.g. PA00001639-1)" style="'+inp+'">';
     h += '<div style="display:flex;flex-direction:column;align-items:center;gap:3px">';
     h += '<input type="number" data-tid="'+id+'" data-li="'+li+'" class="sku-edit-qty" value="'+(line.qty||'')+'" placeholder="QTY" min="1" onchange="updateTicketSkuLine(this)" style="'+inp+'">';
     if (lineQty>0) h += '<span style="font-size:10px;color:'+lineColor+';font-weight:bold;white-space:nowrap">'+lineSelected+' sel</span>';
@@ -1830,6 +1868,7 @@ function openGroupedSelector(id, lineIdx) {
       const tokens = line.orderNum.toString().trim().toUpperCase().split(/\s+/).filter(Boolean);
       if (!tokens.some(t => p2.includes(t))) return false;
     }
+    if (!_poGate(r, line.po)) return false; // PO # filter (Prod ID 2, e.g. PA00001639-1)
     if ((r.pcsPending||0) > 0) return false;
     if ((r.status||'') === 'GHOST') return false; // ghost not available to pick
     return true;
@@ -2161,6 +2200,8 @@ function updateTicketSkuLine(el) {
   if (vpoEl) ticket.skuLines[li].vpo = vpoEl.value.trim();
   const orderNumEl = row.querySelector('.sku-edit-ordernum');
   if (orderNumEl) ticket.skuLines[li].orderNum = orderNumEl.value.trim();
+  const poEl = row.querySelector('.sku-edit-po');
+  if (poEl) ticket.skuLines[li].po = poEl.value.trim();
   saveTickets();
   // If BU changed, refresh the view so SKU list updates
   if (el.classList.contains('sku-edit-bu')) {
@@ -2171,7 +2212,7 @@ function updateTicketSkuLine(el) {
 function addSkuLineToTicket(tid) {
   const ticket = state.tickets.find(t=>t.id===tid);
   if (!ticket) return;
-  ticket.skuLines.push({sku:'',bu:ticket.bu||'',qty:0,zmo:'',vpo:'',orderNum:'',selectedRolls:[]});
+  ticket.skuLines.push({sku:'',bu:ticket.bu||'',qty:0,zmo:'',vpo:'',orderNum:'',po:'',selectedRolls:[]});
   saveTickets();
   viewTicket(tid);
 }
@@ -2403,7 +2444,7 @@ function exportPickTicketPDF(id, fromArchive=false) {
   }
 
   headerBox(margin,        'REFERENCE NUMBER', ticket.refNum, 16, [26,82,118]);
-  headerBox(margin+bw+2,   'ROLLS', String(totalQty), 22, [26,122,74]);
+  headerBox(margin+bw+2,   unitNoun(ticket.customer).toUpperCase(), String(totalQty), 22, [26,122,74]);
   headerBox(margin+bw*2+4, 'DELIVERY DATE', ticket.appt||'—', 12);
   headerBox(margin+bw*3+6, 'STAGED LOC', ticket.stagedLoc||'', 12);
 
@@ -2491,7 +2532,7 @@ function exportPickTicketPDF(id, fromArchive=false) {
       }
       // QTY - right aligned, bold green, same size
       doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,122,74);
-      doc.text(String(qty)+' rolls', pageW-margin-4, skuY, {align:'right'});
+      doc.text(String(qty)+' '+unitNoun(ticket.customer), pageW-margin-4, skuY, {align:'right'});
 
       if (li < validSkuLines.length-1) {
         doc.setDrawColor(200); doc.setLineWidth(0.2);
@@ -2775,7 +2816,7 @@ function applyInvFilter(page) {
   const isFiltered = cust||bu||sku||loc||lot||zmoF;
 
   let h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-  h += '<span style="font-size:11px;color:var(--text2)">Showing '+(st+1)+'–'+Math.min(st+ps,tot)+' of '+tot.toLocaleString()+' rolls'+(isFiltered?' (filtered)':'')+'</span>';
+  h += '<span style="font-size:11px;color:var(--text2)">Showing '+(st+1)+'–'+Math.min(st+ps,tot)+' of '+tot.toLocaleString()+' '+unitNoun(bu||cust)+(isFiltered?' (filtered)':'')+'</span>';
   h += '<div style="display:flex;gap:6px">';
   if (page>0) h += '<button class="btn btn-sm" onclick="applyInvFilter('+(page-1)+')">← Prev</button>';
   h += '<span style="font-size:11px;color:var(--text2);padding:5px 8px">Page '+(page+1)+'/'+pg+'</span>';
