@@ -337,13 +337,24 @@ function inventoryAccuracyStats() {
 
 // Unit of measure noun. MAXXON inventory is counted in skids; everyone else in rolls.
 // (Weight is always tons, regardless of unit.) ctx may be a customer/BU string or a roll object.
+// Cached set of customers whose inventory resolves to Nexus. Rebuilt only when state.inventory
+// is reassigned (import/listener), so unitNoun stays O(1) instead of scanning inventory per call.
+let _nxCustSet = null, _nxCustSrc = null;
+function _nexusCustomers() {
+  if (_nxCustSrc === state.inventory && _nxCustSet) return _nxCustSet;
+  const set = new Set();
+  const inv = state.inventory || [];
+  for (let i = 0; i < inv.length; i++) { if (_isNexusRoll(inv[i])) set.add(inv[i].customer || ''); }
+  _nxCustSet = set; _nxCustSrc = state.inventory;
+  return set;
+}
 function unitNoun(ctx) {
   const isObj = ctx && typeof ctx === 'object';
   const cust = isObj ? (ctx.customer || ctx.bu || '') : (ctx || '');
   // Nexus inventory is counted in pallets. Detect by roll/BU for objects; for a customer/BU
-  // string, by name OR by that customer's inventory resolving to Nexus (BU = NEXUS CIRCULAR).
+  // string, by name OR by that customer resolving to Nexus (O(1) cached lookup, not a scan).
   const nexus = isObj ? _isNexusRoll(ctx)
-    : (/NEXUS/i.test(cust) || (state.inventory||[]).some(r => (r.customer||'') === cust && _isNexusRoll(r)));
+    : (/NEXUS/i.test(cust) || _nexusCustomers().has(cust));
   if (nexus) return 'pallets';
   return /MAXXON/i.test(cust) ? 'skids' : 'rolls';
 }
