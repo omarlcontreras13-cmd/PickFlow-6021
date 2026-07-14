@@ -3656,6 +3656,7 @@ function showEDIImportFile() {
 
   // ── TWIN RIVERS section ──────────────────────────────────────────────────────
   h += renderTRSection();
+  h += renderUPMSection();
 
   if (_ediHBHLoads.length) {
     const totalHBHRolls = _ediHBHLoads.reduce((s,l)=>s+l.rows.length,0);
@@ -5726,6 +5727,264 @@ async function processTRFiles(fileList) {
 }
 function handleTRDrop(e)   { processTRFiles(e.dataTransfer.files); }
 function handleTRUpload(e) { processTRFiles(e.target.files); }
+
+// ─── UPM DELIVERY NOTE / BOL → LOAD ───────────────────────────────────────────
+// One UPM Delivery Note PDF = one load. Text-layer parse via trExtractPdfLines
+// (shared pdf.js extractor). Multiple SKUs (delivery-note pages) supported; each
+// roll carries its own SKU / Prod ID 1 / Prod ID 2 / line PO. Field map:
+//   Mill order number ........ SKU
+//   Shipping marks ........... Prod ID 1  (Product ID column)
+//   "ATL UPM " + Order number  Prod ID 2
+//   Package Number (UPT id) .. Lot #
+//   Gross weight ............. Weight   (KG→LBS ×2.20462 only when BOL is metric)
+//   Metres ................... LF       (m→ft ×3.28084 only when BOL is metric)
+//   Customer PO .............. per-line PO#
+//   Vehicle ID ............... Truck #
+//   UPM Ref. number .......... header PO #   (NOT the line-item Customer PO)
+// Units auto-detected (metric: "kg kg" + "Metres"; imperial: "lb lb" + "LF/Feet").
+// Per-load toggles let the user override. Reel width mm→in. Rolls + gross
+// reconciled against the printed page totals (raw units, so unit-agnostic).
+const UPM_MM2IN = 0.0393701, UPM_M2FT = 3.28084;
+function _upmWeight(raw, isKg){ return Math.round((isKg ? raw * CAT_KG2LB : raw) || 0); }
+function _upmLF(raw, isM){ return Math.round((isM ? raw * UPM_M2FT : raw) || 0); }
+function handleUPMDrop(e){ e.preventDefault(); _upmRoute(Array.from((e.dataTransfer&&e.dataTransfer.files)||[])); }
+function handleUPMUpload(e){ _upmRoute(Array.from(e.target.files||[])); }
+async function _upmRoute(files){
+  const pdfs = files.filter(f => /\.pdf$/i.test(f.name));
+  if (!pdfs.length){ showAlert('UPM: drop a Delivery Note / BOL .pdf', 'warning'); return; }
+  for (const f of pdfs){
+    try { await processUPMPDF(f); }
+    catch (err){ console.error(err); showAlert('UPM: could not read ' + f.name + ' — ' + ((err&&err.message)||err), 'danger'); }
+  }
+}
+async function processUPMPDF(file){
+  showAlert('Reading UPM PDF…', 'info');
+  let lines = await trExtractPdfLines(await file.arrayBuffer());
+  let src = 'text';
+  const hasPkg = (lines||[]).some(l => /^UP[A-Z0-9]{5,}\s+\d/i.test(l));
+  if (!hasPkg){
+    showAlert('UPM PDF has no text layer — running OCR (first run downloads the engine, give it a moment)…', 'info');
+    lines = await _upmOcrPdf(await file.arrayBuffer());
+    src = 'ocr';
+  }
+  const load = _upmParse(lines, file.name);
+  load.source = src;
+  if (!load.rows.length){ showAlert('UPM: no packages found in ' + file.name + (src==='ocr'?' (OCR could not read the table — check scan quality).':' (is this a UPM Delivery Note?)'), 'warning'); return; }
+  window._upmLoads = window._upmLoads || [];
+  window._upmLoads.push(load);
+  showEDIImportFile();
+  const skuN = new Set(load.rows.map(r => r.sku)).size;
+  const uStr = (load.weightIsKg ? 'KG→LBS' : 'LBS as-is') + ' · ' + (load.lengthIsMeters ? 'm→LF' : 'LF as-is');
+  showAlert('✓ UPM ' + file.name + (src==='ocr'?' (OCR)':'') + ' — ' + load.rows.length + ' rolls · ' + skuN + ' SKU(s) · ' + uStr + (load.reconciled ? '' : ' · ⚠ verify roll weights vs BOL'), load.reconciled ? 'success' : 'warning');
+}
+function _upmNum(s){ return parseFloat(String(s==null?'':s).replace(/,/g,'')) || 0; }
+function _upmParse(lines, fileName){
+  const hdr = { receiver:'', poNum:'', truck:'' };
+  const cur = { sku:'', prod1:'', prod2:'', linePo:'', order:'', widthIn:'' };
+  const rows = [];
+  let pend = false;
+  const blob = (lines||[]).join(' ');
+  // Unit system: metric (kg + Metres) converts; imperial (lbs + Web Length/ft) is left as-is.
+  const metricScore   = (/\bG\/M2\b/i.test(blob)?1:0) + (/Metres|Meters/i.test(blob)?1:0) + (/\d\s*mm\b/i.test(blob)?1:0) + (/\bkg\b/i.test(blob)?1:0);
+  const imperialScore = (/Web Length/i.test(blob)?1:0) + (/\bft2?\b/i.test(blob)?1:0) + (/\blbs?\b|lb\.|Ibs/i.test(blob)?1:0) + (/\d\s*in\b/i.test(blob)?1:0);
+  const imperial = imperialScore > metricScore;
+  const weightIsKg = !imperial, lengthIsMeters = !imperial;
+  const isPkgRow = ln => /^UP[A-Z0-9]{5,}\b/i.test(ln) && (ln.match(/\d[\d,]*/g)||[]).length >= 2;
+  (lines||[]).forEach(function(ln){
+    let m;
+    m = ln.match(/Loading ID\s+([A-Za-z0-9_]+)/i); if (m && !hdr.receiver) hdr.receiver = m[1];
+    m = ln.match(/Ref\.?\s*number\s+(\d{4,})/i);    if (m && !hdr.poNum)    hdr.poNum    = m[1];
+    m = ln.match(/Vehicle ID\s+([A-Za-z0-9]+)/i);   if (m && !hdr.truck)    hdr.truck    = m[1];
+    m = ln.match(/Customer PO\s+(.+?)(?:\s+Delivery reference|$)/i); if (m) cur.linePo = m[1].trim();
+    if (/Order number\s+Quality\s+Shipping marks/i.test(ln)){ pend = true; return; }
+    if (pend && !isPkgRow(ln)){
+      pend = false;
+      const toks = ln.split(/\s+/).filter(Boolean);
+      cur.order = toks[0] || '';
+      cur.prod2 = ('ATL UPM ' + cur.order).trim();
+      let mk = toks[toks.length - 1] || '';
+      if (!/^[A-Za-z]\d+/.test(mk)) mk = cur.linePo ? cur.linePo.split('/')[0].trim() : mk;
+      cur.prod1 = mk;
+    }
+    m = ln.match(/\b(US-\d{4,}-\d+)\b/i); if (m) cur.sku = m[1].toUpperCase();
+    if (/(G\/M2|lb\.|\blbs?\b)/i.test(ln) && /\d\s*(mm|in)\b/i.test(ln)){
+      const mmm = ln.match(/(\d[\d.]*)\s*mm/i), inn = ln.match(/(\d[\d.]*)\s*in\b/i);
+      if (mmm) cur.widthIn = +(_upmNum(mmm[1]) * UPM_MM2IN).toFixed(2);
+      else if (inn) cur.widthIn = +_upmNum(inn[1]).toFixed(2);
+    }
+    if (isPkgRow(ln)){
+      const lot = (ln.match(/^(UP[A-Z0-9]{5,})/i)||[])[1] || '';
+      const rest = ln.replace(/^UP[A-Z0-9]{5,}\s*/i,'');
+      const nums = (rest.match(/\d[\d,]*(?:\.\d+)?/g)||[]).map(_upmNum).filter(n=>n>0 || n===0);
+      if (lot && nums.length >= 2){
+        let net = nums[0], gross = nums[1], tail;
+        if (gross > net*2 || nums.length < 3){ gross = net; tail = nums.slice(1); }   // only one weight captured
+        else { tail = nums.slice(2); }
+        const big = tail.slice().sort((a,b)=>b-a);                                     // area = largest, length = 2nd largest
+        const length = big.length>=2 ? big[1] : (big[0]||0);
+        rows.push({ lot:lot, sku:cur.sku, prod1:cur.prod1, prod2:cur.prod2, po:cur.linePo,
+                    rawWeight:gross, rawLength:length, width:(cur.widthIn||''), pcs:1 });
+      }
+      return;
+    }
+  });
+  if (!hdr.poNum && hdr.receiver) hdr.poNum = hdr.receiver.replace(/[_-].*$/,'');
+  const sumGross = rows.reduce((s,r)=>s+(r.rawWeight||0),0);
+  const complete = rows.length>0 && rows.every(r=>r.rawWeight>0 && r.lot);
+  return { fileName:fileName, header:hdr, rows:rows, weightIsKg:weightIsKg, lengthIsMeters:lengthIsMeters, sumGross:sumGross, reconciled:complete };
+}
+async function _upmOcrPdf(buf){
+  const pdfjsLib = await ensurePdfJs();
+  const worker = await _catTimeout(_catEnsureTesseract(), 120000, 'OCR engine load');
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+  const N = pdf.numPages || 1;
+  const KW = ['UPM','Delivery','Loading','Package','Weight','Length','Vehicle','Reference'];
+  const canvasAt = async (page, rot, scale) => { const vp = page.getViewport({ scale, rotation: rot }); const cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height); await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise; return cv; };
+  const rec = async cv => { try { return (await worker.recognize(cv, {}, { text:true, tsv:true, blocks:true })).data; } catch(e){ return null; } };
+  const p1 = await pdf.getPage(1); let bestRot = 0, bestHits = -1;
+  for (const rot of [0,90,270,180]){ const d = await rec(await canvasAt(p1, rot, 1.3)); const t = (d && d.text) || ''; const h = KW.filter(k => t.indexOf(k) >= 0).length; if (h > bestHits){ bestHits = h; bestRot = rot; } if (h >= 4) break; }
+  let out = [];
+  for (let i = 1; i <= N; i++){
+    const page = await pdf.getPage(i);
+    const cv = await canvasAt(page, bestRot, 3);
+    if (_catCanvasBlank(cv)) continue;
+    showAlert('UPM OCR — page ' + i + ' of ' + N + '…', 'info');
+    out = out.concat(_upmRowsFromOcr(await rec(cv)));
+  }
+  return out;
+}
+function _upmRowsFromOcr(d){
+  if (!d) return [];
+  let words = [];
+  if (d.tsv){
+    d.tsv.split('\n').forEach(function(ln){ const c = ln.split('\t'); if (c.length >= 12 && c[0] === '5'){ const conf = parseFloat(c[10]); const s = (c[11]||'').trim(); if (s && conf > 30) words.push({ x:+c[6], y:(+c[7])+(+c[9])/2, s:s }); } });
+  }
+  if (!words.length && d.blocks){
+    (d.blocks||[]).forEach(b => (b.paragraphs||[]).forEach(p => (p.lines||[]).forEach(l => (l.words||[]).forEach(w => { if (w && w.text && String(w.text).trim() && w.bbox){ words.push({ x:w.bbox.x0, y:(w.bbox.y0+w.bbox.y1)/2, s:String(w.text).trim() }); } }))));
+  }
+  if (words.length){
+    const rows = [];
+    words.forEach(function(w){ let r = rows.find(r => Math.abs(r.y - w.y) <= 12); if (!r){ r = { y:w.y, items:[] }; rows.push(r); } r.items.push(w); });
+    rows.sort((a,b) => a.y - b.y);
+    return rows.map(r => r.items.sort((a,b) => a.x - b.x).map(o => o.s).join(' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+  }
+  return String(d.text||'').split('\n').map(l => l.trim()).filter(Boolean);
+}
+function _upmHdrInput(i, key, label, val){
+  return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:8px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
+    +'<input id="upm-'+key+'-'+i+'" type="text" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:112px"></div>';
+}
+function deleteUPMLoad(idx){ (window._upmLoads||[]).splice(idx,1); showEDIImportFile(); }
+function clearUPMLoads(){ const L=window._upmLoads||[]; if(!L.length) return; if(!confirm('Remove all '+L.length+' UPM load(s)?')) return; window._upmLoads=[]; showEDIImportFile(); }
+function setUPMUnit(idx, which, checked){ const l=(window._upmLoads||[])[idx]; if(!l) return; if(which==='kg') l.weightIsKg=!!checked; else if(which==='m') l.lengthIsMeters=!!checked; showEDIImportFile(); }
+function renderUPMSection(){
+  const sectionStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px';
+  const G = '#2e7d32';
+  const loads = window._upmLoads || [];
+  const stamps = window._ediUPMStamps || {};
+  let body;
+  if (!loads.length){
+    body = '<div style="border:2px dashed var(--border);border-radius:6px;padding:18px;text-align:center;color:var(--text2);font-size:12px">No UPM loads imported yet</div>';
+  } else {
+    const totalRolls = loads.reduce(function(s,l){return s+l.rows.length;},0);
+    const items = loads.map(function(load, idx){
+      const H = load.header || {};
+      const detailId = 'upm-detail-' + idx;
+      const skuN = new Set(load.rows.map(function(r){return r.sku;})).size;
+      const recColor = load.reconciled ? 'var(--accent2)' : 'var(--warning)';
+      const recTxt = load.reconciled ? '✓ reconciled' : '⚠ totals mismatch — verify';
+      const stamp = stamps[idx];
+      const stampStr = stamp ? '<div style="font-size:9px;color:var(--accent2)">✓ Exported: '+new Date(stamp.exportedAt).toLocaleString()+'</div>' : '';
+      const chk = 'width:14px;height:14px;accent-color:'+G+';cursor:pointer';
+      const unitToggles = '<div style="display:flex;flex-direction:column;gap:3px;justify-content:center">'
+        +'<label style="display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:var(--text);cursor:pointer;white-space:nowrap"><input type="checkbox" '+(load.weightIsKg?'checked':'')+' onchange="setUPMUnit('+idx+',&quot;kg&quot;,this.checked)" style="'+chk+'">Weight KG→LBS</label>'
+        +'<label style="display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:var(--text);cursor:pointer;white-space:nowrap"><input type="checkbox" '+(load.lengthIsMeters?'checked':'')+' onchange="setUPMUnit('+idx+',&quot;m&quot;,this.checked)" style="'+chk+'">Metres→LF</label></div>';
+      const drows = load.rows.map(function(r, ri){
+        const bg = ri%2!==0 ? 'rgba(0,0,0,0.03)' : '';
+        const wt = _upmWeight(r.rawWeight, load.weightIsKg), lf = _upmLF(r.rawLength, load.lengthIsMeters);
+        return '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
+          +'<td style="padding:4px 8px;font-weight:bold;color:'+G+';white-space:nowrap">'+(r.lot||'—')+'</td>'
+          +'<td style="padding:4px 8px;white-space:nowrap">'+(r.sku||'')+'</td>'
+          +'<td style="padding:4px 8px">'+(r.prod1||'')+'</td>'
+          +'<td style="padding:4px 8px;color:var(--text2);white-space:nowrap">'+(r.prod2||'')+'</td>'
+          +'<td style="padding:4px 8px;color:var(--accent);white-space:nowrap">'+(r.po||'—')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(lf?lf.toLocaleString():'—')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(wt?wt.toLocaleString():'—')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right">'+(r.width||'')+'</td></tr>';
+      }).join('');
+      const totLf = load.rows.reduce(function(s,r){return s+_upmLF(r.rawLength,load.lengthIsMeters);},0).toLocaleString();
+      const totWt = load.rows.reduce(function(s,r){return s+_upmWeight(r.rawWeight,load.weightIsKg);},0).toLocaleString();
+      return '<div style="border-bottom:1px solid var(--border)">'
+        +'<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(idx%2!==0?'var(--surface2)':'var(--surface)')+';flex-wrap:wrap">'
+          +'<div style="flex:1;min-width:170px">'
+            +'<div style="font-weight:bold;color:'+G+';font-size:12px">UPM · Loading ID '+(H.receiver||'—')+'</div>'
+            +'<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+load.fileName+'</div>'
+            +'<div style="font-size:10px;font-weight:700;color:'+recColor+'">'+recTxt+'</div>'+stampStr
+          +'</div>'
+          +unitToggles
+          +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+_upmHdrInput(idx,'po','PO # (UPM Ref)',H.poNum)+_upmHdrInput(idx,'truck','Truck #',H.truck)+_upmHdrInput(idx,'recv','Receiver',H.receiver)+'</div>'
+          +'<div style="text-align:right;white-space:nowrap"><div style="font-weight:bold;color:'+G+';font-size:13px">'+load.rows.length+'</div><div style="font-size:10px;color:var(--text2)">rolls · '+skuN+' SKU</div></div>'
+          +'<button onclick="exportUPMLoad('+idx+')" style="background:'+G+';color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px">Export</button>'
+          +'<button onclick="deleteUPMLoad('+idx+')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px" title="Remove load">✕</button>'
+          +'<button id="'+detailId+'-btn" onclick="toggleEDIDetail(&quot;'+detailId+'&quot;)" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px">▼</button>'
+        +'</div>'
+        +'<div id="'+detailId+'" style="display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:340px;overflow-y:auto">'
+          +'<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--surface2)">'
+            +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">LOT #</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">SKU</th>'
+            +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">PROD ID 1</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">PROD ID 2</th>'
+            +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">PO#</th><th style="padding:5px 8px;text-align:right;color:var(--text2)">LF</th>'
+            +'<th style="padding:5px 8px;text-align:right;color:var(--text2)">WEIGHT (LB)</th><th style="padding:5px 8px;text-align:right;color:var(--text2)">WIDTH (IN)</th>'
+          +'</tr></thead><tbody>'+drows
+          +'<tr style="background:rgba(46,125,50,0.08);font-weight:bold"><td colspan="5" style="padding:5px 8px;color:'+G+'">TOTAL — '+load.rows.length+' rolls'+(load.weightIsKg||load.lengthIsMeters?' ('+(load.weightIsKg?'KG→LBS':'LBS')+' · '+(load.lengthIsMeters?'m→LF':'LF')+')':'')+'</td>'
+          +'<td style="padding:5px 8px;text-align:right;color:'+G+'">'+totLf+'</td><td style="padding:5px 8px;text-align:right;color:'+G+'">'+totWt+'</td><td></td></tr></tbody></table>'
+        +'</div></div>';
+    }).join('');
+    body = '<div style="font-size:10px;color:var(--text2)">'+loads.length+' load(s) &nbsp;·&nbsp; '+totalRolls.toLocaleString()+' rolls total'
+      +'<button onclick="clearUPMLoads()" title="Clear all UPM loads" style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;padding:0">✕ Clear All</button></div>'
+      +'<div style="max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">'+items+'</div>';
+  }
+  return '<div style="'+sectionStyle+';order:7">'
+    +'<div><div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:'+G+'">🌿 UPM LOADS</div>'
+    +'<div style="font-size:10px;color:var(--text2);margin-top:2px">Drop the UPM Delivery Note / BOL PDF — digital or scanned (auto-OCR). Units auto-detect: metric converts (KG→LBS, Metres→LF), imperial (lb/LF) stays as-is — toggle per load if needed. 1 BOL = 1 load · multiple SKUs · verify totals</div></div>'
+    +'<div ondragover="event.preventDefault();this.style.borderColor=\'#2e7d32\';this.style.background=\'rgba(46,125,50,0.08)\'" ondragleave="this.style.borderColor=\'\';this.style.background=\'\'" ondrop="event.preventDefault();this.style.borderColor=\'\';this.style.background=\'\';handleUPMDrop(event)" onclick="document.getElementById(\'upm-file-input\').click()" style="border:2px dashed var(--border);border-radius:8px;padding:18px;text-align:center;cursor:pointer;user-select:none">'
+      +'<div style="font-size:22px;margin-bottom:6px">📂</div><div style="font-size:12px;font-weight:bold;color:'+G+'">Drop UPM Delivery Note / BOL here</div>'
+      +'<div style="font-size:10px;color:var(--text2);margin-top:4px">.pdf · digital or scanned · auto KG→LBS &amp; m→LF for metric, as-is for imperial</div>'
+      +'<input type="file" id="upm-file-input" accept=".pdf" multiple onchange="handleUPMUpload(event)" style="display:none"></div>'
+    +body+'</div>';
+}
+function exportUPMLoad(idx){
+  const load = (window._upmLoads||[])[idx];
+  if (!load || !load.rows.length) return;
+  const H = load.header || {};
+  const gv = function(key, fb){ const el = document.getElementById('upm-'+key+'-'+idx); return (((el&&el.value)||fb||'')+'').trim(); };
+  const poNum = gv('po',H.poNum), truck = gv('truck',H.truck), receiver = gv('recv',H.receiver);
+  if (!poNum){ showAlert('UPM: PO # (UPM Ref) is required — nothing exported.', 'warning'); return; }
+  const aoa = [
+    [],
+    ['Receiver', receiver, null, 'Total Rolls', load.rows.length, null, null, 'Fraction  Decimal'],
+    ['PO #', poNum, null, null, null, null, null, 0.5, 0.5],
+    ['Invoice #', ''],
+    ['Truck #', truck || '', null, null, null, null, null, 'Piper IBD Order #'],
+    [], [],
+    ['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
+  ];
+  const _now = new Date();
+  const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate())/86400000) + 25569;
+  load.rows.forEach(function(r){
+    const wt = _upmWeight(r.rawWeight, load.weightIsKg), lf = _upmLF(r.rawLength, load.lengthIsMeters);
+    aoa.push([r.sku, r.prod1, r.lot, r.prod2, r.po, wt, wt, 'ROLLS', lf, r.pcs, r.width, fileDateSerial]);
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  for (let ri = 8; ri < aoa.length; ri++){ const ref = XLSX.utils.encode_cell({ r:ri, c:11 }); if (ws[ref] && ws[ref].v){ ws[ref].t='n'; ws[ref].z='m/d/yyyy'; } }
+  const safeName = String(poNum).replace(/[^\w\-]/g,'').substring(0,31) || 'UPM';
+  XLSX.utils.book_append_sheet(wb, ws, safeName);
+  XLSX.writeFile(wb, 'EDI_UPM_' + safeName + '.xlsx');
+  window._ediUPMStamps = window._ediUPMStamps || {};
+  window._ediUPMStamps[idx] = { exportedAt: Date.now(), exportedBy: state.currentUser || '' };
+  showAlert('✓ Exported EDI_UPM_' + safeName + '.xlsx — ' + load.rows.length + ' rolls', 'success');
+  showEDIImportFile();
+}
 
 function renderTRSection() {
   const sectionStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px';
