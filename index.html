@@ -459,6 +459,7 @@ function setSyncStatus(s) {
 function listenToFirebase() {
   if (!initFirebase()) { setTimeout(listenToFirebase,2000); return; }
   setSyncStatus('connecting');
+  _ediListen();   // shared EDI loads
 
   // Tickets
   db.ref('6021/tickets').on('value', snap => {
@@ -5902,7 +5903,7 @@ function renderUPMSection(){
       const skuN = new Set(load.rows.map(function(r){return r.sku;})).size;
       const recColor = load.reconciled ? 'var(--accent2)' : 'var(--warning)';
       const recTxt = load.reconciled ? '✓ reconciled' : '⚠ totals mismatch — verify';
-      const stamp = stamps[idx];
+      const stamp = stamps[load._id];
       const stampStr = stamp ? '<div style="font-size:9px;color:var(--accent2)">✓ Exported: '+new Date(stamp.exportedAt).toLocaleString()+'</div>' : '';
       const chk = 'width:14px;height:14px;accent-color:'+G+';cursor:pointer';
       const unitToggles = '<div style="display:flex;flex-direction:column;gap:3px;justify-content:center">'
@@ -5990,7 +5991,8 @@ function exportUPMLoad(idx){
   XLSX.utils.book_append_sheet(wb, ws, safeName);
   XLSX.writeFile(wb, 'EDI_UPM_' + safeName + '.xlsx');
   window._ediUPMStamps = window._ediUPMStamps || {};
-  window._ediUPMStamps[idx] = { exportedAt: Date.now(), exportedBy: state.currentUser || '' };
+  _ediStampLoad(load);
+  window._ediUPMStamps[load._id] = { exportedAt: Date.now(), exportedBy: state.currentUser || '' };
   _ediSave();
   showAlert('✓ Exported EDI_UPM_' + safeName + '.xlsx — ' + load.rows.length + ' rolls', 'success');
   showEDIImportFile();
@@ -9116,47 +9118,125 @@ function exportDirToExcel() {
   showAlert('✓ DIR data exported to Excel.','success');
 }
 
-// ─── EDI LOAD PERSISTENCE ──────────────────────────────────────
-// EDI loads live in memory, so any reload (including the ↻ REFRESH button, which
-// calls location.reload) used to wipe them. They now persist to localStorage and
-// survive reloads until the user removes them with ✕ / Clear All.
-// Covers: HBH, IPG/SOM, Catalyst, Twin Rivers, UPM.
-// Sci Games is deliberately NOT persisted — its groups are rebuilt live from
+// ─── EDI LOAD PERSISTENCE + SHARED SYNC ──────────────────────────────
+// EDI loads used to live only in memory, so any reload (incl. the ↻ REFRESH button,
+// which calls location.reload) wiped them and nobody else could see them.
+// They now sync to Firebase at 6021/ediLoads so every user sees the same loads,
+// and they stay until someone removes them with ✕ / Clear All.
+// Covers: HBH, IPG/SOM, Catalyst, Twin Rivers, UPM (+ export stamps).
+// Sci Games is deliberately NOT stored — its groups are rebuilt live from
 // state.dirData inside showEDIImportFile(), so they refresh with each DIR import.
-// Key is scoped by DB_ENV so test and live never share loads.
-const EDI_LS_KEY = 'pickflow6021_ediLoads_' + DB_ENV;
-function _ediSave() {
-  try {
-    localStorage.setItem(EDI_LS_KEY, JSON.stringify({
-      v: 1,
-      savedAt: Date.now(),
-      hbh: _ediHBHLoads || [],
-      ipg: _ipgLoads || [],
-      cat: _catLoads || [],
-      tr:  window._ediTRLoads || {},
-      upm: window._upmLoads || [],
-      upmStamps: window._ediUPMStamps || {}
-    }));
-  } catch (e) {
-    console.warn('EDI persist failed', e);
+// localStorage is kept only as an offline mirror / pre-connect paint; Firebase wins.
+const EDI_FB_ROOT = '6021/ediLoads';
+const EDI_LS_KEY  = 'pickflow6021_ediLoads_' + DB_ENV;
+const EDI_MIG_KEY = 'pickflow6021_ediMigrated_' + DB_ENV;
+let _ediLastWritten = {};   // per-branch JSON of what we last pushed/received — avoids echo writes
+
+function _ediNewId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+function _ediWho(){ try { return (state.currentUser && (state.currentUser.name||state.currentUser)) || ''; } catch(e){ return ''; } }
+// Stamp every load with a stable id + creation time so ordering and per-load
+// references survive other users adding/removing loads around it.
+function _ediStampLoad(l){ if (!l || typeof l!=='object') return l; if (!l._id) l._id=_ediNewId(); if (!l._ts) l._ts=Date.now(); if (!l._by) l._by=_ediWho(); return l; }
+function _ediPack(arr){ const o={}; (arr||[]).forEach(function(l){ _ediStampLoad(l); o[l._id]=l; }); return o; }
+function _ediUnpack(obj){ return Object.values(obj||{}).filter(Boolean).sort(function(a,b){ return (a._ts||0)-(b._ts||0); }); }
+// Twin Rivers is keyed by load number locally; store by _id and rebuild that shape.
+function _ediPackTR(obj){ const o={}; Object.values(obj||{}).forEach(function(l){ if(!l) return; _ediStampLoad(l); o[l._id]=l; }); return o; }
+function _ediUnpackTR(obj){ const out={}; _ediUnpack(obj).forEach(function(l){ if (l && l.load) out[l.load]=l; }); return out; }
+
+function _ediSnapshot(){
+  return {
+    hbh: _ediPack(_ediHBHLoads),
+    ipg: _ediPack(_ipgLoads),
+    cat: _ediPack(_catLoads),
+    tr:  _ediPackTR(window._ediTRLoads),
+    upm: _ediPack(window._upmLoads),
+    upmStamps: window._ediUPMStamps || {},
+    stamps:    window._ediStamps || {}
+  };
+}
+function _ediSaveLocal(){
+  try { localStorage.setItem(EDI_LS_KEY, JSON.stringify(Object.assign({v:2, savedAt:Date.now()}, _ediSnapshot()))); }
+  catch (e) {
+    console.warn('EDI local mirror failed', e);
     if (e && (e.name === 'QuotaExceededError' || e.code === 22)) {
-      try { showAlert('EDI loads are too large to save locally — older loads may be lost on refresh. Export or delete a few.', 'warning'); } catch(_){}
+      try { showAlert('EDI loads are too large for the local offline copy — they are still synced, but export or delete a few.', 'warning'); } catch(_){}
     }
   }
 }
-function _ediRestore() {
+// Writes only the branches that actually changed, so one user adding an IPG load
+// can never overwrite another user's Catalyst/TR/UPM loads.
+function _ediSave(){
+  _ediSaveLocal();
+  if (!db) return;
+  const cur = _ediSnapshot(), upd = {};
+  Object.keys(cur).forEach(function(k){
+    const s = JSON.stringify(cur[k]||{});
+    if (s !== _ediLastWritten[k]) { upd[k] = cur[k] || {}; _ediLastWritten[k] = s; }
+  });
+  if (!Object.keys(upd).length) return;
+  db.ref(EDI_FB_ROOT).update(upd).catch(function(e){
+    console.warn('EDI sync failed', e);
+    try { showAlert('EDI loads could not sync to the shared database — other users may not see this yet.', 'warning'); } catch(_){}
+  });
+}
+function _ediReadLocal(){ try { return JSON.parse(localStorage.getItem(EDI_LS_KEY)||'null'); } catch(e){ return null; } }
+// Pre-connect paint / offline fallback. Firebase overwrites this once it fires.
+function _ediRestore(){
+  const d = _ediReadLocal();
+  if (!d) return;
   try {
-    const raw = localStorage.getItem(EDI_LS_KEY);
-    if (!raw) return;
-    const d = JSON.parse(raw);
-    if (!d || d.v !== 1) return;
-    if (Array.isArray(d.hbh)) _ediHBHLoads = d.hbh;
-    if (Array.isArray(d.ipg)) _ipgLoads = d.ipg;
-    if (Array.isArray(d.cat)) _catLoads = d.cat;
-    if (d.tr  && typeof d.tr === 'object' && !Array.isArray(d.tr)) window._ediTRLoads = d.tr;
-    if (Array.isArray(d.upm)) window._upmLoads = d.upm;
+    if (d.v === 1) {   // v23 shape: plain arrays
+      if (Array.isArray(d.hbh)) _ediHBHLoads = d.hbh;
+      if (Array.isArray(d.ipg)) _ipgLoads = d.ipg;
+      if (Array.isArray(d.cat)) _catLoads = d.cat;
+      if (d.tr && typeof d.tr === 'object') window._ediTRLoads = d.tr;
+      if (Array.isArray(d.upm)) window._upmLoads = d.upm;
+    } else {           // v2 shape: id-keyed objects
+      _ediHBHLoads = _ediUnpack(d.hbh);
+      _ipgLoads    = _ediUnpack(d.ipg);
+      _catLoads    = _ediUnpack(d.cat);
+      window._ediTRLoads = _ediUnpackTR(d.tr);
+      window._upmLoads   = _ediUnpack(d.upm);
+    }
     if (d.upmStamps && typeof d.upmStamps === 'object') window._ediUPMStamps = d.upmStamps;
+    if (d.stamps    && typeof d.stamps    === 'object') window._ediStamps    = d.stamps;
   } catch (e) { console.warn('EDI restore failed', e); }
+}
+// Don't blow away a header field someone is typing into when a remote change lands.
+function _ediInputFocused(){
+  const a = document.activeElement;
+  if (!a || !a.id) return false;
+  return /^(upm-|cat-|ipg-|hbh-|tr-|edi-|sci-)/.test(a.id);
+}
+function _ediListen(){
+  if (!db) return;
+  db.ref(EDI_FB_ROOT).on('value', function(snap){
+    const d = snap.val() || {};
+    // One-time migration: loads created before shared sync existed still live in
+    // this browser's localStorage. Push them up once, then never resurrect again.
+    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.tr && !d.upm;
+    let migrated = false;
+    try { migrated = !!localStorage.getItem(EDI_MIG_KEY); } catch(e){}
+    if (remoteEmpty && !migrated) {
+      try { localStorage.setItem(EDI_MIG_KEY, String(Date.now())); } catch(e){}
+      const localHas = (_ediHBHLoads||[]).length || (_ipgLoads||[]).length || (_catLoads||[]).length
+        || Object.keys(window._ediTRLoads||{}).length || (window._upmLoads||[]).length;
+      if (localHas) { _ediLastWritten = {}; _ediSave(); return; }
+    }
+    _ediHBHLoads       = _ediUnpack(d.hbh);
+    _ipgLoads          = _ediUnpack(d.ipg);
+    _catLoads          = _ediUnpack(d.cat);
+    window._ediTRLoads = _ediUnpackTR(d.tr);
+    window._upmLoads   = _ediUnpack(d.upm);
+    window._ediUPMStamps = d.upmStamps || {};
+    window._ediStamps    = d.stamps || {};
+    // Record what we just received so the next _ediSave() doesn't echo it back.
+    const cur = _ediSnapshot();
+    Object.keys(cur).forEach(function(k){ _ediLastWritten[k] = JSON.stringify(cur[k]||{}); });
+    _ediSaveLocal();
+    // Only refresh the EDI screen, and never while someone is typing in it.
+    if (state.currentView === 'edi' && !_ediInputFocused()) showEDIImportFile();
+  }, function(e){ console.warn('EDI listener error', e); });
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
