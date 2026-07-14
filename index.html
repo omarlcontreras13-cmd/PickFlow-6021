@@ -3342,6 +3342,7 @@ function deleteEDISciLoad(key) {
 
 function deleteEDIHBHLoad(idx) {
   _ediHBHLoads.splice(idx, 1);
+  _ediSave();
   showEDIImportFile();
 }
 
@@ -3661,7 +3662,7 @@ function showEDIImportFile() {
   if (_ediHBHLoads.length) {
     const totalHBHRolls = _ediHBHLoads.reduce((s,l)=>s+l.rows.length,0);
     h += `<div style="font-size:10px;color:var(--text2)">${_ediHBHLoads.length} loads loaded &nbsp;·&nbsp; ${totalHBHRolls.toLocaleString()} rolls total
-      <button onclick="_ediHBHLoads=[];showEDIImportFile()" title="Clear all HBH loads"
+      <button onclick="_ediHBHLoads=[];_ediSave();showEDIImportFile()" title="Clear all HBH loads"
         style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;padding:0">✕ Clear All</button>
       <button onclick="document.getElementById('hbh-file-input').click()" title="Add another file"
         style="margin-left:8px;background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:0">＋ Add File</button>
@@ -4001,6 +4002,7 @@ function processIPGFile(file) {
       };
 
       _ipgLoads.push(newLoad); // append — 1 file = 1 load
+      _ediSave();
       renderIPGLoads();
       showAlert('✓ IPG file loaded — ' + rolls.length + ' roll(s) in 1 load'
         + (somOrders.length > 1 ? ' (' + somOrders.length + ' SOM Orders combined)' : ''), 'success');
@@ -4014,6 +4016,7 @@ function processIPGFile(file) {
 
 function deleteIPGLoad(idx) {
   _ipgLoads.splice(idx, 1);
+  _ediSave();
   showEDIImportFile(); // full panel re-render (matches the working HBH/SCI delete pattern)
 }
 
@@ -4021,6 +4024,7 @@ function clearIPGLoads() {
   if (!_ipgLoads.length) return;
   if (!confirm('Remove all ' + _ipgLoads.length + ' IPG load(s) from the list?')) return;
   _ipgLoads = [];
+  _ediSave();
   showEDIImportFile();
 }
 
@@ -4493,6 +4497,7 @@ function processCatalystFile(file) {
       const bundles = lines.filter(l=>l.bundled).length;
       const detected = ['roll','weight','width','lineal','sku'].filter(k=>cols[k]>=0);
       _catLoads.push({ fileName:file.name, manual:M, lines:lines, rollCount:dataRows.length, lineCount:lines.length, bundleCount:bundles, detected:detected, orderNo:orderNo });
+      _ediSave();
       const fmsg = filled.length ? ('  \u00b7  auto-filled ' + filled.join(', ')) : '';
       showAlert('\u2713 Catalyst ' + file.name + ' \u2014 ' + dataRows.length + ' rolls \u2192 ' + lines.length + ' lines' + (bundles?(' ('+bundles+' bundled)'):'') + (M.isKg?' \u00b7 KG\u2192LBS':' \u00b7 LBS') + fmsg, 'success');
       renderCatalystLoads();
@@ -4504,8 +4509,8 @@ function processCatalystFile(file) {
   if (/\.csv$/i.test(file.name)) reader.readAsArrayBuffer(file); else reader.readAsBinaryString(file);
 }
 
-function deleteCatalystLoad(idx){ _catLoads.splice(idx,1); showEDIImportFile(); }
-function clearCatalystLoads(){ if(!_catLoads.length) return; if(!confirm('Remove all '+_catLoads.length+' Catalyst load(s)?')) return; _catLoads=[]; showEDIImportFile(); }
+function deleteCatalystLoad(idx){ _catLoads.splice(idx,1); _ediSave(); showEDIImportFile(); }
+function clearCatalystLoads(){ if(!_catLoads.length) return; if(!confirm('Remove all '+_catLoads.length+' Catalyst load(s)?')) return; _catLoads=[]; _ediSave(); showEDIImportFile(); }
 
 function exportCatalystLoad(idx) {
   const load = _catLoads[idx];
@@ -5297,6 +5302,7 @@ function processHBHFile(file) {
         });
       });
 
+      _ediSave();
       showAlert('✓ ' + _ediHBHLoads.length + ' HBH loads loaded from ' + file.name, 'success');
       showEDIImportFile();
     } catch(err) {
@@ -5654,6 +5660,7 @@ function exportSingleTR(key) {
 
 function deleteTRLoad(key) {
   if (window._ediTRLoads) delete window._ediTRLoads[key];
+  _ediSave();
   showEDIImportFile();
 }
 
@@ -5718,6 +5725,7 @@ async function processTRFiles(fileList) {
     built.bol = bol;
     window._ediTRLoads = window._ediTRLoads || {};
     window._ediTRLoads[built.load] = built;
+    _ediSave();
     window._ediTRPending = { excels: [], pdfs: [] }; // clear staging on success
     showAlert('✓ Twin Rivers ' + built.load + ' — ' + built.rollCount + ' rolls → ' + built.packCount + ' packs' + xchk, 'success');
     showEDIImportFile();
@@ -5772,6 +5780,7 @@ async function processUPMPDF(file){
   if (!load.rows.length){ showAlert('UPM: no packages found in ' + file.name + (src==='ocr'?' (OCR could not read the table — check scan quality).':' (is this a UPM Delivery Note?)'), 'warning'); return; }
   window._upmLoads = window._upmLoads || [];
   window._upmLoads.push(load);
+  _ediSave();
   showEDIImportFile();
   const skuN = new Set(load.rows.map(r => r.sku)).size;
   const uStr = (load.weightIsKg ? 'KG→LBS' : 'LBS as-is') + ' · ' + (load.lengthIsMeters ? 'm→LF' : 'LF as-is');
@@ -5874,9 +5883,9 @@ function _upmHdrInput(i, key, label, val){
   return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:8px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
     +'<input id="upm-'+key+'-'+i+'" type="text" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:112px"></div>';
 }
-function deleteUPMLoad(idx){ (window._upmLoads||[]).splice(idx,1); showEDIImportFile(); }
-function clearUPMLoads(){ const L=window._upmLoads||[]; if(!L.length) return; if(!confirm('Remove all '+L.length+' UPM load(s)?')) return; window._upmLoads=[]; showEDIImportFile(); }
-function setUPMUnit(idx, which, checked){ const l=(window._upmLoads||[])[idx]; if(!l) return; if(which==='kg') l.weightIsKg=!!checked; else if(which==='m') l.lengthIsMeters=!!checked; showEDIImportFile(); }
+function deleteUPMLoad(idx){ (window._upmLoads||[]).splice(idx,1); _ediSave(); showEDIImportFile(); }
+function clearUPMLoads(){ const L=window._upmLoads||[]; if(!L.length) return; if(!confirm('Remove all '+L.length+' UPM load(s)?')) return; window._upmLoads=[]; _ediSave(); showEDIImportFile(); }
+function setUPMUnit(idx, which, checked){ const l=(window._upmLoads||[])[idx]; if(!l) return; if(which==='kg') l.weightIsKg=!!checked; else if(which==='m') l.lengthIsMeters=!!checked; _ediSave(); showEDIImportFile(); }
 function renderUPMSection(){
   const sectionStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px';
   const G = '#2e7d32';
@@ -5982,6 +5991,7 @@ function exportUPMLoad(idx){
   XLSX.writeFile(wb, 'EDI_UPM_' + safeName + '.xlsx');
   window._ediUPMStamps = window._ediUPMStamps || {};
   window._ediUPMStamps[idx] = { exportedAt: Date.now(), exportedBy: state.currentUser || '' };
+  _ediSave();
   showAlert('✓ Exported EDI_UPM_' + safeName + '.xlsx — ' + load.rows.length + ' rolls', 'success');
   showEDIImportFile();
 }
@@ -9106,11 +9116,55 @@ function exportDirToExcel() {
   showAlert('✓ DIR data exported to Excel.','success');
 }
 
+// ─── EDI LOAD PERSISTENCE ──────────────────────────────────────
+// EDI loads live in memory, so any reload (including the ↻ REFRESH button, which
+// calls location.reload) used to wipe them. They now persist to localStorage and
+// survive reloads until the user removes them with ✕ / Clear All.
+// Covers: HBH, IPG/SOM, Catalyst, Twin Rivers, UPM.
+// Sci Games is deliberately NOT persisted — its groups are rebuilt live from
+// state.dirData inside showEDIImportFile(), so they refresh with each DIR import.
+// Key is scoped by DB_ENV so test and live never share loads.
+const EDI_LS_KEY = 'pickflow6021_ediLoads_' + DB_ENV;
+function _ediSave() {
+  try {
+    localStorage.setItem(EDI_LS_KEY, JSON.stringify({
+      v: 1,
+      savedAt: Date.now(),
+      hbh: _ediHBHLoads || [],
+      ipg: _ipgLoads || [],
+      cat: _catLoads || [],
+      tr:  window._ediTRLoads || {},
+      upm: window._upmLoads || [],
+      upmStamps: window._ediUPMStamps || {}
+    }));
+  } catch (e) {
+    console.warn('EDI persist failed', e);
+    if (e && (e.name === 'QuotaExceededError' || e.code === 22)) {
+      try { showAlert('EDI loads are too large to save locally — older loads may be lost on refresh. Export or delete a few.', 'warning'); } catch(_){}
+    }
+  }
+}
+function _ediRestore() {
+  try {
+    const raw = localStorage.getItem(EDI_LS_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (!d || d.v !== 1) return;
+    if (Array.isArray(d.hbh)) _ediHBHLoads = d.hbh;
+    if (Array.isArray(d.ipg)) _ipgLoads = d.ipg;
+    if (Array.isArray(d.cat)) _catLoads = d.cat;
+    if (d.tr  && typeof d.tr === 'object' && !Array.isArray(d.tr)) window._ediTRLoads = d.tr;
+    if (Array.isArray(d.upm)) window._upmLoads = d.upm;
+    if (d.upmStamps && typeof d.upmStamps === 'object') window._ediUPMStamps = d.upmStamps;
+  } catch (e) { console.warn('EDI restore failed', e); }
+}
+
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 
 window.addEventListener('load', function() {
   buildLoginScreen();
   localStorage.removeItem('pickflow_state');
+  _ediRestore();   // bring back EDI loads saved before the last reload
   listenToFirebase();
 
   // ── TEST ENVIRONMENT BANNER ──────────────────────────────────────
