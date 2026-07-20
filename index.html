@@ -1495,6 +1495,54 @@ function updateBUOptions() {
 
 // updateSKUOptions moved to ticket view
 
+// ─── DUPLICATE PICK-TICKET CHECK (against archive) ────────────────────────────
+// Flags a likely duplicate when a live ticket line matches an ARCHIVED ticket line
+// on all three: Order #, SKU, and QTY REQUIRED. Non-blocking — clerk decides.
+function _dupNorm(v){ return (v==null?'':String(v)).trim().toUpperCase(); }
+// Match a live ticket line against BOTH archived tickets and other OPEN tickets
+// on Order # + SKU + QTY REQUIRED. selfId excludes the ticket being edited.
+function _dupMatches6021(orderNum, sku, qty, selfId){
+  const o=_dupNorm(orderNum), s=_dupNorm(sku), q=(parseInt(qty)||0);
+  if (!o || !s || !q) return [];   // need all three to call it a duplicate
+  const out=[];
+  function scan(list, source){
+    (list||[]).forEach(function(t){
+      if (t.id===selfId) return;   // don't flag the ticket against itself
+      (t.skuLines||[]).forEach(function(l){
+        if (_dupNorm(l.orderNum)===o && _dupNorm(l.sku)===s && (parseInt(l.qty)||0)===q){
+          out.push({ id:t.id, source:source, refNum:t.refNum||'', when:(source==='open'?(t.created||0):(t.archivedAt||t.created||0)), sku:l.sku, orderNum:l.orderNum, qty:l.qty });
+        }
+      });
+    });
+  }
+  scan(state.tickets, 'open');            // current-date / open pick tickets
+  scan(state.archivedTickets, 'archive'); // archived pick tickets
+  return out;
+}
+function checkDuplicateTicketLine6021(tid, li){
+  const host=document.getElementById('dup-warn-'+tid+'-'+li);
+  const ticket=state.tickets.find(t=>t.id===tid);
+  if (!host||!ticket||!ticket.skuLines[li]){ if(host) host.innerHTML=''; return; }
+  const line=ticket.skuLines[li];
+  const matches=_dupMatches6021(line.orderNum, line.sku, line.qty, tid);
+  if (!matches.length){ host.innerHTML=''; return; }
+  const rowsHtml=matches.slice(0,5).map(function(m){
+    const d=m.when?new Date(m.when).toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'}):'—';
+    const isOpen=m.source==='open';
+    const label=(isOpen?'Open ticket '+d:'Archived '+d)+' — '+(m.refNum?('Ref '+m.refNum):('Ticket '+m.id));
+    const linkFn=isOpen?('viewTicket(\''+m.id+'\')'):('viewArchivedTicket(\''+m.id+'\')');
+    const linkTxt=isOpen?'Open pick ticket →':'Open archived ticket →';
+    return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px">'
+      +'<span style="font-size:11px;color:#7a1f1f">'+label+'</span>'
+      +'<a href="#" onclick="event.preventDefault();'+linkFn+'" style="font-size:11px;font-weight:700;color:#b91c1c;text-decoration:underline;cursor:pointer">'+linkTxt+'</a>'
+      +'</div>';
+  }).join('');
+  host.innerHTML='<div style="margin:4px 0;padding:7px 10px;border:1.5px solid #b91c1c;background:rgba(185,28,28,0.08);border-radius:6px">'
+    +'<div style="font-size:11px;font-weight:800;color:#b91c1c;letter-spacing:.3px">⚠ POSSIBLE DUPLICATE — Order #'+_dupNorm(line.orderNum)+' · SKU '+_dupNorm(line.sku)+' · Qty '+(parseInt(line.qty)||0)+' already exists.</div>'
+    +rowsHtml
+    +'<div style="font-size:10px;color:var(--text2);margin-top:3px">Verify before continuing to avoid a duplicate pick ticket.</div></div>';
+}
+
 function createTicket() {
   const clerk = document.getElementById('nd-clerk').value.trim();
   const refNum = document.getElementById('nd-ref').value.trim();
@@ -1812,6 +1860,7 @@ function viewTicket(id) {
     h += '</div>';
     h += '<button data-tid="'+id+'" data-li="'+li+'" onclick="removeSkuLineFromTicket(this.dataset.tid,parseInt(this.dataset.li))" style="background:none;border:1px solid var(--danger);color:var(--danger);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px;'+(li===0?'visibility:hidden':'')+'">✕</button>';
     h += '</div>';
+    h += '<div id="dup-warn-'+id+'-'+li+'" class="dup-warn-host" style="grid-column:1/-1"></div>';
   });
   h += '</div>';
   h += '</div>';
@@ -1844,6 +1893,7 @@ function viewTicket(id) {
   h += '</div>'; // panel
 
   document.getElementById('main-panel').innerHTML = h;
+  try { (ticket.skuLines||[]).forEach(function(_l,_i){ checkDuplicateTicketLine6021(id, _i); }); } catch(e){}
 }
 
 
@@ -2259,6 +2309,7 @@ function updateTicketSkuLine(el) {
   const poEl = row.querySelector('.sku-edit-po');
   if (poEl) ticket.skuLines[li].po = poEl.value.trim();
   saveTickets();
+  try { checkDuplicateTicketLine6021(tid, li); } catch(e){}
   // If BU changed, refresh the view so SKU list updates
   if (el.classList.contains('sku-edit-bu')) {
     viewTicket(tid);
