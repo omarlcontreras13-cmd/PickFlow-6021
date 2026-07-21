@@ -3730,13 +3730,13 @@ function showEDIImportFile() {
         // Exp Date column carries the file creation date (today) in short format, per HBH EDI spec.
         const expDisp = new Date().toLocaleDateString('en-US');
         detailRows += '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
-          +'<td style="padding:4px 8px;font-weight:bold;color:var(--accent);white-space:nowrap">'+(r.lot||'—')+'</td>'
-          +'<td style="padding:4px 8px">'+(r.sku||'')+'</td>'
-          +'<td style="padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(r.productId||'')+'</td>'
-          +'<td style="padding:4px 8px;color:var(--accent2);white-space:nowrap">'+(r.po5||'—')+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(r.lf||'—')+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(r.weight?(+r.weight).toLocaleString():'—')+'</td>'
-          +'<td style="padding:4px 8px;white-space:nowrap">'+expDisp+'</td>'
+          +'<td style="padding:3px 6px;font-weight:bold;color:var(--accent);white-space:nowrap">'+(r.lot||'—')+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('hbh',i,ri,'sku',r.sku,{width:'110px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('hbh',i,ri,'productId',r.productId,{width:'150px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('hbh',i,ri,'po5',r.po5,{width:'110px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('hbh',i,ri,'lf',r.lf,{num:true})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('hbh',i,ri,'weight',r.weight,{num:true})+'</td>'
+          +'<td style="padding:3px 6px;white-space:nowrap">'+expDisp+'</td>'
           +'</tr>';
       });
       const totWt = (load.rows||[]).reduce(function(s,r){return s+(+r.weight||0);},0).toLocaleString();
@@ -4124,15 +4124,15 @@ function renderIPGLoads() {
       h += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap">' + col + '</th>';
     });
     h += '</tr></thead><tbody>';
-    load.rolls.forEach(r => {
+    load.rolls.forEach((r, ri) => {
       h += '<tr style="border-bottom:1px solid var(--border)">';
-      h += '<td style="padding:5px 10px">' + r.rollId + '</td>';
-      h += '<td style="padding:5px 10px;font-weight:bold">' + r.sku + '</td>';
-      h += '<td style="padding:5px 10px;color:var(--text2)">' + r.prodId + '</td>';
-      h += '<td style="padding:5px 10px;color:var(--text2)">' + (r.somOrder||'') + '</td>';
-      h += '<td style="padding:5px 10px">' + r.lf.toLocaleString() + '</td>';
-      h += '<td style="padding:5px 10px">' + r.wt.toLocaleString() + '</td>';
-      h += '<td style="padding:5px 10px">' + r.widthNum + '</td>';
+      h += '<td style="padding:4px 6px;font-weight:bold">' + r.rollId + '</td>';
+      h += '<td style="padding:4px 6px">' + _ediCellInput('ipg',i,ri,'sku',r.sku,{width:'120px'}) + '</td>';
+      h += '<td style="padding:4px 6px">' + _ediCellInput('ipg',i,ri,'prodId',r.prodId,{width:'170px'}) + '</td>';
+      h += '<td style="padding:4px 6px">' + _ediCellInput('ipg',i,ri,'custOrder',(r.somOrder||''),{width:'100px'}) + '</td>';
+      h += '<td style="padding:4px 6px">' + _ediCellInput('ipg',i,ri,'lf',r.lf,{num:true}) + '</td>';
+      h += '<td style="padding:4px 6px">' + _ediCellInput('ipg',i,ri,'wt',r.wt,{num:true}) + '</td>';
+      h += '<td style="padding:4px 6px">' + _ediCellInput('ipg',i,ri,'widthNum',r.widthNum,{num:true,width:'70px'}) + '</td>';
       h += '</tr>';
     });
     h += '</tbody></table></div></div>';
@@ -4594,9 +4594,9 @@ function exportCatalystLoad(idx) {
   ];
   const __xdk = (M.isKg===false);
   load.lines.forEach(L => {
-    const wt = L.rawWeight * wf;
+    const wt = _catWtRow(L, wf);
     const sku = (__xdk && L.sku) ? (L.sku+'X') : L.sku;
-    aoa.push([ sku, prodId1, L.lot, prodId2, poNum, wt, wt, 'ROLLS', L.linealCm*CAT_CM2IN, L.pcs, L.widthCm*CAT_CM2IN, todaySerial ]);
+    aoa.push([ sku, prodId1, L.lot, prodId2, poNum, wt, wt, 'ROLLS', _catLFRow(L), L.pcs, _catWidthRow(L), todaySerial ]);
   });
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -4635,14 +4635,14 @@ function renderCatalystLoads() {
     h += '<button onclick="deleteCatalystLoad('+i+')" title="Remove load" style="background:none;border:none;cursor:pointer;font-size:14px;color:var(--danger);padding:2px 6px;line-height:1">✕</button></div>';
     h += '<div id="'+detailId+'" style="display:none;overflow-x:auto;max-height:320px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:10px">';
     h += '<thead><tr style="background:var(--surface)"><th style="padding:4px 6px;text-align:left">Lot#</th><th style="padding:4px 6px;text-align:left">SKU</th><th style="padding:4px 6px;text-align:right">Weight</th><th style="padding:4px 6px;text-align:right">LF</th><th style="padding:4px 6px;text-align:right">Width</th><th style="padding:4px 6px;text-align:center">Pcs</th></tr></thead><tbody>';
-    load.lines.forEach(L => {
+    load.lines.forEach((L, li) => {
       h += '<tr style="border-top:1px solid var(--border)'+(L.bundled?';background:rgba(14,165,233,0.06)':'')+'">';
       h += '<td style="padding:3px 6px">'+L.lot+(L.bundled?' <span style="color:#0ea5e9;font-weight:700">pk</span>':'')+'</td>';
-      h += '<td style="padding:3px 6px">'+(L.sku||'')+'</td>';
-      h += '<td style="padding:3px 6px;text-align:right">'+(L.rawWeight*wf).toFixed(1)+'</td>';
-      h += '<td style="padding:3px 6px;text-align:right">'+(L.linealCm*CAT_CM2IN).toFixed(1)+'</td>';
-      h += '<td style="padding:3px 6px;text-align:right">'+(L.widthCm*CAT_CM2IN).toFixed(2)+'</td>';
-      h += '<td style="padding:3px 6px;text-align:center">'+L.pcs+'</td></tr>';
+      h += '<td style="padding:3px 6px">'+_ediCellInput('cat',i,li,'sku',(L.sku||''),{width:'110px'})+'</td>';
+      h += '<td style="padding:3px 6px">'+_ediCellInput('cat',i,li,'ovrWt',(+_catWtRow(L,wf)).toFixed(1),{num:true})+'</td>';
+      h += '<td style="padding:3px 6px">'+_ediCellInput('cat',i,li,'ovrLF',(+_catLFRow(L)).toFixed(1),{num:true})+'</td>';
+      h += '<td style="padding:3px 6px">'+_ediCellInput('cat',i,li,'ovrWidth',(+_catWidthRow(L)).toFixed(2),{num:true,width:'70px'})+'</td>';
+      h += '<td style="padding:3px 6px">'+_ediCellInput('cat',i,li,'pcs',L.pcs,{num:true,width:'56px'})+'</td></tr>';
     });
     h += '</tbody></table></div></div>';
   });
@@ -5807,6 +5807,71 @@ function handleTRUpload(e) { processTRFiles(e.target.files); }
 const UPM_MM2IN = 0.0393701, UPM_M2FT = 3.28084;
 function _upmWeight(raw, isKg){ return Math.round((isKg ? raw * CAT_KG2LB : raw) || 0); }
 function _upmLF(raw, isM){ return Math.round((isM ? raw * UPM_M2FT : raw) || 0); }
+// Override-aware display: a manually-edited cell (ovrWt/ovrLF) wins over the computed value.
+function _upmWeightRow(r, isKg){ return (r && r.ovrWt!=='' && r.ovrWt!=null) ? Math.round(_ediNum(r.ovrWt)||0) : _upmWeight(r?r.rawWeight:0, isKg); }
+function _upmLFRow(r, isM){ return (r && r.ovrLF!=='' && r.ovrLF!=null) ? Math.round(_ediNum(r.ovrLF)||0) : _upmLF(r?r.rawLength:0, isM); }
+// ─── EDI DETAIL INLINE EDITING ────────────────────────────────────────────────
+// Makes every attribute in the expanded EDI detail tables editable (LOT # stays
+// read-only). Edits write straight to the load row, save + sync (shared), and the
+// value flows into Export. Computed columns (UPM weight/LF, Catalyst weight/LF/
+// width) get a per-row override the export/render honors instead of recomputing.
+// Nothing else about the EDI generators changes.
+function _ediCellInput(genKey, a, b, field, value, opts){
+  opts = opts || {};
+  const esc = String(value==null?'':value).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+  const align = opts.num ? 'right' : 'left';
+  const w = opts.width || (opts.num ? '78px' : '100%');
+  // Build call args safely for an HTML attribute (single-quoted JS strings, quotes escaped).
+  function jsArg(v){ if (typeof v==='number') return String(v); return "'"+String(v).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/&/g,'&amp;').replace(/"/g,'&quot;')+"'"; }
+  const args = "'"+genKey+"',"+jsArg(a)+","+(b==null?'null':jsArg(b))+",'"+field+"',this.value";
+  // onchange re-renders (recompute totals + honor overrides); oninput keeps the value hot.
+  return '<input value="'+esc+'"'
+    +' oninput="_ediSetCell('+args+',false)"'
+    +' onchange="_ediSetCell('+args+',true)"'
+    +' spellcheck="false"'
+    +' style="width:'+w+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;'
+    +'padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-align:'+align+';outline:none">';
+}
+// numeric string -> number (strips commas); '' stays ''
+function _ediNum(v){ if(v===''||v==null) return ''; const n=parseFloat(String(v).replace(/,/g,'')); return isNaN(n)?'':n; }
+function _ediRerender(genKey){
+  if (genKey==='upm')      showEDIImportFile();
+  else if (genKey==='hbh') showEDIImportFile();
+  else if (genKey==='ipg') { if (typeof renderIPGLoads==='function') renderIPGLoads(); }
+  else if (genKey==='cat') { if (typeof renderCatalystLoads==='function') renderCatalystLoads(); }
+  else if (genKey==='tr')  showEDIImportFile();
+}
+// Reopen the detail panel that was open, since a full re-render collapses it.
+function _ediReopenDetail(detailId){
+  if (!detailId) return;
+  setTimeout(function(){
+    const el=document.getElementById(detailId); const btn=document.getElementById(detailId+'-btn');
+    if (el){ el.style.display='block'; if(btn) btn.textContent='▲'; }
+  }, 0);
+}
+function _ediSetCell(genKey, a, b, field, value, commit){
+  let row=null, load=null, detailId='';
+  if (genKey==='upm'){ load=(window._upmLoads||[])[a]; if(load){ row=(load.rows||[])[b]; detailId='upm-detail-'+a; } }
+  else if (genKey==='hbh'){ load=(_ediHBHLoads||[])[a]; if(load){ row=(load.rows||[])[b]; detailId='hbh-detail-'+a; } }
+  else if (genKey==='ipg'){ load=(_ipgLoads||[])[a]; if(load){ row=(load.rolls||[])[b]; detailId='ipg-detail-'+a; } }
+  else if (genKey==='cat'){ load=(_catLoads||[])[a]; if(load){ row=(load.lines||[])[b]; detailId='cat-detail-'+a; } }
+  else if (genKey==='tr'){ load=(window._ediTRLoads||{})[a]; if(load){ row=(load.rows||[])[b]; detailId='tr-detail-'+String(a).replace(/[^a-zA-Z0-9_-]/g,'_'); } }
+  if (!row) return;
+  const numeric = { lf:1, weight:1, wt:1, width:1, widthNum:1, pcs:1, ovrLF:1, ovrWt:1, ovrWidth:1 };
+  row[field] = numeric[field] ? _ediNum(value) : value;
+  // keep the two IPG order fields in step (detail shows SOM ORDER, export uses custOrder)
+  if (genKey==='ipg' && field==='custOrder') row.somOrder = value;
+  if (!commit) return;              // still typing — don't re-render yet
+  try { _ediSaveEDI(); } catch(e){}  // persist + shared sync
+  _ediRerender(genKey);
+  _ediReopenDetail(detailId);
+}
+// One place to persist whichever sync layer exists in this build.
+function _ediSaveEDI(){ if (typeof _ediSave==='function') _ediSave(); }
+// Catalyst display honors a manual override (ovrWt/ovrLF/ovrWidth) over the raw*factor value.
+function _catWtRow(L, wf){ return (L && L.ovrWt!=='' && L.ovrWt!=null) ? (_ediNum(L.ovrWt)||0) : (L.rawWeight*wf); }
+function _catLFRow(L){ return (L && L.ovrLF!=='' && L.ovrLF!=null) ? (_ediNum(L.ovrLF)||0) : (L.linealCm*CAT_CM2IN); }
+function _catWidthRow(L){ return (L && L.ovrWidth!=='' && L.ovrWidth!=null) ? (_ediNum(L.ovrWidth)||0) : (L.widthCm*CAT_CM2IN); }
 function handleUPMDrop(e){ e.preventDefault(); _upmRoute(Array.from((e.dataTransfer&&e.dataTransfer.files)||[])); }
 function handleUPMUpload(e){ _upmRoute(Array.from(e.target.files||[])); }
 async function _upmRoute(files){
@@ -5962,19 +6027,19 @@ function renderUPMSection(){
         +'<label style="display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:var(--text);cursor:pointer;white-space:nowrap"><input type="checkbox" '+(load.lengthIsMeters?'checked':'')+' onchange="setUPMUnit('+idx+',&quot;m&quot;,this.checked)" style="'+chk+'">Metres→LF</label></div>';
       const drows = load.rows.map(function(r, ri){
         const bg = ri%2!==0 ? 'rgba(0,0,0,0.03)' : '';
-        const wt = _upmWeight(r.rawWeight, load.weightIsKg), lf = _upmLF(r.rawLength, load.lengthIsMeters);
+        const wt = _upmWeightRow(r, load.weightIsKg), lf = _upmLFRow(r, load.lengthIsMeters);
         return '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
-          +'<td style="padding:4px 8px;font-weight:bold;color:'+G+';white-space:nowrap">'+(r.lot||'—')+'</td>'
-          +'<td style="padding:4px 8px;white-space:nowrap">'+(r.sku||'')+'</td>'
-          +'<td style="padding:4px 8px">'+(r.prod1||'')+'</td>'
-          +'<td style="padding:4px 8px;color:var(--text2);white-space:nowrap">'+(r.prod2||'')+'</td>'
-          +'<td style="padding:4px 8px;color:var(--accent);white-space:nowrap">'+(r.po||'—')+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(lf?lf.toLocaleString():'—')+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(wt?wt.toLocaleString():'—')+'</td>'
-          +'<td style="padding:4px 8px;text-align:right">'+(r.width||'')+'</td></tr>';
+          +'<td style="padding:3px 6px;font-weight:bold;color:'+G+';white-space:nowrap">'+(r.lot||'—')+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'sku',r.sku,{width:'120px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'prod1',r.prod1,{width:'90px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'prod2',r.prod2,{width:'130px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'po',r.po,{width:'120px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'ovrLF',lf,{num:true})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'ovrWt',wt,{num:true})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'width',r.width,{num:true,width:'70px'})+'</td></tr>';
       }).join('');
-      const totLf = load.rows.reduce(function(s,r){return s+_upmLF(r.rawLength,load.lengthIsMeters);},0).toLocaleString();
-      const totWt = load.rows.reduce(function(s,r){return s+_upmWeight(r.rawWeight,load.weightIsKg);},0).toLocaleString();
+      const totLf = load.rows.reduce(function(s,r){return s+_upmLFRow(r,load.lengthIsMeters);},0).toLocaleString();
+      const totWt = load.rows.reduce(function(s,r){return s+_upmWeightRow(r,load.weightIsKg);},0).toLocaleString();
       return '<div style="border-bottom:1px solid var(--border)">'
         +'<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(idx%2!==0?'var(--surface2)':'var(--surface)')+';flex-wrap:wrap">'
           +'<div style="flex:1;min-width:170px">'
@@ -6032,7 +6097,7 @@ function exportUPMLoad(idx){
   const _now = new Date();
   const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate())/86400000) + 25569;
   load.rows.forEach(function(r){
-    const wt = _upmWeight(r.rawWeight, load.weightIsKg), lf = _upmLF(r.rawLength, load.lengthIsMeters);
+    const wt = _upmWeightRow(r, load.weightIsKg), lf = _upmLFRow(r, load.lengthIsMeters);
     aoa.push([r.sku, r.prod1, r.lot, r.prod2, r.po, wt, wt, 'ROLLS', lf, r.pcs, r.width, fileDateSerial]);
   });
   const wb = XLSX.utils.book_new();
@@ -6075,13 +6140,13 @@ function renderTRSection() {
       const detailId = 'tr-detail-' + String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
       const expDispTR = new Date().toLocaleDateString('en-US');
       const drows = ld.rows.map((r, ri) => `<tr style="background:${ri % 2 !== 0 ? 'rgba(0,0,0,0.03)' : ''};border-bottom:1px solid var(--border)">
-          <td style="padding:4px 8px;font-weight:bold;color:var(--accent2);white-space:nowrap">${r.lot || '—'}</td>
-          <td style="padding:4px 8px">${r.sku || ''}</td>
-          <td style="padding:4px 8px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.productId || ''}</td>
-          <td style="padding:4px 8px;color:var(--accent);white-space:nowrap">${r.po || '—'}</td>
-          <td style="padding:4px 8px;text-align:right">${r.lf ? r.lf.toLocaleString() : '—'}</td>
-          <td style="padding:4px 8px;text-align:right">${r.weight ? r.weight.toLocaleString() : '—'}</td>
-          <td style="padding:4px 8px;white-space:nowrap">${expDispTR}</td></tr>`).join('');
+          <td style="padding:3px 6px;font-weight:bold;color:var(--accent2);white-space:nowrap">${r.lot || '—'}</td>
+          <td style="padding:3px 6px">${_ediCellInput('tr',key,ri,'sku',r.sku,{width:'110px'})}</td>
+          <td style="padding:3px 6px">${_ediCellInput('tr',key,ri,'productId',r.productId,{width:'150px'})}</td>
+          <td style="padding:3px 6px">${_ediCellInput('tr',key,ri,'po',r.po,{width:'110px'})}</td>
+          <td style="padding:3px 6px">${_ediCellInput('tr',key,ri,'lf',r.lf,{num:true})}</td>
+          <td style="padding:3px 6px">${_ediCellInput('tr',key,ri,'weight',r.weight,{num:true})}</td>
+          <td style="padding:3px 6px;white-space:nowrap">${expDispTR}</td></tr>`).join('');
       const totLf = ld.rows.reduce((s, r) => s + r.lf, 0).toLocaleString();
       const totWt = ld.rows.reduce((s, r) => s + r.weight, 0).toLocaleString();
       return `<div style="border-bottom:1px solid var(--border)">
