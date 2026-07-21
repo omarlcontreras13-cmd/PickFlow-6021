@@ -5904,11 +5904,21 @@ async function processUPMPDF(file){
   showAlert('✓ UPM ' + file.name + (src==='ocr'?' (OCR)':'') + ' — ' + load.rows.length + ' rolls · ' + skuN + ' SKU(s) · ' + uStr + (load.reconciled ? '' : ' · ⚠ verify roll weights vs BOL'), load.reconciled ? 'success' : 'warning');
 }
 function _upmNum(s){ return parseFloat(String(s==null?'':s).replace(/,/g,'')) || 0; }
+// Reel width from the 'Basis weight / Reel width / Diameter / Core' table. Reel
+// width is the first mm/in dimension on the value row; mm converts to inches,
+// inches are left as-is. Returns '' when no dimension is present.
+function _upmWidthIn(s){
+  const mmm = String(s).match(/(\d[\d.]*)\s*mm\b/i);
+  if (mmm) return +(_upmNum(mmm[1]) * UPM_MM2IN).toFixed(2);
+  const inn = String(s).match(/(\d[\d.]*)\s*in\b/i);
+  if (inn) return +_upmNum(inn[1]).toFixed(2);
+  return '';
+}
 function _upmParse(lines, fileName){
   const hdr = { receiver:'', poNum:'', truck:'' };
   const cur = { sku:'', prod1:'', prod2:'', linePo:'', order:'', widthIn:'' };
   const rows = [];
-  let pend = false;
+  let pend = false, pendWidth = 0;
   const blob = (lines||[]).join(' ');
   // Unit system: metric (kg + Metres) converts; imperial (lbs + Web Length/ft) is left as-is.
   const metricScore   = (/\bG\/M2\b/i.test(blob)?1:0) + (/Metres|Meters/i.test(blob)?1:0) + (/\d\s*mm\b/i.test(blob)?1:0) + (/\bkg\b/i.test(blob)?1:0);
@@ -5933,10 +5943,20 @@ function _upmParse(lines, fileName){
       cur.prod1 = mk;
     }
     m = ln.match(/\b(US-\d{4,}-\d+)\b/i); if (m) cur.sku = m[1].toUpperCase();
-    if (/(G\/M2|lb\.|\blbs?\b)/i.test(ln) && /\d\s*(mm|in)\b/i.test(ln)){
-      const mmm = ln.match(/(\d[\d.]*)\s*mm/i), inn = ln.match(/(\d[\d.]*)\s*in\b/i);
-      if (mmm) cur.widthIn = +(_upmNum(mmm[1]) * UPM_MM2IN).toFixed(2);
-      else if (inn) cur.widthIn = +_upmNum(inn[1]).toFixed(2);
+    // Reel width — captured per SKU, before that SKU's package rows.
+    // (a) inline 'Reel width 79 in' / 'Reel width 2019 mm'
+    m = ln.match(/Reel\s*width[^0-9]{0,6}(\d[\d.]*)\s*(mm|in)\b/i);
+    if (m){ cur.widthIn = /mm/i.test(m[2]) ? +(_upmNum(m[1])*UPM_MM2IN).toFixed(2) : +_upmNum(m[1]).toFixed(2); }
+    // (b) the dimension header — value row lands on one of the next lines
+    //     (pdf.js/OCR can split it off the basis-weight cell), so look ahead.
+    if (/Basis\s*weight/i.test(ln) && /Reel\s*width/i.test(ln)){ pendWidth = 2; return; }
+    if (pendWidth > 0){
+      pendWidth--;
+      if (!isPkgRow(ln)){ const w = _upmWidthIn(ln); if (w !== ''){ cur.widthIn = w; pendWidth = 0; } }
+    }
+    // (c) same-line fallback: a basis-weight value row that also carries dimensions
+    if (/G\/M2|\blbs?\b|lb\.?/i.test(ln) && /\d\s*(mm|in)\b/i.test(ln)){
+      const w = _upmWidthIn(ln); if (w !== '') cur.widthIn = w;
     }
     if (isPkgRow(ln)){
       const lot = (ln.match(/^(UP[A-Z0-9]{5,})/i)||[])[1] || '';
