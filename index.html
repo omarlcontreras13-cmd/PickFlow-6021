@@ -5885,14 +5885,15 @@ async function _upmRoute(files){
 async function processUPMPDF(file){
   showAlert('Reading UPM PDF…', 'info');
   let lines = await trExtractPdfLines(await file.arrayBuffer());
-  let src = 'text';
+  let src = 'text', ocrReels = null;
   const hasPkg = (lines||[]).some(l => /^UP[A-Z0-9]{5,}\s+\d/i.test(l));
   if (!hasPkg){
     showAlert('UPM PDF has no text layer — running OCR (first run downloads the engine, give it a moment)…', 'info');
-    lines = await _upmOcrPdf(await file.arrayBuffer());
+    const ocr = await _upmOcrPdf(await file.arrayBuffer());
+    lines = ocr.lines; ocrReels = ocr.reels;
     src = 'ocr';
   }
-  const load = _upmParse(lines, file.name);
+  const load = _upmParse(lines, file.name, ocrReels);
   load.source = src;
   if (!load.rows.length){ showAlert('UPM: no packages found in ' + file.name + (src==='ocr'?' (OCR could not read the table — check scan quality).':' (is this a UPM Delivery Note?)'), 'warning'); return; }
   window._upmLoads = window._upmLoads || [];
@@ -5914,7 +5915,8 @@ function _upmWidthIn(s){
   if (inn) return +_upmNum(inn[1]).toFixed(2);
   return '';
 }
-function _upmParse(lines, fileName){
+function _upmParse(lines, fileName, ocrReels){
+  const isOcr = !!(ocrReels && ocrReels.length);
   const hdr = { receiver:'', poNum:'', truck:'' };
   const cur = { sku:'', prod1:'', prod2:'', linePo:'', order:'', widthIn:'' };
   const rows = [];
@@ -5931,7 +5933,7 @@ function _upmParse(lines, fileName){
     m = ln.match(/Loading ID\s+([A-Za-z0-9_]+)/i); if (m && !hdr.receiver) hdr.receiver = m[1];
     m = ln.match(/Ref\.?\s*number\s+(\d{4,})/i);    if (m && !hdr.poNum)    hdr.poNum    = m[1];
     m = ln.match(/Vehicle ID\s+([A-Za-z0-9]+)/i);   if (m && !hdr.truck)    hdr.truck    = m[1];
-    m = ln.match(/Customer PO\s+(.+?)(?:\s+Delivery reference|$)/i); if (m) cur.linePo = m[1].trim();
+    m = ln.match(/Customer PO\s+(.+?)(?:\s+Delivery reference|\s+reference|$)/i); if (m) cur.linePo = m[1].trim();
     if (/Order number\s+Quality\s+Shipping marks/i.test(ln)){ pend = true; return; }
     if (pend && !isPkgRow(ln)){
       pend = false;
@@ -5942,23 +5944,23 @@ function _upmParse(lines, fileName){
       if (!/^[A-Za-z]\d+/.test(mk)) mk = cur.linePo ? cur.linePo.split('/')[0].trim() : mk;
       cur.prod1 = mk;
     }
+    // OCR fallback: the 3-column header ('Order number Quality Shipping marks')
+    // frequently splits across lines on a scan, so capture the order token directly.
+    if (isOcr && !cur.order){ m = ln.match(/\b(\d{6,}_\d+)\b/); if (m){ cur.order = m[1]; cur.prod2 = ('ATL UPM ' + cur.order).trim(); } }
     m = ln.match(/\b(US-\d{4,}-\d+)\b/i); if (m) cur.sku = m[1].toUpperCase();
     // Reel width — captured per SKU, before that SKU's package rows.
-    // (a) inline 'Reel width 79 in' / 'Reel width 2019 mm'
     m = ln.match(/Reel\s*width[^0-9]{0,6}(\d[\d.]*)\s*(mm|in)\b/i);
     if (m){ cur.widthIn = /mm/i.test(m[2]) ? +(_upmNum(m[1])*UPM_MM2IN).toFixed(2) : +_upmNum(m[1]).toFixed(2); }
-    // (b) the dimension header — value row lands on one of the next lines
-    //     (pdf.js/OCR can split it off the basis-weight cell), so look ahead.
     if (/Basis\s*weight/i.test(ln) && /Reel\s*width/i.test(ln)){ pendWidth = 2; return; }
     if (pendWidth > 0){
       pendWidth--;
       if (!isPkgRow(ln)){ const w = _upmWidthIn(ln); if (w !== ''){ cur.widthIn = w; pendWidth = 0; } }
     }
-    // (c) same-line fallback: a basis-weight value row that also carries dimensions
     if (/G\/M2|\blbs?\b|lb\.?/i.test(ln) && /\d\s*(mm|in)\b/i.test(ln)){
       const w = _upmWidthIn(ln); if (w !== '') cur.widthIn = w;
     }
-    if (isPkgRow(ln)){
+    // Text-layer path: package rows are single clean lines (lot + numbers).
+    if (!isOcr && isPkgRow(ln)){
       const lot = (ln.match(/^(UP[A-Z0-9]{5,})/i)||[])[1] || '';
       const rest = ln.replace(/^UP[A-Z0-9]{5,}\s*/i,'');
       const nums = (rest.match(/\d[\d,]*(?:\.\d+)?/g)||[]).map(_upmNum).filter(n=>n>0 || n===0);
@@ -5975,6 +5977,19 @@ function _upmParse(lines, fileName){
     }
   });
   if (!hdr.poNum && hdr.receiver) hdr.poNum = hdr.receiver.replace(/[_-].*$/,'');
+  // OCR path: rows come from the coordinate-based reel reconstruction (line-based
+  // package parsing is unreliable on scans). Header/SKU context applies to each reel.
+  if (isOcr){
+    if (!cur.prod1 && cur.linePo) cur.prod1 = cur.linePo.split('/')[0].trim();
+    if (cur.order && !cur.prod2) cur.prod2 = ('ATL UPM ' + cur.order).trim();
+    rows.length = 0;
+    ocrReels.forEach(function(r){
+      rows.push({ lot:r.lot, sku:cur.sku, prod1:cur.prod1, prod2:cur.prod2, po:cur.linePo,
+                  rawWeight:(r.gross===''||r.gross==null?0:r.gross),
+                  rawLength:(r.length===''||r.length==null?0:r.length),
+                  width:(cur.widthIn||''), pcs:1 });
+    });
+  }
   const sumGross = rows.reduce((s,r)=>s+(r.rawWeight||0),0);
   const complete = rows.length>0 && rows.every(r=>r.rawWeight>0 && r.lot);
   return { fileName:fileName, header:hdr, rows:rows, weightIsKg:weightIsKg, lengthIsMeters:lengthIsMeters, sumGross:sumGross, reconciled:complete };
@@ -5989,38 +6004,144 @@ async function _upmOcrPdf(buf){
   const rec = async cv => { try { return (await worker.recognize(cv, {}, { text:true, tsv:true, blocks:true })).data; } catch(e){ return null; } };
   const p1 = await pdf.getPage(1); let bestRot = 0, bestHits = -1;
   for (const rot of [0,90,270,180]){ const d = await rec(await canvasAt(p1, rot, 1.3)); const t = (d && d.text) || ''; const h = KW.filter(k => t.indexOf(k) >= 0).length; if (h > bestHits){ bestHits = h; bestRot = rot; } if (h >= 4) break; }
-  let out = [];
+  // Two binarization thresholds per page; the package table is reconstructed from
+  // OCR word coordinates and the passes are merged (fills faint/dropped cells).
+  const THRS = [175, 205];
+  let lines = [], reels = [];
   for (let i = 1; i <= N; i++){
     const page = await pdf.getPage(i);
-    const cv = await canvasAt(page, bestRot, 3);
-    if (_catCanvasBlank(cv)) continue;
+    const base = await canvasAt(page, bestRot, 3);
+    if (_catCanvasBlank(base)) continue;
     showAlert('UPM OCR — page ' + i + ' of ' + N + '…', 'info');
-    out = out.concat(_upmRowsFromOcr(await rec(cv)));
+    const passReels = [];
+    for (let ti = 0; ti < THRS.length; ti++){
+      const d = await rec(_upmBinarizeCanvas(base, THRS[ti]));
+      const words = _upmWordsFromOcr(d);
+      if (ti === 0) lines = lines.concat(_upmLinesFromWords(words));   // header fields from the first pass
+      passReels.push(_upmReelsFromWords(words, base.width));
+    }
+    reels = reels.concat(_upmMergeReels(passReels));
   }
-  return out;
+  return { lines:lines, reels:_upmDedupeReels(reels) };
 }
-function _upmRowsFromOcr(d){
-  if (!d) return [];
+// Threshold a rendered page canvas to pure black/white (recovers faint scans).
+function _upmBinarizeCanvas(src, thr){
+  const cv = document.createElement('canvas'); cv.width = src.width; cv.height = src.height;
+  const ctx = cv.getContext('2d'); ctx.drawImage(src, 0, 0);
+  const img = ctx.getImageData(0, 0, cv.width, cv.height); const d = img.data;
+  for (let i = 0; i < d.length; i += 4){
+    const l = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    const v = l > thr ? 255 : 0; d[i] = d[i+1] = d[i+2] = v;
+  }
+  ctx.putImageData(img, 0, 0); return cv;
+}
+// Words (x, y-centre, string) from a Tesseract result (TSV level-5, else blocks).
+function _upmWordsFromOcr(d){
   let words = [];
-  if (d.tsv){
+  if (d && d.tsv){
     d.tsv.split('\n').forEach(function(ln){ const c = ln.split('\t'); if (c.length >= 12 && c[0] === '5'){ const conf = parseFloat(c[10]); const s = (c[11]||'').trim(); if (s && conf > 30) words.push({ x:+c[6], y:(+c[7])+(+c[9])/2, s:s }); } });
   }
-  if (!words.length && d.blocks){
+  if (!words.length && d && d.blocks){
     (d.blocks||[]).forEach(b => (b.paragraphs||[]).forEach(p => (p.lines||[]).forEach(l => (l.words||[]).forEach(w => { if (w && w.text && String(w.text).trim() && w.bbox){ words.push({ x:w.bbox.x0, y:(w.bbox.y0+w.bbox.y1)/2, s:String(w.text).trim() }); } }))));
   }
-  if (words.length){
-    const rows = [];
-    words.forEach(function(w){ let r = rows.find(r => Math.abs(r.y - w.y) <= 12); if (!r){ r = { y:w.y, items:[] }; rows.push(r); } r.items.push(w); });
-    rows.sort((a,b) => a.y - b.y);
-    return rows.map(r => r.items.sort((a,b) => a.x - b.x).map(o => o.s).join(' ').replace(/\s+/g,' ').trim()).filter(Boolean);
-  }
-  return String(d.text||'').split('\n').map(l => l.trim()).filter(Boolean);
+  return words;
+}
+// Cluster words into text lines (y within ±12px), left-to-right — used for header fields.
+function _upmLinesFromWords(words){
+  if (!words || !words.length) return [];
+  const rows = [];
+  words.forEach(function(w){ let r = rows.find(r => Math.abs(r.y - w.y) <= 12); if (!r){ r = { y:w.y, items:[] }; rows.push(r); } r.items.push(w); });
+  rows.sort((a,b) => a.y - b.y);
+  return rows.map(r => r.items.sort((a,b) => a.x - b.x).map(o => o.s).join(' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+}
+function _upmRowsFromOcr(d){
+  const w = _upmWordsFromOcr(d);
+  return w.length ? _upmLinesFromWords(w) : String((d&&d.text)||'').split('\n').map(l => l.trim()).filter(Boolean);
+}
+// Reconstruct one package number from the (possibly split / doubled) fragments in one reel band.
+function _upmBuildLot(frags){
+  const subs = [];
+  frags.slice().sort((a,b)=>a.y-b.y).forEach(function(f){ let r = subs.find(r => Math.abs(r.y - f.y) <= 18); if (!r){ r = { y:f.y, it:[] }; subs.push(r); } r.it.push(f); });
+  const cands = [];
+  subs.forEach(function(r){ const j = r.it.slice().sort((a,b)=>a.x-b.x).map(o=>o.s).join('').toUpperCase().replace(/[^0-9A-Z]/g,''); const m = j.match(/UP[0-9A-Z]{6,}/); if (m) cands.push(m[0]); });
+  if (!cands.length) return '';
+  const cnt = {}; cands.forEach(c => cnt[c] = (cnt[c]||0)+1);
+  return Object.keys(cnt).sort(function(a,b){ return (cnt[b]-cnt[a]) || (b.length-a.length); })[0];
+}
+// Build reel rows {lot, gross, length} from OCR word positions of ONE page. Robust to
+// the doubled Package/NARI line, wrapped numeric columns, and split lot tokens. Numbers
+// are classified by magnitude (not column position) so a missing cell can't shift others.
+function _upmReelsFromWords(words, pageW){
+  if (!words || !words.length) return [];
+  const hdr = words.filter(w => /^package/i.test(w.s)).map(w => w.y);
+  const headerY = hdr.length ? Math.min.apply(null, hdr) : 0;
+  let below = words.filter(w => w.y > headerY + 25);
+  const bigs = below.filter(w => (_upmNum(w.s)||0) >= 1000000).map(w => w.y);   // grand-total row
+  const totalsY = bigs.length ? Math.min.apply(null, bigs) : Infinity;
+  below = below.filter(w => w.y < totalsY - 20);
+  const leftCut = pageW * 0.42;
+  const isFrag = s => /^UP[0-9A-Z]/i.test(s) || /^[0-9]{3,}$/.test(s);
+  const lotw = below.filter(w => w.x < leftCut && isFrag(w.s));
+  const ys = Array.from(new Set(lotw.map(w => w.y))).sort((a,b)=>a-b);
+  const bands = [];
+  ys.forEach(function(y){ const last = bands[bands.length-1]; if (last && y - last.c <= 50){ last.ys.push(y); last.c = last.ys.reduce((s,v)=>s+v,0)/last.ys.length; } else bands.push({ ys:[y], c:y }); });
+  const reels = [];
+  bands.forEach(function(b){
+    const lo = Math.min.apply(null, b.ys) - 32, hi = Math.max.apply(null, b.ys) + 32;
+    const lot = _upmBuildLot(lotw.filter(w => w.y >= lo && w.y <= hi));
+    if (!lot) return;
+    const nums = below.filter(w => w.x >= leftCut && w.y >= lo && w.y <= hi && /^[0-9,]{1,7}$/.test(w.s))
+                      .sort((a,b)=>a.x-b.x).map(w => _upmNum(w.s)).filter(v => v > 0 || v === 0);
+    const wts = nums.filter(v => v >= 1000 && v <= 9999).slice(0, 2);       // net, gross
+    const gross = wts.length > 1 ? wts[1] : (wts.length ? wts[0] : '');
+    const rest = nums.filter(v => !(v >= 1000 && v <= 9999));
+    const big = rest.slice().sort((a,b)=>b-a);                              // area largest
+    const length = big.length >= 2 ? big[1] : '';                          // web length = 2nd largest
+    reels.push({ lot:lot, gross:gross, length:length });
+  });
+  return reels;
+}
+// Merge reel rows across OCR passes (thresholds): keep first per lot, fill blanks from later passes.
+function _upmDedupeReels(reels){
+  const order = [], by = {};
+  (reels||[]).forEach(function(r){
+    if (!r || !r.lot) return;
+    const digits = String(r.lot).replace(/[^0-9]/g,'');
+    const key = digits.length >= 6 ? digits : ('x' + order.length);
+    if (!(key in by)){ by[key] = Object.assign({}, r); order.push(key); }
+    else {
+      // same reel misread twice (e.g. a stray letter) — keep the clean 'UP<digits>' lot, fill blank cells
+      if (/^UP\d/.test(r.lot) && !/^UP\d/.test(by[key].lot)) by[key].lot = r.lot;
+      ['gross','length'].forEach(function(f){ if ((by[key][f]===''||by[key][f]==null) && r[f]!=='' && r[f]!=null) by[key][f] = r[f]; });
+    }
+  });
+  return order.map(k => by[k]);
+}
+function _upmMergeReels(passes){
+  const order = [], by = {};
+  (passes||[]).forEach(function(pr){ (pr||[]).forEach(function(r){
+    if (!r || !r.lot) return;
+    if (!by[r.lot]){ by[r.lot] = Object.assign({}, r); order.push(r.lot); }
+    else { ['gross','length'].forEach(function(f){ if ((by[r.lot][f]===''||by[r.lot][f]==null) && r[f]!=='' && r[f]!=null) by[r.lot][f] = r[f]; }); }
+  }); });
+  return order.map(k => by[k]);
 }
 function _upmHdrInput(i, key, label, val){
   return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:8px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
     +'<input id="upm-'+key+'-'+i+'" type="text" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:112px"></div>';
 }
 function deleteUPMLoad(idx){ (window._upmLoads||[]).splice(idx,1); _ediSave(); showEDIImportFile(); }
+function deleteUPMRow(idx, ri){
+  const load=(window._upmLoads||[])[idx]; if(!load||!load.rows||!load.rows[ri]) return;
+  const r=load.rows[ri];
+  if(!confirm('Delete roll '+((r&&r.lot)||('#'+(ri+1)))+' from this UPM load?')) return;
+  load.rows.splice(ri,1);
+  if(!load.rows.length){ (window._upmLoads||[]).splice(idx,1); _ediSave(); showEDIImportFile(); return; }
+  load.reconciled = load.rows.every(function(x){return x.rawWeight>0 && x.lot;});
+  load.sumGross = load.rows.reduce(function(s,x){return s+(x.rawWeight||0);},0);
+  _ediSave(); showEDIImportFile();
+  if (typeof _ediReopenDetail==='function') _ediReopenDetail('upm-detail-'+idx);
+}
 function clearUPMLoads(){ const L=window._upmLoads||[]; if(!L.length) return; if(!confirm('Remove all '+L.length+' UPM load(s)?')) return; window._upmLoads=[]; _ediSave(); showEDIImportFile(); }
 function setUPMUnit(idx, which, checked){ const l=(window._upmLoads||[])[idx]; if(!l) return; if(which==='kg') l.weightIsKg=!!checked; else if(which==='m') l.lengthIsMeters=!!checked; _ediSave(); showEDIImportFile(); }
 function renderUPMSection(){
@@ -6056,7 +6177,8 @@ function renderUPMSection(){
           +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'po',r.po,{width:'120px'})+'</td>'
           +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'ovrLF',lf,{num:true})+'</td>'
           +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'ovrWt',wt,{num:true})+'</td>'
-          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'width',r.width,{num:true,width:'70px'})+'</td></tr>';
+          +'<td style="padding:3px 6px">'+_ediCellInput('upm',idx,ri,'width',r.width,{num:true,width:'70px'})+'</td>'
+          +'<td style="padding:3px 6px;text-align:center"><button onclick="deleteUPMRow('+idx+','+ri+')" title="Delete this roll" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;line-height:1;padding:0 2px">\u2715</button></td></tr>';
       }).join('');
       const totLf = load.rows.reduce(function(s,r){return s+_upmLFRow(r,load.lengthIsMeters);},0).toLocaleString();
       const totWt = load.rows.reduce(function(s,r){return s+_upmWeightRow(r,load.weightIsKg);},0).toLocaleString();
@@ -6079,10 +6201,10 @@ function renderUPMSection(){
             +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">LOT #</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">SKU</th>'
             +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">PROD ID 1</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">PROD ID 2</th>'
             +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">PO#</th><th style="padding:5px 8px;text-align:right;color:var(--text2)">LF</th>'
-            +'<th style="padding:5px 8px;text-align:right;color:var(--text2)">WEIGHT (LB)</th><th style="padding:5px 8px;text-align:right;color:var(--text2)">WIDTH (IN)</th>'
+            +'<th style="padding:5px 8px;text-align:right;color:var(--text2)">WEIGHT (LB)</th><th style="padding:5px 8px;text-align:right;color:var(--text2)">WIDTH (IN)</th><th style="padding:5px 8px;width:24px"></th>'
           +'</tr></thead><tbody>'+drows
           +'<tr style="background:rgba(46,125,50,0.08);font-weight:bold"><td colspan="5" style="padding:5px 8px;color:'+G+'">TOTAL — '+load.rows.length+' rolls'+(load.weightIsKg||load.lengthIsMeters?' ('+(load.weightIsKg?'KG→LBS':'LBS')+' · '+(load.lengthIsMeters?'m→LF':'LF')+')':'')+'</td>'
-          +'<td style="padding:5px 8px;text-align:right;color:'+G+'">'+totLf+'</td><td style="padding:5px 8px;text-align:right;color:'+G+'">'+totWt+'</td><td></td></tr></tbody></table>'
+          +'<td style="padding:5px 8px;text-align:right;color:'+G+'">'+totLf+'</td><td style="padding:5px 8px;text-align:right;color:'+G+'">'+totWt+'</td><td></td><td></td></tr></tbody></table>'
         +'</div></div>';
     }).join('');
     body = '<div style="font-size:10px;color:var(--text2)">'+loads.length+' load(s) &nbsp;·&nbsp; '+totalRolls.toLocaleString()+' rolls total'
