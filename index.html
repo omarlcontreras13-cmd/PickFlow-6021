@@ -183,7 +183,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
       <span id="data-status"><span class="status-dot" style="background:var(--danger)"></span>NO DATA</span>
       <span id="sync-status" class="sync-indicator sync-pending">⟳ CONNECTING...</span>
       <span id="current-time"></span>
-      <span id="app-version" title="App version — confirm everyone is on the same build" style="font-size:10px;color:var(--accent2);letter-spacing:1px;border:1px solid var(--accent2);padding:1px 6px;border-radius:3px;font-weight:bold">v36</span>
+      <span id="app-version" title="App version — confirm everyone is on the same build" style="font-size:10px;color:var(--accent2);letter-spacing:1px;border:1px solid var(--accent2);padding:1px 6px;border-radius:3px;font-weight:bold">v38</span>
       <button onclick="showDashboard()" title="Home" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);cursor:pointer;font-size:14px;line-height:1">🏠</button>
       <button onclick="location.reload(true)" style="padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer;font-family:var(--font);font-size:10px;letter-spacing:1px">↻ REFRESH</button>
     </div>
@@ -462,7 +462,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 36;
+const APP_BUILD = 38;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -502,6 +502,7 @@ function listenToFirebase() {
     });
     state.tickets = state.tickets.filter(t=>remoteIds.has(t.id));
     state.tickets.sort((a,b)=>a.created-b.created);
+    _ticketsLastWritten = {}; state.tickets.forEach(function(t){ _ticketsLastWritten[t.id]=JSON.stringify(t); });
     updateTicketList();
     // Only re-render ticket screens — never jump away from other views
     if (state.activeTicket) {
@@ -657,12 +658,17 @@ function listenToFirebase() {
   });
 }
 
+var _ticketsLastWritten = {};
 function saveTickets() {
   if (!db) return;
   setSyncStatus('pending');
-  const data = {};
-  state.tickets.forEach(t=>{ data[t.id]=t; });
-  db.ref('6021/tickets').set(data).then(()=>setSyncStatus('ok')).catch(()=>setSyncStatus('err'));
+  // Write ONLY tickets that changed since our last write (never the whole collection),
+  // so one user's save can't overwrite another user's ticket (e.g. printed -> created).
+  const upd = {}, localIds = {};
+  state.tickets.forEach(function(t){ localIds[t.id]=1; const s=JSON.stringify(t); if (s!==_ticketsLastWritten[t.id]){ upd[t.id]=t; _ticketsLastWritten[t.id]=s; } });
+  Object.keys(_ticketsLastWritten).forEach(function(id){ if(!localIds[id]){ upd[id]=null; delete _ticketsLastWritten[id]; } });
+  if (!Object.keys(upd).length){ setSyncStatus('ok'); return; }
+  db.ref('6021/tickets').update(upd).then(()=>setSyncStatus('ok')).catch(()=>setSyncStatus('err'));
 }
 
 function saveArchive() {
@@ -6310,7 +6316,7 @@ function renderUPMSection(){
     }).join('');
     body = '<div style="font-size:10px;color:var(--text2)">'+loads.length+' load(s) &nbsp;·&nbsp; '+totalRolls.toLocaleString()+' rolls total'
       +'<button onclick="clearUPMLoads()" title="Clear all UPM loads" style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;padding:0">✕ Clear All</button></div>'
-      +'<div style="max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">'+items+'</div>';
+      +'<div style="overflow-x:hidden;border:1px solid var(--border);border-radius:8px">'+items+'</div>';
   }
   return '<div style="'+sectionStyle+';order:7">'
     +'<div><div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:'+G+'">🌿 UPM LOADS</div>'
@@ -6615,7 +6621,7 @@ function renderDomtarSection(){
     }).join('');
     body = '<div style="font-size:10px;color:var(--text2)">'+loads.length+' load(s) &nbsp;·&nbsp; '+totalRolls.toLocaleString()+' rolls total'
       +'<button onclick="clearDomtarLoads()" title="Clear all Domtar loads" style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;padding:0">✕ Clear All</button></div>'
-      +'<div style="max-height:460px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">'+items+'</div>';
+      +'<div style="overflow-x:hidden;border:1px solid var(--border);border-radius:8px">'+items+'</div>';
   }
   const dl = '<datalist id="domtar-skulist">'+_domtarSkuRecords().map(function(r){ return '<option value="'+String(r.sku).replace(/"/g,'&quot;')+'">'; }).join('')+'</datalist>';
   return '<div style="'+sectionStyle+';order:8">'
