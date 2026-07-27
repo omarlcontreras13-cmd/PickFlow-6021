@@ -183,6 +183,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
       <span id="data-status"><span class="status-dot" style="background:var(--danger)"></span>NO DATA</span>
       <span id="sync-status" class="sync-indicator sync-pending">⟳ CONNECTING...</span>
       <span id="current-time"></span>
+      <span id="app-version" title="App version — confirm everyone is on the same build" style="font-size:10px;color:var(--accent2);letter-spacing:1px;border:1px solid var(--accent2);padding:1px 6px;border-radius:3px;font-weight:bold">v36</span>
       <button onclick="showDashboard()" title="Home" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);cursor:pointer;font-size:14px;line-height:1">🏠</button>
       <button onclick="location.reload(true)" style="padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer;font-family:var(--font);font-size:10px;letter-spacing:1px">↻ REFRESH</button>
     </div>
@@ -253,6 +254,7 @@ const BU_MAP = {
   'ATL': 'ATL UPM',
   'MAX': 'MAXXON',
   'PA0': 'NEXUS CIRCULAR',   // Nexus PO prefix -> BU
+  'DTA': 'DOMTAR',          // Domtar pulp roll id prefix -> BU
 };
 
 const BU_SEQ_DEFAULT = {
@@ -419,6 +421,7 @@ let state = {
   buZmoMap: {},
   ipgWidthTable: {},
   hbhWidthTable: {},
+  domtarSku: {},
   importMode: 'inventory',
   lastImport: null
 };
@@ -456,10 +459,37 @@ function setSyncStatus(s) {
   else { el.className='sync-indicator sync-pending'; el.textContent='⟳ SYNCING...'; }
 }
 
+// ─── AUTO-UPDATE ───────────────────────────────────────────
+// Publishes this build to Firebase; when a newer build is published elsewhere, open
+// clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
+const APP_BUILD = 36;
+const VERSION_PATH = '6021/appVersion';
+function _versionDoReload(remote){
+  const a=document.activeElement;
+  if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)){ setTimeout(function(){ _versionDoReload(remote); }, 4000); return; }  // don't interrupt data entry
+  try{ location.reload(true); }catch(e){ location.reload(); }
+}
+function _versionGuard(){
+  try{ const el=document.getElementById('app-version'); if(el) el.textContent='v'+APP_BUILD; }catch(e){}
+  if(!db) return;
+  db.ref(VERSION_PATH).on('value', function(snap){
+    const remote = parseInt(snap.val(),10) || 0;
+    if(remote > APP_BUILD){
+      let tried=0; try{ tried=parseInt(sessionStorage.getItem('pf_reload_build'),10)||0; }catch(e){}
+      if(tried>=remote) return;                        // already reloaded for this build — avoid a loop if the served file is still old
+      try{ sessionStorage.setItem('pf_reload_build', String(remote)); }catch(e){}
+      try{ showAlert('🔄 New version v'+remote+' available — updating…','info'); }catch(e){}
+      setTimeout(function(){ _versionDoReload(remote); }, 1500);
+    } else if(remote < APP_BUILD){
+      db.ref(VERSION_PATH).set(APP_BUILD).catch(function(){});
+    }
+  }, function(){});
+}
 function listenToFirebase() {
   if (!initFirebase()) { setTimeout(listenToFirebase,2000); return; }
   setSyncStatus('connecting');
   _ediListen();   // shared EDI loads
+  _versionGuard();
 
   // Tickets
   db.ref('6021/tickets').on('value', snap => {
@@ -564,6 +594,10 @@ function listenToFirebase() {
     const data = snap.val();
     state.hbhWidthTable = data || {};
     updateHBHWidthCount(); // refresh count if the EDI section is open
+  });
+  db.ref('6021/domtarSku').on('value', snap => {
+    state.domtarSku = snap.val() || {};
+    if (state.currentView === 'edi' && typeof showEDIImportFile==='function' && !_ediInputFocused()) showEDIImportFile();
   });
 
   // cycleCount6021 connection loaded on demand
@@ -1340,7 +1374,8 @@ function ticketStamp(t, stage){
 }
 function ticketStageInfo(t){
   const s = (((t&&t.status)||'')+'').toLowerCase();
-  if (s==='printed'||s==='staged'||s==='completed') return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
+  const printed = (s==='printed'||s==='staged'||s==='completed') || !!(t&&t.stamps&&t.stamps.printed&&t.stamps.printed.by);
+  if (printed) return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
   return {label:'CREATED', bg:'#facc15', border:'#eab308', icon:'✎'};
 }
 function ticketStageBadge(t, small){
@@ -1349,10 +1384,11 @@ function ticketStageBadge(t, small){
   return '<span style="display:inline-block;background:'+info.bg+';border:1px solid '+info.border+';color:#000;border-radius:10px;padding:'+pad+';font-size:'+fs+';font-weight:bold;letter-spacing:.5px;white-space:nowrap">'+info.icon+' '+info.label+'</span>';
 }
 function ticketStampLine(t){
-  const s = (((t&&t.status)||'')+'').toLowerCase();
-  const stage = (s==='printed'||s==='staged'||s==='completed') ? 'printed' : 'created';
-  const st = ticketStamp(t, stage); if (!st || !st.by) return '';
-  return 'by '+st.by+(st.at?' · '+_stampWhen(st.at):'');
+  const c=ticketStamp(t,'created'), p=ticketStamp(t,'printed');
+  const parts=[];
+  if(c && c.by) parts.push('Created · '+c.by+(c.at?' · '+_stampWhen(c.at):''));
+  if(p && p.by) parts.push('<span style="color:var(--accent2);font-weight:600">Printed · '+p.by+(p.at?' · '+_stampWhen(p.at):'')+'</span>');
+  return parts.length ? parts.join('<br>') : '';
 }
 function ticketStageHistory(t){
   const order = [['created','Created'],['printed','Printed']];
@@ -3710,6 +3746,7 @@ function showEDIImportFile() {
   // ── TWIN RIVERS section ──────────────────────────────────────────────────────
   h += renderTRSection();
   h += renderUPMSection();
+  h += renderDomtarSection();
 
   if (_ediHBHLoads.length) {
     const totalHBHRolls = _ediHBHLoads.reduce((s,l)=>s+l.rows.length,0);
@@ -3857,6 +3894,21 @@ const IPG_WIDTH_TABLE_DEFAULT = {
 // (from state/Firebase) layered on top. Imported entries are stored as a LIST of
 // {desc, sub, w} records in Firebase — NOT keyed by the width description, because
 // descriptions contain "/" (e.g. "8/16ths") which Firebase forbids in keys.
+// Normalize a width description for tolerant matching: drop all quote/inch marks
+// (straight, curly, and prime) plus whitespace, and lowercase. So "29'' 12/16ths",
+// '29 " 12/16ths', and '29" 12/16ths' all collapse to the same key.
+function _ipgNormWidth(s){
+  return String(s==null?'':s).toLowerCase().replace(/[\u2032\u2033\u2018\u2019\u201c\u201d'"\s]/g,'');
+}
+// Look up a width description: exact match first, then a normalized (quote/space
+// insensitive) match. Returns [subSku, numericWidth] or null if nothing matches.
+function _ipgWidthLookup(table, desc){
+  if (table[desc]) return table[desc];
+  const n=_ipgNormWidth(desc);
+  if(!n) return null;
+  for (const k in table){ if (_ipgNormWidth(k)===n) return table[k]; }
+  return null;
+}
 function getIpgWidthTable() {
   const merged = {};
   for (const k in IPG_WIDTH_TABLE_DEFAULT) merged[k] = IPG_WIDTH_TABLE_DEFAULT[k];
@@ -4010,6 +4062,7 @@ function processIPGFile(file) {
       const widthTable = getIpgWidthTable(); // defaults + any imported overrides
       const shipmentNo = (((document.getElementById('ipg-load-id')||{}).value)||'').trim();
       const rolls = [];
+      const unmatchedWidths = [];
       let meta = null;
       dataRows.forEach(r => {
         const somOrder  = String(r[cSomOrder]||'').trim();
@@ -4026,7 +4079,9 @@ function processIPGFile(file) {
         const carrierN  = String(r[cCarrierN]||'').trim();
         const delivDate = r[cDeliver]||'';
 
-        const widthLookup = widthTable[widthDesc] || [widthDesc, parseFloat(widthDesc)||0];
+        const wl          = _ipgWidthLookup(widthTable, widthDesc);
+        if (!wl && widthDesc && unmatchedWidths.indexOf(widthDesc) === -1) unmatchedWidths.push(widthDesc);
+        const widthLookup = wl || [widthDesc, parseFloat(widthDesc)||0];
         const subSku      = widthLookup[0];
         const widthNum    = widthLookup[1];
         const sku         = grade + subSku;
@@ -4058,6 +4113,7 @@ function processIPGFile(file) {
       renderIPGLoads();
       showAlert('✓ IPG file loaded — ' + rolls.length + ' roll(s) in 1 load'
         + (somOrders.length > 1 ? ' (' + somOrders.length + ' SOM Orders combined)' : ''), 'success');
+      if (unmatchedWidths.length) showAlert('⚠ ' + unmatchedWidths.length + ' width(s) not found in the table — SKU may be wrong: ' + unmatchedWidths.join(', ') + '. Update the Width → SKU table and re-import.', 'danger');
     } catch(err) {
       showAlert('Error reading IPG file: ' + err.message, 'danger');
       console.error(err);
@@ -4427,8 +4483,8 @@ function _catParsePdfRolls(lines){
     if(/SUBTOTAL|TOTAL\s+DELIVERY/i.test(l)) on=false;
     if(!on) continue;
     if(/^\s*Label\s*No/i.test(l)) continue;
-    let str=String(l), re=/\b([A-Z][A-Z0-9]{5,13})\s+(\d{3,5})\b/g, mm;
-    while((mm=re.exec(str))){ const w=parseInt(mm[2],10); if(w>=200&&w<=6000) rolls.push({lot:mm[1], weight:w}); }
+    let str=String(l), re=/\b([A-Z][A-Z0-9]{5,13})\s+(\d{1,3}(?:,\d{3})+|\d{3,5})\b/g, mm;
+    while((mm=re.exec(str))){ const w=parseInt(String(mm[2]).replace(/,/g,''),10); if(w>=200&&w<=6000) rolls.push({lot:mm[1], weight:w}); }
   }
   const sum=rolls.reduce((s,r)=>s+r.weight,0);
   const reconciled=(pCount>0 && rolls.length===pCount && Math.abs(sum-pTotal)<=Math.max(2,Math.round(pTotal*0.001)));
@@ -5836,6 +5892,7 @@ function _ediCellInput(genKey, a, b, field, value, opts){
 function _ediNum(v){ if(v===''||v==null) return ''; const n=parseFloat(String(v).replace(/,/g,'')); return isNaN(n)?'':n; }
 function _ediRerender(genKey){
   if (genKey==='upm')      showEDIImportFile();
+  else if (genKey==='domtar') showEDIImportFile();
   else if (genKey==='hbh') showEDIImportFile();
   else if (genKey==='ipg') { if (typeof renderIPGLoads==='function') renderIPGLoads(); }
   else if (genKey==='cat') { if (typeof renderCatalystLoads==='function') renderCatalystLoads(); }
@@ -5852,12 +5909,13 @@ function _ediReopenDetail(detailId){
 function _ediSetCell(genKey, a, b, field, value, commit){
   let row=null, load=null, detailId='';
   if (genKey==='upm'){ load=(window._upmLoads||[])[a]; if(load){ row=(load.rows||[])[b]; detailId='upm-detail-'+a; } }
+  else if (genKey==='domtar'){ load=(window._domtarLoads||[])[a]; if(load){ row=(load.rows||[])[b]; detailId='domtar-detail-'+a; } }
   else if (genKey==='hbh'){ load=(_ediHBHLoads||[])[a]; if(load){ row=(load.rows||[])[b]; detailId='hbh-detail-'+a; } }
   else if (genKey==='ipg'){ load=(_ipgLoads||[])[a]; if(load){ row=(load.rolls||[])[b]; detailId='ipg-detail-'+a; } }
   else if (genKey==='cat'){ load=(_catLoads||[])[a]; if(load){ row=(load.lines||[])[b]; detailId='cat-detail-'+a; } }
   else if (genKey==='tr'){ load=(window._ediTRLoads||{})[a]; if(load){ row=(load.rows||[])[b]; detailId='tr-detail-'+String(a).replace(/[^a-zA-Z0-9_-]/g,'_'); } }
   if (!row) return;
-  const numeric = { lf:1, weight:1, wt:1, width:1, widthNum:1, pcs:1, ovrLF:1, ovrWt:1, ovrWidth:1 };
+  const numeric = { lf:1, weight:1, wt:1, width:1, widthNum:1, pcs:1, ovrLF:1, ovrWt:1, ovrWidth:1, adwt:1, widthIn:1 };
   row[field] = numeric[field] ? _ediNum(value) : value;
   // keep the two IPG order fields in step (detail shows SOM ORDER, export uses custOrder)
   if (genKey==='ipg' && field==='custOrder') row.somOrder = value;
@@ -5918,7 +5976,7 @@ function _upmWidthIn(s){
 function _upmParse(lines, fileName, ocrReels){
   const isOcr = !!(ocrReels && ocrReels.length);
   const hdr = { receiver:'', poNum:'', truck:'' };
-  const cur = { sku:'', prod1:'', prod2:'', linePo:'', order:'', widthIn:'' };
+  const cur = { sku:'', prod1:'', prod2:'', linePo:'', order:'', widthIn:'', shipMark:'' };
   const rows = [];
   let pend = false, pendWidth = 0;
   const blob = (lines||[]).join(' ');
@@ -5932,7 +5990,13 @@ function _upmParse(lines, fileName, ocrReels){
     let m;
     m = ln.match(/Loading ID\s+([A-Za-z0-9_]+)/i); if (m && !hdr.receiver) hdr.receiver = m[1];
     m = ln.match(/Ref\.?\s*number\s+(\d{4,})/i);    if (m && !hdr.poNum)    hdr.poNum    = m[1];
-    m = ln.match(/Vehicle ID\s+([A-Za-z0-9]+)/i);   if (m && !hdr.truck)    hdr.truck    = m[1];
+    m = ln.match(/Vehicle\s*ID\s+([A-Za-z0-9]{4,})/i); if (m && !hdr.truck) hdr.truck = m[1];
+    // OCR often splits the Carrier | Vehicle-ID columns onto separate lines, so the
+    // plate lands beside "…LLC ID 907305" or on a line of its own — capture those too.
+    if (!hdr.truck){ m = ln.match(/(?:LLC|Carrier|Vehicle)[^0-9]*\bID\b[^0-9]{0,4}(\d{5,7})\b/i); if (m) hdr.truck = m[1]; }
+    if (!hdr.truck && /^\s*\d{6}\s*$/.test(ln) && !hdr.truckMaybe) hdr.truckMaybe = ln.trim();
+    // Shipping marks -> Prod ID 1 (e.g. "A018627"): a single letter followed by 6 digits.
+    if (!cur.shipMark && !/^UP/i.test(ln.trim())){ m = ln.match(/\b([A-Z]\d{6})\b/); if (m) cur.shipMark = m[1]; }
     m = ln.match(/Customer PO\s+(.+?)(?:\s+Delivery reference|\s+reference|$)/i); if (m) cur.linePo = m[1].trim();
     if (/Order number\s+Quality\s+Shipping marks/i.test(ln)){ pend = true; return; }
     if (pend && !isPkgRow(ln)){
@@ -5976,11 +6040,13 @@ function _upmParse(lines, fileName, ocrReels){
       return;
     }
   });
+  if (!hdr.truck && hdr.truckMaybe) hdr.truck = hdr.truckMaybe;
   if (!hdr.poNum && hdr.receiver) hdr.poNum = hdr.receiver.replace(/[_-].*$/,'');
   // OCR path: rows come from the coordinate-based reel reconstruction (line-based
   // package parsing is unreliable on scans). Header/SKU context applies to each reel.
   if (isOcr){
-    if (!cur.prod1 && cur.linePo) cur.prod1 = cur.linePo.split('/')[0].trim();
+    if (cur.shipMark) cur.prod1 = cur.shipMark;
+    else if (!cur.prod1 && cur.linePo) cur.prod1 = cur.linePo.split('/')[0].trim();
     if (cur.order && !cur.prod2) cur.prod2 = ('ATL UPM ' + cur.order).trim();
     rows.length = 0;
     ocrReels.forEach(function(r){
@@ -6102,33 +6168,68 @@ function _upmReelsFromWords(words, pageW){
   return reels;
 }
 // Merge reel rows across OCR passes (thresholds): keep first per lot, fill blanks from later passes.
+function _upmLotDist(a,b){
+  a=String(a).toUpperCase().replace(/[^0-9A-Z]/g,''); b=String(b).toUpperCase().replace(/[^0-9A-Z]/g,'');
+  if(a===b) return 0; const m=a.length,n=b.length; if(Math.abs(m-n)>1) return 9;
+  const dp=[]; for(let i=0;i<=m;i++){ dp.push([i]); for(let j=1;j<=n;j++) dp[i].push(i===0?j:0); }
+  for(let i=1;i<=m;i++) for(let j=1;j<=n;j++){ dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); }
+  return dp[m][n];
+}
 function _upmDedupeReels(reels){
   const order = [], by = {};
   (reels||[]).forEach(function(r){
     if (!r || !r.lot) return;
     const digits = String(r.lot).replace(/[^0-9]/g,'');
     const key = digits.length >= 6 ? digits : ('x' + order.length);
-    if (!(key in by)){ by[key] = Object.assign({}, r); order.push(key); }
+    if (!(key in by)){ by[key] = Object.assign({}, r); by[key]._n = r._n||1; order.push(key); }
     else {
       // same reel misread twice (e.g. a stray letter) — keep the clean 'UP<digits>' lot, fill blank cells
       if (/^UP\d/.test(r.lot) && !/^UP\d/.test(by[key].lot)) by[key].lot = r.lot;
       ['gross','length'].forEach(function(f){ if ((by[key][f]===''||by[key][f]==null) && r[f]!=='' && r[f]!=null) by[key][f] = r[f]; });
+      by[key]._n = (by[key]._n||1) + (r._n||1);
     }
   });
-  return order.map(k => by[k]);
+  const list = order.map(k => by[k]);
+  // Drop OCR-echo phantom reels: one character off a real reel AND either weightless
+  // (the doubled EUDR line) or carrying the identical weight (same physical row misread
+  // on the other threshold pass). Keep the reading with more OCR support (_n). Genuine
+  // sequential reels differ by a digit too, but each has its own weight + full support.
+  const valid = function(r){ return r.gross!=='' && r.gross!=null && (+r.gross)>0; };
+  const drop = {};
+  for(let i=0;i<list.length;i++){ for(let j=i+1;j<list.length;j++){
+    if(drop[i]||drop[j]) continue;
+    if(_upmLotDist(list[i].lot,list[j].lot)!==1) continue;
+    const vi=valid(list[i]), vj=valid(list[j]);
+    let loser=-1;
+    if(!vi && vj) loser=i;
+    else if(vi && !vj) loser=j;
+    else if(vi && vj && (+list[i].gross)===(+list[j].gross)){
+      const ni=list[i]._n||1, nj=list[j]._n||1;
+      loser = ni<nj ? i : (nj<ni ? j : j);
+    }
+    if(loser>=0) drop[loser]=1;
+  }}
+  return list.filter(function(_,i){ return !drop[i]; });
 }
 function _upmMergeReels(passes){
   const order = [], by = {};
   (passes||[]).forEach(function(pr){ (pr||[]).forEach(function(r){
     if (!r || !r.lot) return;
-    if (!by[r.lot]){ by[r.lot] = Object.assign({}, r); order.push(r.lot); }
-    else { ['gross','length'].forEach(function(f){ if ((by[r.lot][f]===''||by[r.lot][f]==null) && r[f]!=='' && r[f]!=null) by[r.lot][f] = r[f]; }); }
+    if (!by[r.lot]){ by[r.lot] = Object.assign({_n:0}, r); order.push(r.lot); }
+    by[r.lot]._n++;
+    ['gross','length'].forEach(function(f){ if ((by[r.lot][f]===''||by[r.lot][f]==null) && r[f]!=='' && r[f]!=null) by[r.lot][f] = r[f]; });
   }); });
   return order.map(k => by[k]);
 }
+function _upmHdrEdit(i, key, val){
+  const load=(window._upmLoads||[])[i]; if(!load) return; load.header=load.header||{};
+  const f = key==='po' ? 'poNum' : (key==='recv' ? 'receiver' : key);
+  load.header[f]=val;
+  try{ _ediSave(); }catch(e){}
+}
 function _upmHdrInput(i, key, label, val){
   return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:8px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
-    +'<input id="upm-'+key+'-'+i+'" type="text" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:112px"></div>';
+    +'<input id="upm-'+key+'-'+i+'" type="text" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_upmHdrEdit('+i+',&quot;'+key+'&quot;,this.value)" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:112px"></div>';
 }
 function deleteUPMLoad(idx){ (window._upmLoads||[]).splice(idx,1); _ediSave(); showEDIImportFile(); }
 function deleteUPMRow(idx, ri){
@@ -6219,6 +6320,355 @@ function renderUPMSection(){
       +'<div style="font-size:10px;color:var(--text2);margin-top:4px">.pdf · digital or scanned · auto KG→LBS &amp; m→LF for metric, as-is for imperial</div>'
       +'<input type="file" id="upm-file-input" accept=".pdf" multiple onchange="handleUPMUpload(event)" style="display:none"></div>'
     +body+'</div>';
+}
+// ═══ DOMTAR PULP ROLL PACKING SLIP → LOAD ═══════════════════════════════════
+// One packing slip = one load. Rolls ship as 2-roll PACKS (parent bold, child next);
+// packs are kept together (parent line immediately followed by its child) through the
+// grid and the export so labels print 2-per-pack under the right combo. Field map:
+//   Load Number ........... Receiver (header)
+//   Order-Item + Vehicle .. PO # (header)
+//   Bill Of Lading ........ Invoice # (header)
+//   Vehicle ID ............ Truck # (header)
+//   SKU (typed) ........... SKU        → Product ID auto-fills from the SKU master
+//   Roll ID (DTA…) ........ Lot #      (parent → child order)
+//   Order-Item ............ Prod ID 2
+//   Customer PO ........... PO # (line)
+//   ADWT lbs .............. Weight & Gross Weight
+//   Length ft ............. LF · Width in .. Width · Pcs = 1 · UOM = ROLL
+//   Exp Date .............. day-of (Short Date), like the other segments
+const DOMTAR_SKU_DEFAULT = { "WP3446": "ASH-A1-ADSWR7B-3IN-117-HVY2---60.90*152.00-R" };
+// SKU master: built-in defaults + any imported/manually-added rows (Firebase 6021/domtarSku).
+function getDomtarSkuTable(){
+  const merged = {}; for (const k in DOMTAR_SKU_DEFAULT) merged[k] = DOMTAR_SKU_DEFAULT[k];
+  const imp = (typeof state!=='undefined' && state.domtarSku) ? state.domtarSku : null;
+  if (imp){ const recs = Array.isArray(imp) ? imp : Object.values(imp);
+    recs.forEach(function(r){ if (r && r.sku!=null && String(r.sku).trim()) merged[String(r.sku).trim().toUpperCase()] = String(r.prod==null?'':r.prod); }); }
+  return merged;
+}
+function _domtarProdId(sku){ const t = getDomtarSkuTable(); return t[String(sku==null?'':sku).trim().toUpperCase()] || ''; }
+function _domtarSkuRecords(){ const imp = (typeof state!=='undefined' && state.domtarSku) ? state.domtarSku : null; return imp ? (Array.isArray(imp)?imp.slice():Object.values(imp)) : []; }
+function _domtarNum(s){ const n = parseFloat(String(s==null?'':s).replace(/,/g,'')); return isNaN(n) ? 0 : n; }
+
+// ── Word/table reconstruction (shared by the digital text layer and OCR) ───────
+function _domtarRows(words){
+  const rows = [];
+  (words||[]).forEach(function(w){ let r = rows.find(function(r){ return Math.abs(r.y - w.y) <= 3; }); if (!r){ r = { y:w.y, items:[] }; rows.push(r); } r.items.push(w); });
+  rows.sort(function(a,b){ return a.y - b.y; });
+  return rows.map(function(r){ return r.items.sort(function(a,b){ return a.x - b.x; }); });
+}
+// Header cell values: the value token sits to the right of its label on the same row.
+function _domtarHeader(pages){
+  const p0 = pages[0] || [];
+  function valRight(re){
+    for (let i=0;i<p0.length;i++){ const w=p0[i]; if (re.test(w.s)){
+      const same = p0.filter(function(v){ return Math.abs(v.y-w.y)<=3 && v.x > w.x+3; }).sort(function(a,b){ return a.x-b.x; });
+      if (same.length) return same[0].s.trim();
+    } }
+    return '';
+  }
+  return { receiver: valRight(/^Load Number/i), truck: valRight(/^Vehicle ID/i),
+           invoice: valRight(/^Bill Of Lading/i), dateLoaded: valRight(/^Date Loaded/i) };
+}
+// Roll rows in reading order, tagged with their Order-Item. The Order-Item / Customer
+// PO / Product / Width block prints in the LEFT column, vertically interleaved with the
+// first rolls, so group fields are read from the left column only and backfilled per
+// order-item in a second pass (early rolls would otherwise miss the later-printed width).
+function _domtarRolls(pages){
+  const rolls = [], attrs = {};
+  let curOI = '';
+  (pages||[]).forEach(function(words, pi){
+    _domtarRows(words).forEach(function(row){
+      const leftLine = row.filter(function(t){ return t.x < 285; }).map(function(t){ return t.s; }).join(' ');
+      let m;
+      m = leftLine.match(/Order-?Item:\s*([0-9]+\s*-\s*\d+)/i); if (m){ curOI = m[1].replace(/\s+/g,' ').trim(); if (!attrs[curOI]) attrs[curOI] = { po:'', product:'', widthIn:'' }; }
+      m = leftLine.match(/Customer PO:\s*(.+)$/i); if (m && curOI) attrs[curOI].po = m[1].trim();
+      m = leftLine.match(/Product:\s*(.+)$/i);      if (m && curOI) attrs[curOI].product = m[1].trim();
+      m = leftLine.match(/Width:\s*([\d.]+)\s*in/i); if (m && curOI) attrs[curOI].widthIn = parseFloat(m[1]);
+      const dta = row.find(function(t){ return /^DTA[0-9A-Z]{6,}$/i.test(t.s); });
+      if (dta){
+        const nums = row.filter(function(t){ return t.x > 380 && /^[\d,]+$/.test(t.s); }).sort(function(a,b){ return a.x-b.x; }).map(function(t){ return _domtarNum(t.s); });
+        const trk  = row.filter(function(t){ return t.x >= 330 && t.x <= 392 && /^\d{4,8}$/.test(t.s); }).sort(function(a,b){ return a.x-b.x; });
+        rolls.push({ pg:pi, y:dta.y, lot:dta.s.toUpperCase(), track:(trk[0]?trk[0].s:''),
+          lf:(nums[0]||0), adwt:(nums[2]||0), orderItem:curOI });
+      }
+    });
+  });
+  rolls.sort(function(a,b){ return (a.pg-b.pg) || (a.y-b.y); });
+  rolls.forEach(function(r){ const a = attrs[r.orderItem] || {}; r.po = a.po||''; r.product = a.product||''; r.widthIn = (a.widthIn==null?'':a.widthIn); });
+  return rolls;
+}
+// Build a load: pair rolls into 2-roll packs (parent first) and keep them contiguous.
+function _domtarBuildLoad(pages, fileName, source){
+  const H = _domtarHeader(pages);
+  const raw = _domtarRolls(pages);
+  const rows = [];
+  for (let i=0;i<raw.length;i++){
+    const r = raw[i];
+    rows.push({ lot:r.lot, track:r.track, lf:Math.round(r.lf), adwt:Math.round(r.adwt),
+      widthIn:(r.widthIn||''), orderItem:r.orderItem, po:r.po, product:r.product,
+      pack:(Math.floor(i/2)+1), parent:(i%2===0), sku:'', pcs:1 });
+  }
+  const orderItems = [];
+  rows.forEach(function(r){ if (r.orderItem && orderItems.indexOf(r.orderItem)<0) orderItems.push(r.orderItem); });
+  const poHeader = ((orderItems.join(' / ')) + ' ' + (H.truck||'')).trim();
+  return { fileName:fileName, source:source,
+    header:{ receiver:(H.receiver||''), po:poHeader, invoice:(H.invoice||''), truck:(H.truck||''), dateLoaded:(H.dateLoaded||'') },
+    orderItems:orderItems, skuByOrder:{}, rows:rows,
+    packCount:Math.floor(rows.length/2), rollCount:rows.length, reconciled:(rows.length%2===0) };
+}
+
+// ── PDF word extraction (digital text layer) ───────────────────────────────────
+async function _domtarWordsPdf(buf){
+  const pdfjsLib = await ensurePdfJs();
+  const pdf = await pdfjsLib.getDocument({ data:new Uint8Array(buf) }).promise;
+  const pages = [];
+  for (let i=1;i<=pdf.numPages;i++){
+    const page = await pdf.getPage(i);
+    const vp = page.getViewport({ scale:1 });
+    const tc = await page.getTextContent();
+    const words = [];
+    tc.items.forEach(function(it){ if (!it.str || !it.str.trim()) return;
+      words.push({ x:it.transform[4], y:(vp.height - it.transform[5]), s:it.str.trim() }); });
+    pages.push(words);
+  }
+  return pages;
+}
+// ── OCR path (scanned slip) — same {x,y,s} word shape at PDF-point scale ────────
+async function _domtarOcrPdf(buf){
+  const pdfjsLib = await ensurePdfJs();
+  const worker = await _catTimeout(_catEnsureTesseract(), 120000, 'OCR engine load');
+  const pdf = await pdfjsLib.getDocument({ data:new Uint8Array(buf) }).promise;
+  const pages = [];
+  const SC = 3;
+  for (let i=1;i<=pdf.numPages;i++){
+    showAlert('Domtar OCR — page ' + i + ' of ' + (pdf.numPages||1) + '…', 'info');
+    const page = await pdf.getPage(i);
+    const vp = page.getViewport({ scale:SC });
+    const cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+    await page.render({ canvasContext:cv.getContext('2d'), viewport:vp }).promise;
+    let words = [];
+    try { const d = await worker.recognize(_upmBinarizeCanvas(cv,180), {}, { tsv:true, blocks:true }); words = _upmWordsFromOcr(d.data); } catch(e){}
+    pages.push(words.map(function(w){ return { x:w.x/SC, y:w.y/SC, s:w.s }; }));   // back to PDF-point scale
+  }
+  return pages;
+}
+async function _domtarImport(f){
+  try{
+    showAlert('Reading Domtar packing slip…', 'info');
+    const buf = await f.arrayBuffer();
+    let pages = await _domtarWordsPdf(buf), source = 'pdf';
+    const hasRolls = pages.some(function(pg){ return pg.some(function(w){ return /^DTA[0-9A-Z]{6,}$/i.test(w.s); }); });
+    if (!hasRolls){ showAlert('Domtar slip has no text layer — running OCR (first run downloads the engine)…', 'info'); pages = await _domtarOcrPdf(buf); source = 'ocr'; }
+    const load = _domtarBuildLoad(pages, f.name, source);
+    if (!load.rows.length){ showAlert('Domtar: no rolls found in ' + f.name + (source==='ocr'?' (OCR could not read the table — check scan quality).':' (is this a pulp roll packing slip?)'), 'warning'); return; }
+    _ediStampLoad(load); load.createdAt = Date.now();
+    window._domtarLoads = window._domtarLoads || [];
+    window._domtarLoads.push(load);
+    _ediSave(); showEDIImportFile();
+    if (typeof _ediReopenDetail==='function') _ediReopenDetail('domtar-detail-'+(window._domtarLoads.length-1));
+    showAlert('✓ Domtar ' + f.name + (source==='ocr'?' (OCR)':'') + ' — ' + load.rollCount + ' rolls · ' + load.packCount + ' packs — enter the SKU for each order' + (load.reconciled?'':' · ⚠ odd roll count, verify packs'), 'success');
+  }catch(err){ console.error(err); showAlert('Domtar read failed — ' + ((err&&err.message)||err), 'danger'); }
+}
+function handleDomtarUpload(e){ const f = e && e.target && e.target.files && e.target.files[0]; if (e&&e.target) e.target.value=''; if (f) _domtarImport(f); }
+function handleDomtarDrop(e){ e.preventDefault(); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) _domtarImport(f); }
+
+// ── Edits (persist to model so nothing clears on re-render / tile switch) ───────
+function _domtarHdrEdit(i, key, val){
+  const load = (window._domtarLoads||[])[i]; if (!load) return; load.header = load.header||{};
+  load.header[key] = val; try{ _ediSave(); }catch(e){}
+}
+function _domtarSetSku(i, oi, val){
+  const load = (window._domtarLoads||[])[i]; if (!load) return;
+  load.skuByOrder = load.skuByOrder || {};
+  load.skuByOrder[oi] = val;
+  const pid = _domtarProdId(val);
+  (load.rows||[]).forEach(function(r){ if (r.orderItem===oi){ r.sku = val; r.productId = pid; } });
+  try{ _ediSave(); }catch(e){}
+  const el = document.getElementById('domtar-pid-'+i+'-'+_domtarKey(oi)); if (el) el.textContent = pid || '—';
+}
+function _domtarKey(s){ return String(s==null?'':s).replace(/[^a-zA-Z0-9]/g,'_'); }
+
+// ── SKU master mini-table (import + manual add/remove) ─────────────────────────
+function _domtarSaveSku(recs){
+  state.domtarSku = recs;
+  try{ if (db) db.ref('6021/domtarSku').set(recs).catch(function(){}); }catch(e){}
+}
+function domtarAddSkuRow(){
+  const s = (document.getElementById('domtar-newsku')||{}).value, p = (document.getElementById('domtar-newprod')||{}).value;
+  const sku = String(s==null?'':s).trim(), prod = String(p==null?'':p).trim();
+  if (!sku){ showAlert('Enter a SKU.', 'warning'); return; }
+  const recs = _domtarSkuRecords().filter(function(r){ return String(r.sku).trim().toUpperCase()!==sku.toUpperCase(); });
+  recs.push({ sku:sku, prod:prod }); _domtarSaveSku(recs); showEDIImportFile();
+}
+function domtarDelSkuRow(sku){
+  const recs = _domtarSkuRecords().filter(function(r){ return String(r.sku).trim().toUpperCase()!==String(sku).trim().toUpperCase(); });
+  _domtarSaveSku(recs); showEDIImportFile();
+}
+function domtarImportSkuFile(ev){
+  const f = ev && ev.target && ev.target.files && ev.target.files[0]; if (ev&&ev.target) ev.target.value=''; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = function(e){
+    try{
+      const wb = XLSX.read(new Uint8Array(e.target.result), { type:'array' });
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
+      const recs = _domtarSkuRecords(); const seen = {}; recs.forEach(function(r){ seen[String(r.sku).trim().toUpperCase()]=r; });
+      let n = 0;
+      aoa.forEach(function(row, i){ if (i===0) return; const sku=String(row[0]||'').trim(), prod=String(row[1]||'').trim(); if (!sku) return;
+        const k = sku.toUpperCase(); if (seen[k]) seen[k].prod = prod; else { const rec={sku:sku,prod:prod}; recs.push(rec); seen[k]=rec; } n++; });
+      if (!n){ showAlert('No SKU rows found. Expected columns: SKU | Prod ID', 'warning'); return; }
+      _domtarSaveSku(recs); showEDIImportFile();
+      showAlert('✓ Domtar SKU table — ' + n + ' row(s) imported', 'success');
+    }catch(err){ showAlert('SKU import failed: ' + ((err&&err.message)||err), 'danger'); }
+  };
+  rd.readAsArrayBuffer(f);
+}
+function _domtarSkuTableHtml(){
+  const recs = _domtarSkuRecords(); const G = '#2e7d32';
+  const rows = recs.map(function(r){
+    const sk = String(r.sku).replace(/"/g,'&quot;');
+    return '<tr style="border-bottom:1px solid var(--border)"><td style="padding:2px 6px;font-weight:700">'+String(r.sku)+'</td>'
+      +'<td style="padding:2px 6px;color:var(--text2);font-size:9px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+String(r.prod||'').replace(/"/g,'&quot;')+'">'+String(r.prod||'')+'</td>'
+      +'<td style="padding:2px 6px;text-align:center"><button onclick="domtarDelSkuRow(&quot;'+sk+'&quot;)" title="Remove" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:12px">✕</button></td></tr>';
+  }).join('');
+  const inp = 'padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-family:var(--font);font-size:10px';
+  return '<details style="border:1px solid var(--border);border-radius:6px;padding:6px 8px;background:var(--bg)">'
+    +'<summary style="cursor:pointer;font-size:10px;font-weight:700;color:'+G+'">SKU table ('+recs.length+') — import or add SKU → Product ID</summary>'
+    +'<div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+      +'<label style="font-size:10px;font-weight:700;color:'+G+';border:1px solid '+G+';border-radius:4px;padding:3px 8px;cursor:pointer">Import xlsx<input type="file" accept=".xlsx,.xls" onchange="domtarImportSkuFile(event)" style="display:none"></label>'
+      +'<input id="domtar-newsku" placeholder="SKU" style="'+inp+';width:90px">'
+      +'<input id="domtar-newprod" placeholder="Product ID" style="'+inp+';width:220px">'
+      +'<button onclick="domtarAddSkuRow()" style="background:'+G+';color:#fff;border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:10px;font-weight:700">+ Add</button></div>'
+    +(recs.length ? '<div style="max-height:150px;overflow:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--surface2)"><th style="padding:2px 6px;text-align:left">SKU</th><th style="padding:2px 6px;text-align:left">PRODUCT ID</th><th style="width:24px"></th></tr></thead><tbody>'+rows+'</tbody></table></div>' : '<div style="font-size:9px;color:var(--text2);margin-top:6px">No SKUs yet — import a sheet (SKU | Prod ID) or add rows above.</div>')
+    +'</details>';
+}
+
+// ── Section render ─────────────────────────────────────────────────────────────
+function _domtarHdrInput(i, key, label, val){
+  return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:8px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
+    +'<input id="domtar-'+key+'-'+i+'" type="text" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_domtarHdrEdit('+i+',&quot;'+key+'&quot;,this.value)" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:150px"></div>';
+}
+function renderDomtarSection(){
+  const sectionStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px';
+  const G = '#2e7d32';
+  const loads = window._domtarLoads || [];
+  let body;
+  if (!loads.length){
+    body = '<div style="border:2px dashed var(--border);border-radius:6px;padding:18px;text-align:center;color:var(--text2);font-size:12px">No Domtar loads imported yet</div>';
+  } else {
+    const totalRolls = loads.reduce(function(s,l){ return s + (l.rows?l.rows.length:0); }, 0);
+    const items = loads.map(function(load, idx){
+      const H = load.header || {};
+      const detailId = 'domtar-detail-' + idx;
+      const rows = load.rows || [];
+      const skuMissing = (load.orderItems||[]).filter(function(oi){ return !(load.skuByOrder&&load.skuByOrder[oi]); }).length;
+      const recColor = skuMissing ? 'var(--warning)' : 'var(--accent2)';
+      const recTxt = skuMissing ? ('⚠ enter SKU for '+skuMissing+' order(s)') : '✓ ready';
+      // per Order-Item SKU entry
+      const skuBlocks = (load.orderItems||[]).map(function(oi){
+        const sku = (load.skuByOrder&&load.skuByOrder[oi])||'';
+        const pid = _domtarProdId(sku);
+        return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:8px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">SKU · Order '+oi+'</label>'
+          +'<div style="display:flex;gap:6px;align-items:center"><input id="domtar-sku-'+idx+'-'+_domtarKey(oi)+'" list="domtar-skulist" value="'+String(sku).replace(/"/g,'&quot;')+'" oninput="_domtarSetSku('+idx+',&quot;'+oi+'&quot;,this.value)" placeholder="SKU" style="padding:4px 7px;border:1.5px solid '+G+';border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:110px">'
+          +'<span id="domtar-pid-'+idx+'-'+_domtarKey(oi)+'" style="font-size:10px;color:var(--text2);max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+String(pid).replace(/"/g,'&quot;')+'">'+(pid||'—')+'</span></div></div>';
+      }).join('');
+      const drows = rows.map(function(r, ri){
+        const packTop = (ri%2===0);   // parent starts a pack
+        const topBorder = packTop && ri>0 ? ';border-top:2px solid var(--border)' : '';
+        const bg = (Math.floor(ri/2)%2!==0) ? 'rgba(0,0,0,0.03)' : '';
+        return '<tr style="background:'+bg+topBorder+'">'
+          +'<td style="padding:3px 6px;text-align:center;color:var(--text2);font-size:9px">'+r.pack+(r.parent?' P':' c')+'</td>'
+          +'<td style="padding:3px 6px;font-weight:'+(r.parent?'bold':'normal')+';color:'+G+';white-space:nowrap">'+(r.lot||'—')+'</td>'
+          +'<td style="padding:3px 6px;font-size:9px;color:var(--text2)">'+(r.sku||'—')+'</td>'
+          +'<td style="padding:3px 6px;font-size:9px;color:var(--text2);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(r.productId||'—')+'</td>'
+          +'<td style="padding:3px 6px;font-size:9px">'+(r.orderItem||'—')+'</td>'
+          +'<td style="padding:3px 6px;font-size:9px">'+(r.po||'—')+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('domtar',idx,ri,'adwt',r.adwt,{num:true,width:'70px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('domtar',idx,ri,'lf',r.lf,{num:true,width:'70px'})+'</td>'
+          +'<td style="padding:3px 6px">'+_ediCellInput('domtar',idx,ri,'widthIn',r.widthIn,{num:true,width:'64px'})+'</td>'
+          +'<td style="padding:3px 6px;text-align:center;font-size:9px">'+(r.pcs||1)+'</td></tr>';
+      }).join('');
+      const totWt = rows.reduce(function(s,r){ return s + (parseFloat(r.adwt)||0); }, 0).toLocaleString();
+      const totLf = rows.reduce(function(s,r){ return s + (parseFloat(r.lf)||0); }, 0).toLocaleString();
+      return '<div style="border-bottom:1px solid var(--border)">'
+        +'<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(idx%2!==0?'var(--surface2)':'var(--surface)')+';flex-wrap:wrap">'
+          +'<div style="flex:1;min-width:180px"><div style="font-weight:bold;color:'+G+';font-size:12px">Domtar · Load '+(H.receiver||'—')+'</div>'
+            +'<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+load.fileName+(load.source==='ocr'?' · 📄 OCR':'')+'</div>'
+            +'<div style="font-size:10px;font-weight:700;color:'+recColor+'">'+recTxt+'</div></div>'
+          +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+_domtarHdrInput(idx,'receiver','Receiver',H.receiver)+_domtarHdrInput(idx,'po','PO # (Order+Vehicle)',H.po)+_domtarHdrInput(idx,'invoice','Invoice # (BOL)',H.invoice)+_domtarHdrInput(idx,'truck','Truck #',H.truck)+'</div>'
+          +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">'+skuBlocks+'</div>'
+          +'<div style="text-align:right;white-space:nowrap"><div style="font-weight:bold;color:'+G+';font-size:13px">'+load.rollCount+'</div><div style="font-size:10px;color:var(--text2)">rolls · '+load.packCount+' packs</div></div>'
+          +'<button onclick="exportDomtarLoad('+idx+')" style="background:'+G+';color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px">Export</button>'
+          +'<button onclick="deleteDomtarLoad('+idx+')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px" title="Remove load">✕</button>'
+          +'<button id="'+detailId+'-btn" onclick="toggleEDIDetail(&quot;'+detailId+'&quot;)" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px">▼</button>'
+        +'</div>'
+        +'<div id="'+detailId+'" style="display:none;border-top:1px solid var(--border);overflow-x:auto;max-height:360px;overflow-y:auto">'
+          +'<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--surface2)">'
+            +'<th style="padding:5px 6px;color:var(--text2)">PACK</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">LOT # (ROLL ID)</th>'
+            +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">SKU</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">PRODUCT ID</th>'
+            +'<th style="padding:5px 8px;text-align:left;color:var(--text2)">PROD ID 2</th><th style="padding:5px 8px;text-align:left;color:var(--text2)">PO#</th>'
+            +'<th style="padding:5px 8px;text-align:right;color:var(--text2)">WEIGHT</th><th style="padding:5px 8px;text-align:right;color:var(--text2)">LF</th>'
+            +'<th style="padding:5px 8px;text-align:right;color:var(--text2)">WIDTH</th><th style="padding:5px 6px;color:var(--text2)">PCS</th>'
+          +'</tr></thead><tbody>'+drows
+          +'<tr style="background:rgba(46,125,50,0.08);font-weight:bold"><td colspan="6" style="padding:5px 8px;color:'+G+'">TOTAL — '+load.rollCount+' rolls · '+load.packCount+' packs</td>'
+          +'<td style="padding:5px 8px;text-align:right;color:'+G+'">'+totWt+'</td><td style="padding:5px 8px;text-align:right;color:'+G+'">'+totLf+'</td><td></td><td></td></tr></tbody></table>'
+        +'</div></div>';
+    }).join('');
+    body = '<div style="font-size:10px;color:var(--text2)">'+loads.length+' load(s) &nbsp;·&nbsp; '+totalRolls.toLocaleString()+' rolls total'
+      +'<button onclick="clearDomtarLoads()" title="Clear all Domtar loads" style="margin-left:8px;background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;padding:0">✕ Clear All</button></div>'
+      +'<div style="max-height:460px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px">'+items+'</div>';
+  }
+  const dl = '<datalist id="domtar-skulist">'+_domtarSkuRecords().map(function(r){ return '<option value="'+String(r.sku).replace(/"/g,'&quot;')+'">'; }).join('')+'</datalist>';
+  return '<div style="'+sectionStyle+';order:8">'
+    +'<div><div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:'+G+'">🟢 DOMTAR LOADS</div>'
+    +'<div style="font-size:10px;color:var(--text2);margin-top:2px">Drop the Domtar pulp roll packing slip (PDF — digital or scanned). Rolls import as 2-roll packs (parent + child kept together). Enter the SKU for each order — Product ID auto-fills from the SKU table. 1 slip = 1 load.</div></div>'
+    + _domtarSkuTableHtml()
+    +'<div ondragover="event.preventDefault();this.style.borderColor=\'#2e7d32\';this.style.background=\'rgba(46,125,50,0.08)\'" ondragleave="this.style.borderColor=\'\';this.style.background=\'\'" ondrop="handleDomtarDrop(event);this.style.borderColor=\'\';this.style.background=\'\'" onclick="document.getElementById(\'domtar-file-input\').click()" style="border:2px dashed var(--border);border-radius:8px;padding:18px;text-align:center;cursor:pointer;user-select:none">'
+      +'<div style="font-size:22px;margin-bottom:6px">📂</div><div style="font-size:12px;font-weight:bold;color:'+G+'">Drop Domtar packing slip here</div>'
+      +'<div style="font-size:10px;color:var(--text2);margin-top:4px">.pdf · digital or scanned · parent/child packs kept together</div>'
+      +'<input type="file" id="domtar-file-input" accept=".pdf" onchange="handleDomtarUpload(event)" style="display:none"></div>'
+    + dl + body + '</div>';
+}
+function deleteDomtarLoad(idx){ (window._domtarLoads||[]).splice(idx,1); _ediSave(); showEDIImportFile(); }
+function clearDomtarLoads(){ const L=window._domtarLoads||[]; if(!L.length) return; if(!confirm('Remove all '+L.length+' Domtar load(s)?')) return; window._domtarLoads=[]; _ediSave(); showEDIImportFile(); }
+
+// ── Export (12-column template, Short Date, packs kept in order) ────────────────
+function exportDomtarLoad(idx){
+  const load = (window._domtarLoads||[])[idx];
+  if (!load || !load.rows.length) return;
+  const gv = function(key, fb){ const el = document.getElementById('domtar-'+key+'-'+idx); return (((el&&el.value)||fb||'')+'').trim(); };
+  const receiver = gv('receiver', load.header.receiver), poHeader = gv('po', load.header.po),
+        invoice = gv('invoice', load.header.invoice), truck = gv('truck', load.header.truck);
+  const missing = (load.orderItems||[]).filter(function(oi){ return !(load.skuByOrder&&load.skuByOrder[oi]); });
+  if (missing.length){ showAlert('Domtar: enter a SKU for order '+missing.join(', ')+' before exporting.', 'warning'); return; }
+  const aoa = [
+    [],
+    ['Receiver', receiver, null, 'Total Rolls', load.rows.length, null, null, 'Fraction  Decimal'],
+    ['PO #', poHeader, null, null, null, null, null, 0.5, 0.5],
+    ['Invoice #', invoice],
+    ['Truck #', truck || '', null, null, null, null, null, 'Piper IBD Order #'],
+    [], [],
+    ['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date']
+  ];
+  const _now = new Date();
+  const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate())/86400000) + 25569;
+  load.rows.forEach(function(r){
+    const sku = (load.skuByOrder && load.skuByOrder[r.orderItem]) || r.sku || '';
+    const pid = _domtarProdId(sku) || r.productId || '';
+    const wt = (r.adwt===''||r.adwt==null) ? 0 : (parseFloat(r.adwt)||0);
+    aoa.push([ sku, pid, r.lot, r.orderItem, r.po, wt, wt, 'ROLL', (parseFloat(r.lf)||0), (r.pcs||1), (parseFloat(r.widthIn)||0), fileDateSerial ]);
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  for (let ri = 8; ri < aoa.length; ri++){ const ref = XLSX.utils.encode_cell({ r:ri, c:11 }); if (ws[ref] && ws[ref].v){ ws[ref].t='n'; ws[ref].z='m/d/yy'; } }
+  const safeName = String(receiver||'DOMTAR').replace(/[^\w\-]/g,'').substring(0,31) || 'DOMTAR';
+  XLSX.utils.book_append_sheet(wb, ws, safeName);
+  XLSX.writeFile(wb, 'EDI_DOMTAR_' + safeName + '.xlsx');
+  window._ediDomtarStamps = window._ediDomtarStamps || {};
+  _ediStampLoad(load);
+  window._ediDomtarStamps[load._id] = { exportedAt: Date.now(), exportedBy: (state.currentUser || '') };
+  _ediSave();
+  showAlert('✓ Exported EDI_DOMTAR_' + safeName + '.xlsx — ' + load.rows.length + ' rolls · ' + load.packCount + ' packs', 'success');
+  showEDIImportFile();
 }
 function exportUPMLoad(idx){
   const load = (window._upmLoads||[])[idx];
@@ -9408,7 +9858,9 @@ function _ediSnapshot(){
     cat: _ediPack(_catLoads),
     tr:  _ediPackTR(window._ediTRLoads),
     upm: _ediPack(window._upmLoads),
+    domtar: _ediPack(window._domtarLoads),
     upmStamps: window._ediUPMStamps || {},
+    domtarStamps: window._ediDomtarStamps || {},
     stamps:    window._ediStamps || {}
   };
 }
@@ -9449,14 +9901,17 @@ function _ediRestore(){
       if (Array.isArray(d.cat)) _catLoads = d.cat;
       if (d.tr && typeof d.tr === 'object') window._ediTRLoads = d.tr;
       if (Array.isArray(d.upm)) window._upmLoads = d.upm;
+      if (Array.isArray(d.domtar)) window._domtarLoads = d.domtar;
     } else {           // v2 shape: id-keyed objects
       _ediHBHLoads = _ediUnpack(d.hbh);
       _ipgLoads    = _ediUnpack(d.ipg);
       _catLoads    = _ediUnpack(d.cat);
       window._ediTRLoads = _ediUnpackTR(d.tr);
       window._upmLoads   = _ediUnpack(d.upm);
+      window._domtarLoads = _ediUnpack(d.domtar);
     }
     if (d.upmStamps && typeof d.upmStamps === 'object') window._ediUPMStamps = d.upmStamps;
+    if (d.domtarStamps && typeof d.domtarStamps === 'object') window._ediDomtarStamps = d.domtarStamps;
     if (d.stamps    && typeof d.stamps    === 'object') window._ediStamps    = d.stamps;
   } catch (e) { console.warn('EDI restore failed', e); }
 }
@@ -9464,7 +9919,7 @@ function _ediRestore(){
 function _ediInputFocused(){
   const a = document.activeElement;
   if (!a || !a.id) return false;
-  return /^(upm-|cat-|ipg-|hbh-|tr-|edi-|sci-)/.test(a.id);
+  return /^(upm-|cat-|ipg-|hbh-|tr-|edi-|sci-|domtar-)/.test(a.id);
 }
 function _ediListen(){
   if (!db) return;
@@ -9472,13 +9927,13 @@ function _ediListen(){
     const d = snap.val() || {};
     // One-time migration: loads created before shared sync existed still live in
     // this browser's localStorage. Push them up once, then never resurrect again.
-    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.tr && !d.upm;
+    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.tr && !d.upm && !d.domtar;
     let migrated = false;
     try { migrated = !!localStorage.getItem(EDI_MIG_KEY); } catch(e){}
     if (remoteEmpty && !migrated) {
       try { localStorage.setItem(EDI_MIG_KEY, String(Date.now())); } catch(e){}
       const localHas = (_ediHBHLoads||[]).length || (_ipgLoads||[]).length || (_catLoads||[]).length
-        || Object.keys(window._ediTRLoads||{}).length || (window._upmLoads||[]).length;
+        || Object.keys(window._ediTRLoads||{}).length || (window._upmLoads||[]).length || (window._domtarLoads||[]).length;
       if (localHas) { _ediLastWritten = {}; _ediSave(); return; }
     }
     _ediHBHLoads       = _ediUnpack(d.hbh);
@@ -9486,7 +9941,9 @@ function _ediListen(){
     _catLoads          = _ediUnpack(d.cat);
     window._ediTRLoads = _ediUnpackTR(d.tr);
     window._upmLoads   = _ediUnpack(d.upm);
+    window._domtarLoads = _ediUnpack(d.domtar);
     window._ediUPMStamps = d.upmStamps || {};
+    window._ediDomtarStamps = d.domtarStamps || {};
     window._ediStamps    = d.stamps || {};
     // Record what we just received so the next _ediSave() doesn't echo it back.
     const cur = _ediSnapshot();
