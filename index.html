@@ -199,6 +199,10 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
         <button class="sidebar-tab active" id="tab-open" onclick="switchSidebarTab('open')">OPEN</button>
         <button class="sidebar-tab" id="tab-archive" onclick="switchSidebarTab('archive')">ARCHIVE</button>
       </div>
+      <div style="padding:8px 10px 0">
+        <input id="pt-ref-search" type="text" autocomplete="off" placeholder="🔍 Search Reference #…" oninput="filterPickTickets()" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">
+        <div id="pt-arch-match"></div>
+      </div>
       <div class="sidebar-actions">
         <button class="btn btn-primary" id="import-btn" onclick="showImport()">⬆ Import Data</button>
         <button class="btn btn-success" id="new-ticket-btn" onclick="showNewTicket()" disabled>+ New Pick Ticket</button>
@@ -462,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 38;
+const APP_BUILD = 46;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1640,6 +1644,41 @@ function handleDashboardTicketClick(el) {
   if (tid) viewTicket(tid);
 }
 
+// ── PICK-TICKET REFERENCE # SEARCH (additive; does not modify updateTicketList) ──
+function _ptNorm(v){ return ((v==null?'':v)+'').trim().toLowerCase(); }
+function filterPickTickets(){
+  var q=_ptNorm((document.getElementById('pt-ref-search')||{}).value);
+  document.querySelectorAll('#ticket-list .ticket-card').forEach(function(card){
+    var tid=card.getAttribute('data-tid');
+    var t=(state.tickets||[]).find(function(x){return x.id===tid;});
+    var ref=t?_ptNorm(t.refNum):'';
+    var show=!q || ref.indexOf(q)!==-1 || _ptNorm(tid).indexOf(q)!==-1;
+    card.style.display=show?'':'none';
+  });
+  renderPTArchMatch(q);
+}
+function renderPTArchMatch(q){
+  var host=document.getElementById('pt-arch-match'); if(!host) return;
+  if(!q){ host.innerHTML=''; return; }
+  var hits=(state.archivedTickets||[]).filter(function(t){ return _ptNorm(t.refNum).indexOf(q)!==-1 || _ptNorm(t.id).indexOf(q)!==-1; });
+  if(!hits.length){ host.innerHTML=''; return; }
+  host.innerHTML=hits.slice(0,4).map(function(t){
+    return '<div style="margin-top:6px;padding:7px 9px;border:1px solid var(--warning);background:rgba(224,162,0,0.08);border-radius:6px">'
+      +'<div style="font-size:11px;color:var(--text)">\uD83D\uDCC1 <strong>'+((t.refNum||t.id)+'').replace(/</g,'&lt;')+'</strong> is <strong>archived</strong>.</div>'
+      +'<div style="font-size:10px;color:var(--text2);margin:2px 0 6px">'+t.id+(t.customer?(' \u00B7 '+(t.customer+'').replace(/</g,'&lt;')):'')+'</div>'
+      +'<div style="display:flex;gap:6px">'
+      +'<button class="btn btn-sm" style="font-size:10px;background:var(--accent2);color:#fff;border-color:var(--accent2)" onclick="ptMoveArchivedToOpen(\''+t.id+'\')">Move to OPEN \u2014 Yes</button>'
+      +'<button class="btn btn-sm" style="font-size:10px" onclick="ptDismissArchMatch()">No</button>'
+      +'</div></div>';
+  }).join('');
+}
+function ptDismissArchMatch(){ var h=document.getElementById('pt-arch-match'); if(h) h.innerHTML=''; }
+function ptMoveArchivedToOpen(id){
+  if(typeof isAdmin==='function' && !isAdmin()){ if(typeof showAlert==='function') showAlert('Only admins can move a ticket back to OPEN.','warning'); return; }
+  try{ restoreTicket(id); }catch(e){}
+  var s=document.getElementById('pt-ref-search'); if(s) s.value='';
+  ptDismissArchMatch();
+}
 function updateTicketList() {
   document.getElementById('ticket-count') && (document.getElementById('ticket-count').textContent = state.tickets.length+'/20');
   const list = document.getElementById('ticket-list');
@@ -7493,6 +7532,12 @@ function showCycleCountStart() {
         <div class="form-group" style="margin-bottom:10px">
           <input type="text" id="cc-loc-search" placeholder="Filter locations..." oninput="filterCCLocs()" style="${fi}">
         </div>
+        <div class="form-group" style="margin-bottom:10px">
+          <select id="cc-cust-filter" onchange="applyCCFilters()" style="${fi}" title="Show only locations holding this customer and count only their inventory">
+            <option value="__all__">All customers</option>
+            ${(()=>{ const cs=[...new Set(state.inventory.map(r=>(r.customer||'').trim()).filter(Boolean))].sort(); return cs.map(c=>'<option value="'+String(c).replace(/"/g,'&quot;')+'">'+String(c).replace(/</g,'&lt;')+'</option>').join(''); })()}
+          </select>
+        </div>
         <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
           <button class="btn btn-sm" onclick="document.querySelectorAll('.cc-loc-chk').forEach(c=>c.checked=true);updateCCSelCount()">Select All</button>
           <button class="btn btn-sm" onclick="document.querySelectorAll('.cc-loc-chk').forEach(c=>c.checked=false);updateCCSelCount()">Clear All</button>
@@ -7568,6 +7613,11 @@ function showCycleCountStart() {
 
     panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
     window._ccAllLocs = storageLocs;
+    // ── CUSTOMER FILTER (additive) — map each location to the customers it holds so the
+    // customer dropdown can stack with the existing text filter without touching filterCCLocs().
+    try { window._ccLocCustomers = (function(){ var m={}; state.inventory.forEach(function(r){ if(!r.location) return; var c=(r.customer||'').trim(); if(!c) return; if(!m[r.location]) m[r.location]={}; m[r.location][c]=1; }); return m; })(); } catch(e){ window._ccLocCustomers={}; }
+    window._ccCustFilter = '__all__';
+    try { var _ccSearchEl=document.getElementById('cc-loc-search'); if(_ccSearchEl) _ccSearchEl.addEventListener('input', applyCCFilters); } catch(e){}
     window._ccSuggestedLocs = suggestedLocs.map(s=>s.loc);
     renderCCMonthList(ccCurKey);
     // Physically move any prior-month live sessions into the monthly archive node.
@@ -8047,6 +8097,20 @@ function updateCCSelCount() {
   if (el) el.textContent = n + ' selected';
 }
 
+// Combined location filter (additive): text box AND customer dropdown. Does NOT modify filterCCLocs.
+function applyCCFilters(){
+  var q = ((document.getElementById('cc-loc-search')||{}).value||'').toLowerCase();
+  var custSel = (document.getElementById('cc-cust-filter')||{}).value||'__all__';
+  window._ccCustFilter = custSel;
+  var map = window._ccLocCustomers||{};
+  document.querySelectorAll('.cc-loc-chk').forEach(function(chk){
+    var row = chk.closest('label'); if(!row) return;
+    var loc = chk.value;
+    var textOk = loc.toLowerCase().indexOf(q)!==-1;
+    var custOk = (custSel==='__all__') || !!(map[loc] && map[loc][custSel]);
+    row.style.display = (textOk && custOk) ? 'flex' : 'none';
+  });
+}
 function filterCCLocs() {
   const q = (document.getElementById('cc-loc-search')||{}).value||'';
   document.querySelectorAll('.cc-loc-chk').forEach(chk=>{
@@ -8087,6 +8151,7 @@ function startCycleCount() {
   state.inventory.forEach(r => {
     if (!selected.includes(r.location)) return;
     if ((r.pcsPending||0) > 0) return;
+    if (window._ccCustFilter && window._ccCustFilter!=='__all__' && (r.customer||'')!==window._ccCustFilter) return;   // customer filter — inert unless a customer is chosen
     locData[r.location].push(r);
   });
 
