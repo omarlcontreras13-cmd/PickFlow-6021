@@ -199,6 +199,10 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
         <button class="sidebar-tab active" id="tab-open" onclick="switchSidebarTab('open')">OPEN</button>
         <button class="sidebar-tab" id="tab-archive" onclick="switchSidebarTab('archive')">ARCHIVE</button>
       </div>
+      <div style="padding:8px 10px 0">
+        <input id="pt-ref-search" type="text" autocomplete="off" placeholder="🔍 Search Reference #…" oninput="filterPickTickets()" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">
+        <div id="pt-arch-match"></div>
+      </div>
       <div class="sidebar-actions">
         <button class="btn btn-primary" id="import-btn" onclick="showImport()">⬆ Import Data</button>
         <button class="btn btn-success" id="new-ticket-btn" onclick="showNewTicket()" disabled>+ New Pick Ticket</button>
@@ -462,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 45;
+const APP_BUILD = 46;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1640,6 +1644,41 @@ function handleDashboardTicketClick(el) {
   if (tid) viewTicket(tid);
 }
 
+// ── PICK-TICKET REFERENCE # SEARCH (additive; does not modify updateTicketList) ──
+function _ptNorm(v){ return ((v==null?'':v)+'').trim().toLowerCase(); }
+function filterPickTickets(){
+  var q=_ptNorm((document.getElementById('pt-ref-search')||{}).value);
+  document.querySelectorAll('#ticket-list .ticket-card').forEach(function(card){
+    var tid=card.getAttribute('data-tid');
+    var t=(state.tickets||[]).find(function(x){return x.id===tid;});
+    var ref=t?_ptNorm(t.refNum):'';
+    var show=!q || ref.indexOf(q)!==-1 || _ptNorm(tid).indexOf(q)!==-1;
+    card.style.display=show?'':'none';
+  });
+  renderPTArchMatch(q);
+}
+function renderPTArchMatch(q){
+  var host=document.getElementById('pt-arch-match'); if(!host) return;
+  if(!q){ host.innerHTML=''; return; }
+  var hits=(state.archivedTickets||[]).filter(function(t){ return _ptNorm(t.refNum).indexOf(q)!==-1 || _ptNorm(t.id).indexOf(q)!==-1; });
+  if(!hits.length){ host.innerHTML=''; return; }
+  host.innerHTML=hits.slice(0,4).map(function(t){
+    return '<div style="margin-top:6px;padding:7px 9px;border:1px solid var(--warning);background:rgba(224,162,0,0.08);border-radius:6px">'
+      +'<div style="font-size:11px;color:var(--text)">\uD83D\uDCC1 <strong>'+((t.refNum||t.id)+'').replace(/</g,'&lt;')+'</strong> is <strong>archived</strong>.</div>'
+      +'<div style="font-size:10px;color:var(--text2);margin:2px 0 6px">'+t.id+(t.customer?(' \u00B7 '+(t.customer+'').replace(/</g,'&lt;')):'')+'</div>'
+      +'<div style="display:flex;gap:6px">'
+      +'<button class="btn btn-sm" style="font-size:10px;background:var(--accent2);color:#fff;border-color:var(--accent2)" onclick="ptMoveArchivedToOpen(\''+t.id+'\')">Move to OPEN \u2014 Yes</button>'
+      +'<button class="btn btn-sm" style="font-size:10px" onclick="ptDismissArchMatch()">No</button>'
+      +'</div></div>';
+  }).join('');
+}
+function ptDismissArchMatch(){ var h=document.getElementById('pt-arch-match'); if(h) h.innerHTML=''; }
+function ptMoveArchivedToOpen(id){
+  if(typeof isAdmin==='function' && !isAdmin()){ if(typeof showAlert==='function') showAlert('Only admins can move a ticket back to OPEN.','warning'); return; }
+  try{ restoreTicket(id); }catch(e){}
+  var s=document.getElementById('pt-ref-search'); if(s) s.value='';
+  ptDismissArchMatch();
+}
 function updateTicketList() {
   document.getElementById('ticket-count') && (document.getElementById('ticket-count').textContent = state.tickets.length+'/20');
   const list = document.getElementById('ticket-list');
