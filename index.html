@@ -466,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 46;
+const APP_BUILD = 48;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1432,7 +1432,7 @@ function showDashboard() {
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.destination||''}${t.appt?' · '+t.appt:''} · ${t.clerk||''}</div>
               </div>
               <div style="text-align:right">
-                <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}<div style="font-size:12px;color:var(--accent2);font-weight:bold">${ticketQtyDisplay(t)} ${unitNoun(t.customer)}</div></div>
+                <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}${(isAdmin() && ticketStageInfo(t).label==='PRINTED') ? `<span onclick="event.stopPropagation();unprintTicket('${t.id}')" title="Reverse print — undo the print flag (printed in error)" style="cursor:pointer;color:var(--warning);font-weight:bold;font-size:14px;line-height:1;padding:0 3px;user-select:none">↩</span>` : ''}<div style="font-size:12px;color:var(--accent2);font-weight:bold">${ticketQtyDisplay(t)} ${unitNoun(t.customer)}</div></div>
                 <div style="font-size:11px;color:var(--text2)">${new Date(t.created).toLocaleDateString()}</div>
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">${ticketStampLine(t)}</div>
               </div>
@@ -2490,6 +2490,7 @@ function deleteTicket(id) {
 function archiveTicket(id, silent=false) {
   if (!isAdmin()) { showAlert('Only admins can archive.','warning'); return; }
   const ticket = state.tickets.find(t=>t.id===id); if (!ticket) return;
+  if (typeof ticketStageInfo==='function' && ticketStageInfo(ticket).label!=='PRINTED') { if(!silent) showAlert('This ticket is still in CREATED status — print the pick ticket before archiving.','warning'); return; }
   if (!silent&&!confirm('Archive this ticket?')) return;
   ticket.archivedAt = Date.now();
   ticket.archivedBy = state.currentUser?state.currentUser.name:'System';
@@ -2501,6 +2502,19 @@ function archiveTicket(id, silent=false) {
   saveTickets(); saveArchive(); updateTicketList();
   showDashboard();
   if (!silent) showAlert('Ticket archived.','success');
+}
+
+// ── REVERSE PRINT (additive) — undo a print flag set in error; reverts to CREATED ──
+function unprintTicket(id){
+  if (!isAdmin()) { showAlert('Only admins can reverse a print flag.','warning'); return; }
+  const ticket = state.tickets.find(t=>t.id===id); if (!ticket) return;
+  if (typeof ticketStageInfo==='function' && ticketStageInfo(ticket).label!=='PRINTED') { showAlert('This ticket is not marked printed.','warning'); return; }
+  if (!confirm('Reverse the PRINTED flag on '+id+' back to CREATED? Use this only if it was printed in error.')) return;
+  ticket.status='open';
+  if (ticket.stamps) delete ticket.stamps.printed;
+  saveTickets(); updateTicketList();
+  if (state.activeTicket===id) viewTicket(id); else showDashboard();
+  showAlert('Print flag reversed — '+id+' is back to CREATED.','success');
 }
 
 // ─── ARCHIVE LIST ─────────────────────────────────────────────────────────────
