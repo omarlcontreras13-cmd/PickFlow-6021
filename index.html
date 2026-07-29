@@ -466,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 48;
+const APP_BUILD = 50;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -2497,7 +2497,7 @@ function archiveTicket(id, silent=false) {
   state.archivedTickets.push(ticket);
   state.tickets = state.tickets.filter(t=>t.id!==id);
   if (state.activeTicket===id) state.activeTicket=null;
-  const cutoff = Date.now()-(90*24*60*60*1000);
+  const cutoff = Date.now()-(30*24*60*60*1000);
   state.archivedTickets = state.archivedTickets.filter(t=>t.archivedAt>cutoff);
   saveTickets(); saveArchive(); updateTicketList();
   showDashboard();
@@ -2536,8 +2536,9 @@ function renderArchiveList(filterDate='') {
   const list = document.getElementById('ticket-list');
   if (!state.archivedTickets.length) { list.innerHTML='<div style="padding:20px;text-align:center;color:var(--text2);font-size:11px">No archived tickets</div>'; return; }
   const groups={};
-  [...state.archivedTickets].sort((a,b)=>b.archivedAt-a.archivedAt).forEach(t=>{
-    const d=new Date(t.archivedAt).toLocaleDateString();
+  const _cdOf=(t)=> t.created || (t.ticketDate ? Date.parse(t.ticketDate+'T00:00:00') : (t.archivedAt||0));   // file by CREATION date
+  [...state.archivedTickets].sort((a,b)=>_cdOf(b)-_cdOf(a)).forEach(t=>{
+    const d=new Date(_cdOf(t)).toLocaleDateString();
     if (!groups[d]) groups[d]=[];
     groups[d].push(t);
   });
@@ -9590,11 +9591,14 @@ function archiveAll(silent=false, isAuto=false) {
   // Manual archiving stays admin-only. The automated EOD job is a system action
   // and must run no matter which user happens to have the app open at the time.
   if (!isAuto && !isAdmin()) return;
-  const count=state.tickets.length;
-  state.tickets.forEach(t=>{ t.archivedAt=Date.now(); t.archivedBy=isAuto?'EOD Auto':(state.currentUser?state.currentUser.name:'EOD Auto'); state.archivedTickets.push(t); });
-  state.tickets=[];
-  state.activeTicket=null;
-  const cutoff=Date.now()-(90*24*60*60*1000);
+  // Only PRINTED tickets archive; CREATED (un-printed) tickets stay on the main screen.
+  const _toArchive=state.tickets.filter(function(t){ return (typeof ticketStageInfo==='function') ? ticketStageInfo(t).label==='PRINTED' : true; });
+  const _keep=state.tickets.filter(function(t){ return (typeof ticketStageInfo==='function') ? ticketStageInfo(t).label!=='PRINTED' : false; });
+  const count=_toArchive.length;
+  _toArchive.forEach(t=>{ t.archivedAt=Date.now(); t.archivedBy=isAuto?'EOD Auto':(state.currentUser?state.currentUser.name:'EOD Auto'); state.archivedTickets.push(t); });
+  state.tickets=_keep;
+  if (state.activeTicket && !_keep.some(function(t){return t.id===state.activeTicket;})) state.activeTicket=null;
+  const cutoff=Date.now()-(30*24*60*60*1000);
   state.archivedTickets=state.archivedTickets.filter(t=>t.archivedAt>cutoff);
   saveTickets(); saveArchive(); updateTicketList();
   // Don't yank a user off their current screen during an automatic archive.
