@@ -466,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 50;
+const APP_BUILD = 53;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1429,6 +1429,7 @@ function showDashboard() {
               <div>
                 <div class="ticket-id">${t.id}${t.refNum?' · '+t.refNum:''}</div>
                 <div style="font-size:12px;color:var(--text);margin-top:3px">${t.customer||'No customer'} ${t.bu?'· '+t.bu:''}</div>
+                ${t.wmsOrder?`<div style="font-size:11px;color:var(--text2);margin-top:2px">WMS Order #: <strong style="color:var(--text)">${t.wmsOrder}</strong></div>`:''}
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.destination||''}${t.appt?' · '+t.appt:''} · ${t.clerk||''}</div>
               </div>
               <div style="text-align:right">
@@ -1482,6 +1483,7 @@ function showNewTicket() {
           <div class="form-group"><label>DATE</label><input type="date" id="nd-date" value="${today}"></div>
           <div class="form-group"><label>CLERK *</label><input type="text" id="nd-clerk" value="${state.currentUser?state.currentUser.name:''}" autofocus></div>
           <div class="form-group"><label>REFERENCE # *</label><input type="text" id="nd-ref" placeholder="e.g. CP-10715 or RELEASE 287"></div>
+          <div class="form-group"><label>WMS ORDER #</label><input type="text" id="nd-wms" placeholder="WMS order number"></div>
           <div class="form-group"><label>CUSTOMER</label>
             <select id="nd-customer" onchange="updateBUOptions()">
               <option value="">Select customer...</option>
@@ -1605,6 +1607,7 @@ function createTicket() {
     const ticket = {
       id,
       refNum,
+      wmsOrder: (document.getElementById('nd-wms')?document.getElementById('nd-wms').value.trim():''),
       clerk,
       customer: document.getElementById('nd-customer').value,
       bu: topBU,
@@ -1848,6 +1851,7 @@ function viewTicket(id) {
   h += '<div style="font-size:11px"><span style="color:var(--text2)">DESTINATION: </span><strong>'+(ticket.destination||'—')+'</strong></div>';
   h += '<div style="font-size:11px"><span style="color:var(--text2)">CLERK: </span><strong>'+(ticket.clerk||'—')+'</strong></div>';
   h += '<div style="font-size:11px"><span style="color:var(--text2)">PICKER: </span><strong>'+(ticket.picker||'—')+'</strong></div>';
+  h += '<div style="font-size:11px"><span style="color:var(--text2)">WMS ORDER #: </span><strong>'+(ticket.wmsOrder||'—')+'</strong></div>';
   h += '</div>';
 
   // ── SKU / QTY ENTRY ────────────────────────────────────────────────────────
@@ -2426,6 +2430,7 @@ function editTicket(id) {
   h += '<div class="form-group"><label>DATE</label><input type="date" id="ed-date" value="'+(t.ticketDate||'')+'"></div>';
   h += '<div class="form-group"><label>CLERK</label><input type="text" id="ed-clerk" value="'+(t.clerk||'')+'"></div>';
   h += '<div class="form-group"><label>REFERENCE #</label><input type="text" id="ed-ref" value="'+(t.refNum||'')+'"></div>';
+  h += '<div class="form-group"><label>WMS ORDER #</label><input type="text" id="ed-wms" value="'+(t.wmsOrder||'')+'"></div>';
   h += '<div class="form-group"><label>CUSTOMER</label><select id="ed-customer" onchange="editUpdateBU()">';
   h += '<option value="">Select customer...</option>';
   customers.forEach(c => { h += '<option value="'+c+'"'+(c===t.customer?' selected':'')+'>'+c+'</option>'; });
@@ -2465,6 +2470,7 @@ function saveEdit(id) {
   t.ticketDate  = document.getElementById('ed-date').value;
   t.clerk       = document.getElementById('ed-clerk').value.trim();
   t.refNum      = document.getElementById('ed-ref').value.trim();
+  t.wmsOrder    = (document.getElementById('ed-wms')?document.getElementById('ed-wms').value.trim():(t.wmsOrder||''));
   t.customer    = document.getElementById('ed-customer').value;
   t.bu          = document.getElementById('ed-bu').value;
   t.appt        = document.getElementById('ed-appt').value;
@@ -2573,6 +2579,7 @@ function viewArchivedTicket(id) {
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
         <div><span style="font-size:10px;color:var(--text2)">REF #: </span><strong>${ticket.refNum||'—'}</strong></div>
+        <div><span style="font-size:10px;color:var(--text2)">WMS ORDER #: </span><strong>${ticket.wmsOrder||'—'}</strong></div>
         <div><span style="font-size:10px;color:var(--text2)">CUSTOMER: </span><strong>${ticket.customer||'—'}</strong></div>
         <div><span style="font-size:10px;color:var(--text2)">DESTINATION: </span><strong>${ticket.destination||'—'}</strong></div>
         <div><span style="font-size:10px;color:var(--text2)">ROLLS: </span><strong>${totalRolls}</strong></div>
@@ -2736,6 +2743,15 @@ function exportPickTicketPDF(id, fromArchive=false) {
         doc.text('VPO:', vpoX+5, skuY);
         doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,82,118);
         doc.text(l.vpo, vpoX+17, skuY);
+      }
+      // WMS ORDER # (ticket-level) — printed right after ZMO/VPO
+      if (ticket.wmsOrder) {
+        const wmsX = l.vpo ? ((l.zmo?margin+18+165:margin+18+110)+52) : (l.zmo?margin+18+165 : (l.bu?margin+18+110:margin+18+58));
+        doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(80);
+        doc.text('\u00B7', wmsX, skuY);
+        doc.text('WMS Order #:', wmsX+5, skuY);
+        doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,82,118);
+        doc.text(String(ticket.wmsOrder), wmsX+30, skuY);
       }
       // QTY - right aligned, bold green, same size
       doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,122,74);
