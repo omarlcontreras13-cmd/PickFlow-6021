@@ -466,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 54;
+const APP_BUILD = 58;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1760,14 +1760,14 @@ function renderSkuLinesSections(ticket, id) {
         const _statCol = _isPick?'var(--warning)':r.status==='DAMAGED'?'var(--danger)':r.status==='GHOST'?'var(--text2)':r.status==='CYCLE COUNT'?'var(--accent)':'var(--accent2)';
         html += '<td style="font-weight:bold;color:'+_statCol+'">'+_statDisp+'</td>';
         html += '<td style="font-size:11px">' + (r.bol||'—') + '</td>';
-        html += '<td style="text-align:center">1</td>';
+        html += '<td style="text-align:center">' + (r.pcs||1) + '</td>';
         html += '<td style="text-align:right">' + (r.grossWt||0).toLocaleString() + '</td>';
         html += '<td style="text-align:right">' + (r.tons||0).toFixed(1) + '</td>';
         html += '<td><button onclick="removeRollFromLine(\'' + id + '\',' + li + ',\'' + r.skidId + '\')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:12px;padding:2px 6px">✕</button></td>';
         html += '</tr>';
       });
       html += '<tr class="totals-row"><td colspan="7" style="text-align:right">SUBTOTAL</td>';
-      html += '<td style="text-align:center">' + lineRolls.length + '</td>';
+      html += '<td style="text-align:center">' + lineRolls.reduce(function(s,r){return s+(r.pcs||1);},0) + '</td>';
       html += '<td style="text-align:right">' + lineWt.toLocaleString() + '</td>';
       html += '<td style="text-align:right">' + lineTons.toFixed(1) + '</td>';
       html += '<td></td></tr>';
@@ -2595,11 +2595,11 @@ function viewArchivedTicket(id) {
               <td>${(r.dirExpDate||r.expDate)?new Date(r.dirExpDate||r.expDate).toLocaleDateString():'—'}</td>
               <td>${r.lot||'—'}</td><td>${r.skidId||'—'}</td>
               <td>${r.productId||'—'}</td><td style="font-weight:bold">${r.location||'—'}</td>
-              <td>${r.bol||'—'}</td><td style="text-align:center">1</td><td style="text-align:center">1</td>
+              <td>${r.bol||'—'}</td><td style="text-align:center">1</td><td style="text-align:center">${r.pcs||1}</td>
               <td style="text-align:right">${(r.grossWt||0).toLocaleString()}</td>
               <td style="text-align:right">${(r.tons||0).toFixed(1)}</td>
             </tr>`).join('')}
-            <tr class="totals-row"><td colspan="7" style="text-align:right">GRAND TOTAL</td><td style="text-align:center">${totalRolls}</td><td style="text-align:center">${totalRolls}</td><td style="text-align:right">${totalWt.toLocaleString()}</td><td style="text-align:right">${totalTons.toFixed(1)}</td></tr>
+            <tr class="totals-row"><td colspan="7" style="text-align:right">GRAND TOTAL</td><td style="text-align:center">${totalRolls}</td><td style="text-align:center">${selected.reduce(function(s,r){return s+(r.pcs||1);},0)}</td><td style="text-align:right">${totalWt.toLocaleString()}</td><td style="text-align:right">${totalTons.toFixed(1)}</td></tr>
           </tbody>
         </table>
       </div>
@@ -2804,13 +2804,13 @@ function exportPickTicketPDF(id, fromArchive=false) {
       (r.dirExpDate||r.expDate)?new Date(r.dirExpDate||r.expDate).toLocaleDateString():'—',
       '', // PICKED — checkbox drawn in didDrawCell
       r.lot||'—', r.skidId||'—', r.productId||'—', r.prod2||'—', r.location||'—', ((r.pcsPending||0)>0?'PICKED':(r.status||'AVAILABLE')),
-      '1',
+      String(r.pcs||1),
       (r.grossWt||0).toLocaleString(), (r.tons||0).toFixed(1)
     ]);
 
     // Subtotal row per SKU
     if (skuLines.length>1) {
-      tableRows.push(['','','','','','','','Subtotal',String(lineRolls.length),String(lineRolls.length),lineWt.toLocaleString(),lineTons.toFixed(1)]);
+      tableRows.push(['','','','','','','','Subtotal',String(lineRolls.length),String(lineRolls.reduce(function(s,r){return s+(r.pcs||1);},0)),lineWt.toLocaleString(),lineTons.toFixed(1)]);
     }
 
     // ── Per-SKU label above each table ──────────────────────────────────────
@@ -9568,7 +9568,11 @@ function showDataPreview() {
         <div class="stat-card"><div class="stat-label">Locations</div><div class="stat-value">${[...new Set(state.inventory.map(r=>r.location))].length}</div></div>
         <div class="stat-card"><div class="stat-label">DIR Records</div><div class="stat-value orange">${Object.keys(state.dirData).length}</div></div>
       </div>
-      <div id="ptabs" style="display:flex;gap:8px;margin-bottom:16px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
+        <div id="ptabs" style="display:flex;gap:8px"></div>
+        <button class="btn btn-sm" onclick="exportEodReport('NOR')" style="white-space:nowrap;background:var(--accent2);color:#fff">&#128230; NOR EOD</button>
+        <button class="btn btn-sm" onclick="exportEodReport('COV')" style="white-space:nowrap;background:var(--accent2);color:#fff">&#128230; COV EOD</button>
+      </div>
       <div id="pcontent"></div>
     </div>`;
   window.switchTab('inventory');
@@ -9907,6 +9911,46 @@ function exportInvToExcel() {
   XLSX.utils.book_append_sheet(wb, ws, 'Raw Inventory');
   XLSX.writeFile(wb, 'PickFlow_6021_Inventory_'+new Date().toISOString().slice(0,10)+'.xlsx');
   showAlert('✓ Inventory exported to Excel.','success');
+}
+
+// ─── NOR / COV END-OF-DAY REPORT ──────────────────────────────────────────────
+// Exports a receiving-location EOD summary (NOR = Norcross XDK, COV = Covington XDK) from the
+// loaded inventory. Picked inventory (pcsPending > 0) is excluded. Output is the summary
+// format only — Customer / BU header, then SKU -> Count of Lot #, a separator row, then
+// Grand Total. All cell values are upper-case. Reuses the existing SheetJS export mechanism.
+function exportEodReport(code){
+  code=(code||'').toUpperCase();
+  const wantName = code==='NOR' ? 'NORCROSS XDK' : (code==='COV' ? 'COVINGTON XDK' : code);
+  const wantWord = code==='NOR' ? 'NORCROSS' : (code==='COV' ? 'COVINGTON' : '');
+  // Match rows for this receiving location (raw BU code, resolved display name, or location word),
+  // excluding picked inventory.
+  const rows=(state.inventory||[]).filter(function(r){
+    const rb=(r.buRaw||'').toString().toUpperCase();
+    const disp=(resolveBU(r.buRaw||r.bu)||r.bu||'').toString().toUpperCase();
+    const isTarget = rb===code || disp===wantName || (wantWord && disp.indexOf(wantWord)>=0);
+    if(!isTarget) return false;
+    if((r.pcsPending||0) > 0) return false;   // EXCLUDE picked inventory
+    return true;
+  });
+  if(!rows.length){ showAlert('No non-picked '+wantName+' inventory to export.','warning'); return; }
+
+  // Summary pivot: SKU -> Count of Lot # (rolls per SKU). Group case-insensitively so a SKU
+  // that differs only by letter case is not split into two rows.
+  const skuCount={};
+  rows.forEach(function(r){ const k=(r.sku||'(BLANK)').toString().toUpperCase(); skuCount[k]=(skuCount[k]||0)+1; });
+  const custs=[...new Set(rows.map(function(r){return (r.customer||'').toString().toUpperCase();}).filter(Boolean))];
+
+  const sum=[['CUSTOMER', custs.join(', ')],['BU', wantName],['',''],['SKU','COUNT OF LOT #']];
+  Object.keys(skuCount).sort().forEach(function(k){ sum.push([k, skuCount[k]]); });
+  sum.push(['','']);                          // blank separator line above Grand Total
+  sum.push(['GRAND TOTAL', rows.length]);
+
+  const ws=XLSX.utils.aoa_to_sheet(sum);
+  ws['!cols']=[{wch:22},{wch:16}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  XLSX.writeFile(wb, 'PickFlow_6021_'+code+'_EOD_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  showAlert('✓ '+wantName+' EOD exported — '+rows.length+' rolls (picked excluded).','success');
 }
 
 function exportDirToExcel() {
