@@ -466,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 53;
+const APP_BUILD = 54;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -987,11 +987,11 @@ function importDIR(wb) {
   const matI      = col('Material');
   const matDescI  = col('Material Description');
   const docTypeI  = col('Doc Type');
-  const soDocI    = col('SO Document');
+  const soDocI    = ['SO Document','SO Doc.','SO Doc'].reduce((f,n)=>f>=0?f:col(n), -1);
   const soItemI   = col('SO Item');
-  const custPoI   = col('Customer PO Number');
-  const mfgDateI  = col('Date of Manufacture');
-  const grossWtI  = col('Gross Weight');
+  const custPoI   = ['Customer PO Number','Cust PO','Customer PO'].reduce((f,n)=>f>=0?f:col(n), -1);
+  const mfgDateI  = ['Date of Manufacture','Manuf. Dte','Created On'].reduce((f,n)=>f>=0?f:col(n), -1);
+  const grossWtI  = ['Gross Weight','Grs Wt','Gross Wt'].reduce((f,n)=>f>=0?f:col(n), -1);
   const nameI     = col('Name');
   const tonsI     = col('Tons');
   const widthI    = col('Width');
