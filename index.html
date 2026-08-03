@@ -466,7 +466,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 58;
+const APP_BUILD = 59;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -6727,12 +6727,21 @@ function exportDomtarLoad(idx){
   ];
   const _now = new Date();
   const fileDateSerial = Math.round(Date.UTC(_now.getFullYear(), _now.getMonth(), _now.getDate())/86400000) + 25569;
-  load.rows.forEach(function(r){
+  // Collapse each 2-roll pack (parent + next child) into ONE parent line: sum Weight, LF and
+  // Pcs (Pcs=2), keep the parent's Width (both rolls share it). An odd trailing roll with no
+  // child exports on its own (Pcs 1). Only the exported file collapses; the grid is unchanged.
+  const _dNum = function(v){ return (v===''||v==null) ? 0 : (parseFloat(v)||0); };
+  for (let i=0; i<load.rows.length; ){
+    const r = load.rows[i];
+    const child = (r.parent && load.rows[i+1] && !load.rows[i+1].parent) ? load.rows[i+1] : null;
     const sku = (load.skuByOrder && load.skuByOrder[r.orderItem]) || r.sku || '';
     const pid = _domtarProdId(sku) || r.productId || '';
-    const wt = (r.adwt===''||r.adwt==null) ? 0 : (parseFloat(r.adwt)||0);
-    aoa.push([ sku, pid, r.lot, r.orderItem, r.po, wt, wt, 'ROLL', (parseFloat(r.lf)||0), (r.pcs||1), (parseFloat(r.widthIn)||0), fileDateSerial ]);
-  });
+    const wt = _dNum(r.adwt) + (child ? _dNum(child.adwt) : 0);
+    const lf = _dNum(r.lf)  + (child ? _dNum(child.lf)  : 0);
+    const pcs = child ? 2 : (r.pcs||1);
+    aoa.push([ sku, pid, r.lot, r.orderItem, r.po, wt, wt, 'ROLL', lf, pcs, (parseFloat(r.widthIn)||0), fileDateSerial ]);
+    i += child ? 2 : 1;
+  }
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   for (let ri = 8; ri < aoa.length; ri++){ const ref = XLSX.utils.encode_cell({ r:ri, c:11 }); if (ws[ref] && ws[ref].v){ ws[ref].t='n'; ws[ref].z='m/d/yy'; } }
