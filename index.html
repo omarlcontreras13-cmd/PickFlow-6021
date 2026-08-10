@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 61;
+const APP_BUILD = 62;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1389,6 +1389,22 @@ function ticketStageInfo(t){
   if (printed) return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
   return {label:'CREATED', bg:'#facc15', border:'#eab308', icon:'✎'};
 }
+// ── HOT / PRIORITY FLAG (additive) — mark a pick ticket priority; shows in the summary view ──
+function ticketHotBadge(t, small){
+  if (!t || !t.hot) return '';
+  const pad = small ? '0 6px' : '1px 8px', fs = small ? '9px' : '10px';
+  return '<span style="display:inline-block;background:#dc2626;border:1px solid #b91c1c;color:#fff;border-radius:10px;padding:'+pad+';font-size:'+fs+';font-weight:bold;letter-spacing:.5px;white-space:nowrap">🔥 HOT</span>';
+}
+function toggleHotTicket(id){
+  const t = (state.tickets||[]).find(function(x){return x.id===id;}) || (state.archivedTickets||[]).find(function(x){return x.id===id;});
+  if(!t) return;
+  t.hot = !t.hot;
+  try{ saveTickets(); }catch(e){}
+  updateTicketList();
+  if (state.currentView==='dashboard') showDashboard();
+  else if (state.activeTicket===id) viewTicket(id);
+  showAlert(t.hot ? '🔥 '+id+' flagged HOT — priority.' : id+' priority flag removed.','success');
+}
 function ticketStageBadge(t, small){
   const info = ticketStageInfo(t);
   const pad = small ? '0 6px' : '1px 8px', fs = small ? '9px' : '10px';
@@ -1434,7 +1450,7 @@ function showDashboard() {
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.destination||''}${t.appt?' · '+t.appt:''} · ${t.clerk||''}</div>
               </div>
               <div style="text-align:right">
-                <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}${(isAdmin() && ticketStageInfo(t).label==='PRINTED') ? `<span onclick="event.stopPropagation();unprintTicket('${t.id}')" title="Reverse print — undo the print flag (printed in error)" style="cursor:pointer;color:var(--warning);font-weight:bold;font-size:14px;line-height:1;padding:0 3px;user-select:none">↩</span>` : ''}<div style="font-size:12px;color:var(--accent2);font-weight:bold">${ticketQtyDisplay(t)} ${unitNoun(t.customer)}</div></div>
+                <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketHotBadge(t)}${ticketStageBadge(t)}${(isAdmin() && ticketStageInfo(t).label==='PRINTED') ? `<span onclick="event.stopPropagation();unprintTicket('${t.id}')" title="Reverse print — undo the print flag (printed in error)" style="cursor:pointer;color:var(--warning);font-weight:bold;font-size:14px;line-height:1;padding:0 3px;user-select:none">↩</span>` : ''}<div style="font-size:12px;color:var(--accent2);font-weight:bold">${ticketQtyDisplay(t)} ${unitNoun(t.customer)}</div></div>
                 <div style="font-size:11px;color:var(--text2)">${new Date(t.created).toLocaleDateString()}</div>
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">${ticketStampLine(t)}</div>
               </div>
@@ -1696,7 +1712,7 @@ function updateTicketList() {
     listHtml += '<div class="ticket-id">' + t.id + '</div>';
     listHtml += '<div style="font-size:11px;color:var(--text);margin-top:2px">' + (t.refNum||'—') + ' · ' + (t.customer||'—') + '</div>';
     listHtml += '<div style="font-size:10px;color:var(--text2)">' + ticketQtyDisplay(t) + ' ' + unitNoun(t.customer) + ' · ' + (t.clerk||'') + '</div>';
-    listHtml += '<div style="margin-top:3px">' + ticketStageBadge(t, true) + '</div>';
+    listHtml += '<div style="margin-top:3px">' + ticketHotBadge(t, true) + ticketStageBadge(t, true) + '</div>';
     listHtml += '</div>';
   });
   list.innerHTML = listHtml;
@@ -1809,7 +1825,7 @@ function viewTicket(id) {
   // ── TICKET HEADER ──────────────────────────────────────────────────────────
   h += '<div class="ticket-header" style="padding-bottom:0">';
   h += '<div class="ticket-header-body">';
-  h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">'+ticketStageBadge(ticket)+ticketStageHistory(ticket)+'</div>';
+  h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">'+ticketHotBadge(ticket)+ticketStageBadge(ticket)+ticketStageHistory(ticket)+'</div>';
 
   // Top 3 boxes: Ref#, QTY Requested, Destination
   h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px">';
@@ -1959,6 +1975,7 @@ function viewTicket(id) {
   h += '<button class="btn btn-sm" style="font-weight:bold" data-tid="'+id+'" onclick="editTicket(this.dataset.tid)">✎ Edit</button>';
   h += '<button class="btn btn-sm" style="font-weight:bold" data-tid="'+id+'" onclick="exportPickTicketPDF(this.dataset.tid)">📄 Pick Ticket</button>';
   h += '<button class="btn btn-sm" style="font-weight:bold" data-tid="'+id+'" onclick="exportLoadTag(this.dataset.tid)">🏷 Load Tag</button>';
+  h += '<button class="btn btn-sm" style="font-weight:bold;'+(ticket.hot?'background:#dc2626;color:#fff;border-color:#dc2626':'border-color:#dc2626;color:#dc2626')+'" data-tid="'+id+'" onclick="toggleHotTicket(this.dataset.tid)">🔥 '+(ticket.hot?'HOT ✓':'Mark HOT')+'</button>';
   h += '<button class="btn btn-sm" style="font-weight:bold" onclick="printCCCurrentSheet()">🖨 Print</button>';
   h += '<div style="flex:1"></div>';
   if (isAdmin()) h += '<button class="btn btn-sm" style="font-weight:bold;border-color:var(--warning);color:var(--warning)" data-tid="'+id+'" onclick="archiveTicket(this.dataset.tid)">📁 Archive</button>';
