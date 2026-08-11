@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 62;
+const APP_BUILD = 63;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -9977,6 +9977,24 @@ function exportEodReport(code){
   ws['!cols']=[{wch:22},{wch:16}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  // COV EOD only: add a 2nd tab with the full roll detail (same 27-column layout as the example).
+  if (code==='COV'){
+    const dh=['Customer','PO #','SKU','Product ID','Product ID2','BU','Pcs','UOM','Pcs Pending','Dmg',
+      'Inventory Status','Lot #','Expiration Date','Zone','Location','SkidID',"Date Rec'd",'Receiver',
+      'Invoice #','Truck #','Unique Weight','Gross Weight','Full Weight Lbs','Full Gross Weight Lbs','Linear Ft','Width','Inbound BOL'];
+    const det=[dh];
+    rows.forEach(function(r){
+      const expD=r.dirExpDate||r.expDate; const wt=r.grossWt||0; const pcs=r.pcs||1;
+      det.push([ r.customer||'', r.po||'', r.sku||'', r.productId||'', r.prod2||'',
+        (r.buRaw||'').toString().toUpperCase(), pcs, '', r.pcsPending||0, r.dmg||0, r.status||'', r.lot||'',
+        expD ? new Date(expD).toLocaleDateString() : '', '', r.location||'', r.skidId||'',
+        r.dateRecd ? new Date(r.dateRecd).toLocaleDateString() : '', '', r.invoice||'', '',
+        wt, wt, wt*pcs, wt*pcs, '', '', r.bol||'' ]);
+    });
+    const wsD=XLSX.utils.aoa_to_sheet(det);
+    wsD['!cols']=dh.map(function(){return {wch:16};});
+    XLSX.utils.book_append_sheet(wb, wsD, 'Detail');
+  }
   XLSX.writeFile(wb, 'PickFlow_6021_'+code+'_EOD_'+new Date().toISOString().slice(0,10)+'.xlsx');
   showAlert('✓ '+wantName+' EOD exported — '+rows.length+' rolls (picked excluded).','success');
 }
