@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 63;
+const APP_BUILD = 64;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -2701,7 +2701,18 @@ function exportPickTicketPDF(id, fromArchive=false) {
   doc.rect(margin, nY, fullW, 12);
   doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(120);
   doc.text('NOTES', margin+2, nY+4);
-  if (ticket.notes) {
+  if (ticket.hot) {
+    // HOT flag → big bold red at the start of the NOTES box; notes (if any) follow it.
+    let _nx = margin + 22;
+    doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor(200,0,0);
+    doc.text('HOT', _nx, nY+9);
+    _nx += doc.getTextWidth('HOT') + 5;
+    if (ticket.notes) {
+      doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(20);
+      doc.text(String(ticket.notes).substring(0,110), _nx, nY+9);
+    }
+    doc.setTextColor(20);
+  } else if (ticket.notes) {
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(20);
     doc.text(ticket.notes.substring(0,120), margin + fullW/2, nY+9, {align:'center'});
   }
