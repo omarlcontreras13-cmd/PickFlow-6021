@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 64;
+const APP_BUILD = 65;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -4819,6 +4819,10 @@ function renderCatalystLoads() {
 // other EDI segment. Reuses the same parse + bundling + OCR helpers.
 // ===========================================================================
 let _catMergeGroups = [];
+// Debounced shared-DB save for merge-route edits (railcar / outbound / shipment /
+// consignee are typed char-by-char via oninput; coalesce into one write).
+let _catMergeSaveT = null;
+function _catMergeSaveSoon(){ try { clearTimeout(_catMergeSaveT); } catch(e){} _catMergeSaveT = setTimeout(function(){ try { _ediSave(); } catch(e){} }, 400); }
 
 function _catNormBol(bol){ const s=String(bol||''); const p=s.split('-'); const d=(p[0]||'').replace(/\D/g,''); const suf=(p[1]||'').replace(/[^0-9A-Za-z]/g,''); return d ? (d+'-'+suf) : s.replace(/\s+/g,'').toUpperCase(); }
 function _catSylBase(bol){ const p=String(bol||'').split('-')[0]; const d=p.replace(/\D/g,''); return d ? ('SYL'+d) : p.trim(); }
@@ -5031,20 +5035,23 @@ async function _catMergeRoute(files){
   if (pdfs.length) msg += ' \u00b7 OCR filled '+ocrFilled+'/'+pdfs.length+' Outbound #'+(pdfMiss?(' \u00b7 '+pdfMiss+' need manual entry'):'');
   msg += '. Verify Outbound # & Rail Car, then Export.';
   showAlert(msg, (ocrFilled||totalDel)?'success':'warning');
+  _ediSave();
   renderCatMerge();
 }
 
 function _catMergeSet(gi, di, field, val){
   const grp=_catMergeGroups[gi]; if(!grp) return;
-  if (field==='railcar'){ grp.railcar=val.trim(); return; }
+  if (field==='railcar'){ grp.railcar=val.trim(); _catMergeSaveSoon(); return; }
   const d=grp.deliveries[di]; if(!d) return;
   d[field]=val.trim();
+  _catMergeSaveSoon();
 }
 
 function _catMergeToggleUnit(gi, di){
   const grp=_catMergeGroups[gi]; if(!grp) return;
   const d=grp.deliveries[di]; if(!d) return;
   d.isKg = (d.isKg===false);
+  _ediSave();
   renderCatMerge();
 }
 
@@ -5052,10 +5059,11 @@ function _catMergeDelDelivery(gi, di){
   const grp=_catMergeGroups[gi]; if(!grp) return;
   grp.deliveries.splice(di,1);
   if(!grp.deliveries.length) _catMergeGroups.splice(gi,1);
+  _ediSave();
   renderCatMerge();
 }
 
-function _catMergeClear(){ if(!_catMergeGroups.length) return; if(!confirm('Clear all Catalyst merge groups?')) return; _catMergeGroups=[]; renderCatMerge(); }
+function _catMergeClear(){ if(!_catMergeGroups.length) return; if(!confirm('Clear all Catalyst merge groups?')) return; _catMergeGroups=[]; _ediSave(); renderCatMerge(); }
 
 function renderCatMerge(){
   const c=document.getElementById('cat-merge-list'); if(!c) return;
@@ -5073,7 +5081,7 @@ function renderCatMerge(){
     h+='<span style="font-size:10px;color:var(--text2);margin-left:8px">Receiver <b style="color:var(--text)">'+receiver+'</b> \u00b7 '+grp.deliveries.length+' deliveries \u00b7 '+totalLines+' lines \u00b7 '+totalRolls+' rolls'+(anyBundle?' \u00b7 has bundles':'')+'</span></div>';
     h+='<div style="display:flex;align-items:center;gap:6px">';
     h+='<label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2)">RAIL CAR #</label>';
-    h+='<input value="'+(grp.railcar||'')+'" oninput="_catMergeSet('+gi+',0,\'railcar\',this.value)" placeholder="e.g. SRY9448" style="'+inp+';width:110px;text-align:center'+((grp.railcar||'').trim()?'':';border-color:var(--danger)')+'">';
+    h+='<input id="catm-railcar-'+gi+'" value="'+(grp.railcar||'')+'" oninput="_catMergeSet('+gi+',0,\'railcar\',this.value)" placeholder="e.g. SRY9448" style="'+inp+';width:110px;text-align:center'+((grp.railcar||'').trim()?'':';border-color:var(--danger)')+'">';
     h+='<button onclick="exportCatMergeGroup('+gi+')" style="background:#0ea5e9;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:1px">\u2b07 EXPORT MERGED</button>';
     h+='<button onclick="exportCatMergeByLoad('+gi+')" title="Export each delivery as its own separate import file" style="background:var(--surface);color:#0ea5e9;border:1px solid #0ea5e9;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:1px">\u2b07 BY LOAD</button>';
     h+='</div></div>';
@@ -5089,15 +5097,15 @@ function renderCatMerge(){
       h+='<td style="padding:3px 6px">'+(d.delivery||'')+'</td>';
       h+='<td style="padding:3px 6px">'+(d.custOrder||'')+'</td>';
       h+='<td style="padding:3px 6px">'+(d.orderNo||'')+'</td>';
-      h+='<td style="padding:3px 6px"><input value="'+d.shipment+'" oninput="_catMergeSet('+gi+','+di+',\'shipment\',this.value)" onchange="renderCatMerge()" style="'+inp+';width:78px"></td>';
-      h+='<td style="padding:3px 6px"><input value="'+(d.outbound||'')+'" oninput="_catMergeSet('+gi+','+di+',\'outbound\',this.value)" onchange="renderCatMerge()" placeholder="needed" style="'+inp+';width:90px'+(noOb?';border-color:var(--danger)':'')+'"></td>';
+      h+='<td style="padding:3px 6px"><input id="catm-shipment-'+gi+'-'+di+'" value="'+d.shipment+'" oninput="_catMergeSet('+gi+','+di+',\'shipment\',this.value)" onchange="renderCatMerge()" style="'+inp+';width:78px"></td>';
+      h+='<td style="padding:3px 6px"><input id="catm-outbound-'+gi+'-'+di+'" value="'+(d.outbound||'')+'" oninput="_catMergeSet('+gi+','+di+',\'outbound\',this.value)" onchange="renderCatMerge()" placeholder="needed" style="'+inp+';width:90px'+(noOb?';border-color:var(--danger)':'')+'"></td>';
       h+='<td style="padding:3px 6px;text-align:right">'+d.lines.length+'</td>';
       h+='<td style="padding:3px 6px;text-align:right">'+d.physRolls+'</td>';
       h+='<td style="padding:3px 6px;color:var(--text2);font-size:10px">'+p1+' \u2192 '+(p2||'(needs Outbound)')+'</td>';
       h+='<td style="padding:3px 6px;text-align:center">'+(d.isKg===false?'<button onclick="_catMergeToggleUnit('+gi+','+di+')" title="Click to switch to REG (KG)" style="background:#f59e0b;color:#fff;border:none;border-radius:4px;padding:2px 9px;cursor:pointer;font-size:10px;font-weight:700;letter-spacing:1px">XDK</button>':'<button onclick="_catMergeToggleUnit('+gi+','+di+')" title="Click to switch to XDK (LB)" style="background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:2px 9px;cursor:pointer;font-size:10px;font-weight:700;letter-spacing:1px">REG</button>')+'</td>';
       h+='<td style="padding:3px 6px;white-space:nowrap"><button onclick="exportCatMergeLoad('+gi+','+di+')" title="Export just this load as its own file" style="background:none;border:1px solid #0ea5e9;color:#0ea5e9;border-radius:4px;padding:1px 6px;cursor:pointer;font-size:10px;margin-right:4px">\u2b07</button><button onclick="_catMergeDelDelivery('+gi+','+di+')" style="background:none;border:1px solid var(--danger);color:var(--danger);border-radius:4px;padding:1px 6px;cursor:pointer;font-size:10px">\u2715</button></td>';
       h+='</tr>';
-      if(d.isKg===false){ h+='<tr><td colspan="11" style="padding:0 6px 8px 6px"><span style="font-size:9px;letter-spacing:1px;font-weight:700;color:#f59e0b">XDK SHIP-TO</span> <input value="'+String(d.consignee||'').replace(/"/g,'&quot;')+'" oninput="_catMergeSet('+gi+','+di+',\'consignee\',this.value)" placeholder="Final consignee / destination \u2014 name, address, city ST zip (used in the XDK email)" style="'+inp+';width:78%;border-color:#f59e0b"></td></tr>'; }
+      if(d.isKg===false){ h+='<tr><td colspan="11" style="padding:0 6px 8px 6px"><span style="font-size:9px;letter-spacing:1px;font-weight:700;color:#f59e0b">XDK SHIP-TO</span> <input id="catm-consignee-'+gi+'-'+di+'" value="'+String(d.consignee||'').replace(/"/g,'&quot;')+'" oninput="_catMergeSet('+gi+','+di+',\'consignee\',this.value)" placeholder="Final consignee / destination \u2014 name, address, city ST zip (used in the XDK email)" style="'+inp+';width:78%;border-color:#f59e0b"></td></tr>'; }
     });
     h+='</tbody></table></div>';
     h+='<div style="font-size:10px;color:var(--text2);margin-top:6px">Export header \u2192 Receiver '+receiver+' \u00b7 Truck '+(grp.railcar||'(set rail car)')+' \u00b7 Total Rolls '+totalRolls+' \u00b7 each roll keeps its own delivery\'s Prod ID 1/2/PO.</div>';
@@ -10062,6 +10070,7 @@ function _ediSnapshot(){
     hbh: _ediPack(_ediHBHLoads),
     ipg: _ediPack(_ipgLoads),
     cat: _ediPack(_catLoads),
+    catMerge: _ediPack(_catMergeGroups),
     tr:  _ediPackTR(window._ediTRLoads),
     upm: _ediPack(window._upmLoads),
     domtar: _ediPack(window._domtarLoads),
@@ -10105,6 +10114,7 @@ function _ediRestore(){
       if (Array.isArray(d.hbh)) _ediHBHLoads = d.hbh;
       if (Array.isArray(d.ipg)) _ipgLoads = d.ipg;
       if (Array.isArray(d.cat)) _catLoads = d.cat;
+      if (Array.isArray(d.catMerge)) _catMergeGroups = d.catMerge;
       if (d.tr && typeof d.tr === 'object') window._ediTRLoads = d.tr;
       if (Array.isArray(d.upm)) window._upmLoads = d.upm;
       if (Array.isArray(d.domtar)) window._domtarLoads = d.domtar;
@@ -10112,6 +10122,7 @@ function _ediRestore(){
       _ediHBHLoads = _ediUnpack(d.hbh);
       _ipgLoads    = _ediUnpack(d.ipg);
       _catLoads    = _ediUnpack(d.cat);
+      _catMergeGroups = _ediUnpack(d.catMerge);
       window._ediTRLoads = _ediUnpackTR(d.tr);
       window._upmLoads   = _ediUnpack(d.upm);
       window._domtarLoads = _ediUnpack(d.domtar);
@@ -10125,7 +10136,7 @@ function _ediRestore(){
 function _ediInputFocused(){
   const a = document.activeElement;
   if (!a || !a.id) return false;
-  return /^(upm-|cat-|ipg-|hbh-|tr-|edi-|sci-|domtar-)/.test(a.id);
+  return /^(upm-|catm?-|ipg-|hbh-|tr-|edi-|sci-|domtar-)/.test(a.id);
 }
 function _ediListen(){
   if (!db) return;
@@ -10133,18 +10144,19 @@ function _ediListen(){
     const d = snap.val() || {};
     // One-time migration: loads created before shared sync existed still live in
     // this browser's localStorage. Push them up once, then never resurrect again.
-    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.tr && !d.upm && !d.domtar;
+    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.catMerge && !d.tr && !d.upm && !d.domtar;
     let migrated = false;
     try { migrated = !!localStorage.getItem(EDI_MIG_KEY); } catch(e){}
     if (remoteEmpty && !migrated) {
       try { localStorage.setItem(EDI_MIG_KEY, String(Date.now())); } catch(e){}
-      const localHas = (_ediHBHLoads||[]).length || (_ipgLoads||[]).length || (_catLoads||[]).length
+      const localHas = (_ediHBHLoads||[]).length || (_ipgLoads||[]).length || (_catLoads||[]).length || (_catMergeGroups||[]).length
         || Object.keys(window._ediTRLoads||{}).length || (window._upmLoads||[]).length || (window._domtarLoads||[]).length;
       if (localHas) { _ediLastWritten = {}; _ediSave(); return; }
     }
     _ediHBHLoads       = _ediUnpack(d.hbh);
     _ipgLoads          = _ediUnpack(d.ipg);
     _catLoads          = _ediUnpack(d.cat);
+    _catMergeGroups    = _ediUnpack(d.catMerge);
     window._ediTRLoads = _ediUnpackTR(d.tr);
     window._upmLoads   = _ediUnpack(d.upm);
     window._domtarLoads = _ediUnpack(d.domtar);
