@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 65;
+const APP_BUILD = 70;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -2635,6 +2635,52 @@ function restoreTicket(id) {
   showAlert('Ticket restored.','success');
 }
 
+// ─── CODE 39 BARCODE (self-contained, no external lib) ────────────────────────
+// Warehouse scanners read Code 39 universally; it's self-checking (no checksum
+// needed) and drawn here as filled bars directly into the jsPDF so the pick
+// ticket's WMS Order # can be scanned to start picking. Value is uppercased and
+// stripped to the Code 39 character set (0-9 A-Z - . space $ / + %).
+var _CODE39 = {
+  '0':'NNNWWNWNN','1':'WNNWNNNNW','2':'NNWWNNNNW','3':'WNWWNNNNN','4':'NNNWWNNNW',
+  '5':'WNNWWNNNN','6':'NNWWWNNNN','7':'NNNWNNWNW','8':'WNNWNNWNN','9':'NNWWNNWNN',
+  'A':'WNNNNWNNW','B':'NNWNNWNNW','C':'WNWNNWNNN','D':'NNNNWWNNW','E':'WNNNWWNNN',
+  'F':'NNWNWWNNN','G':'NNNNNWWNW','H':'WNNNNWWNN','I':'NNWNNWWNN','J':'NNNNWWWNN',
+  'K':'WNNNNNNWW','L':'NNWNNNNWW','M':'WNWNNNNWN','N':'NNNNWNNWW','O':'WNNNWNNWN',
+  'P':'NNWNWNNWN','Q':'NNNNNNWWW','R':'WNNNNNWWN','S':'NNWNNNWWN','T':'NNNNWNWWN',
+  'U':'WWNNNNNNW','V':'NWWNNNNNW','W':'WWWNNNNNN','X':'NWNNWNNNW','Y':'WWNNWNNNN',
+  'Z':'NWWNWNNNN','-':'NWNNNNWNW','.':'WWNNNNWNN',' ':'NWWNNNWNN','$':'NWNWNWNNN',
+  '/':'NWNWNNNWN','+':'NWNNNWNWN','%':'NNNWNWNWN','*':'NWNNWNWNN'
+};
+function _code39Clean(v){ return String(v==null?'':v).toUpperCase().replace(/[^0-9A-Z\-. $\/+%]/g,''); }
+function _code39Width(v, nw, ratio){
+  const data = '*' + _code39Clean(v) + '*';
+  const ww = nw*ratio; let w = 0;
+  for (let i=0;i<data.length;i++){
+    const p = _CODE39[data[i]]; if(!p) continue;
+    for (let j=0;j<9;j++){ w += (p[j]==='W')?ww:nw; }
+    w += nw; // narrow inter-character gap
+  }
+  return w;
+}
+function _drawCode39(doc, v, x, y, opts){
+  opts = opts||{};
+  const nw = opts.narrow || 0.4, ratio = opts.ratio || 2.6, h = opts.height || 10;
+  const ww = nw*ratio;
+  const data = '*' + _code39Clean(v) + '*';
+  doc.setFillColor(0,0,0);
+  let cx = x;
+  for (let i=0;i<data.length;i++){
+    const p = _CODE39[data[i]]; if(!p) continue;
+    for (let j=0;j<9;j++){
+      const w = (p[j]==='W')?ww:nw;
+      if (j%2===0) doc.rect(cx, y, w, h, 'F'); // even element = bar
+      cx += w;
+    }
+    cx += nw; // inter-character gap
+  }
+  return cx - x;
+}
+
 // ─── PDF EXPORTS ──────────────────────────────────────────────────────────────
 function exportPickTicketPDF(id, fromArchive=false) {
   const ticket = fromArchive ? state.archivedTickets.find(t=>t.id===id) : state.tickets.find(t=>t.id===id);
@@ -2680,8 +2726,34 @@ function exportPickTicketPDF(id, fromArchive=false) {
   headerBox(margin+bw*2+4, 'DELIVERY DATE', ticket.appt||'—', 12);
   headerBox(margin+bw*3+6, 'STAGED LOC', ticket.stagedLoc||'', 12);
 
+  // ── WMS ORDER # + BARCODE ROW ────────────────────────────────────────────
+  // Sits between the top header boxes and the Destination/Picker row. Number on
+  // the left, a large scannable Code 39 barcode of the WMS Order # on the right
+  // (sized up for long-range scanners). No human-readable text under the bars —
+  // the number already reads on this same line.
+  let _afterHeaderY = 30;                       // header boxes end at y=8+22=30
+  if (ticket.wmsOrder) {
+    const wY = 32, wmsBoxH = 19;
+    doc.setFillColor(240, 245, 255);
+    doc.setDrawColor(26,82,118); doc.setLineWidth(0.3);
+    doc.rect(margin, wY, pageW-margin*2, wmsBoxH, 'FD');
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(80);
+    doc.text('WMS ORDER #:', margin+4, wY+11);
+    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(26,82,118);
+    doc.text(String(ticket.wmsOrder), margin+38, wY+11.5);
+    const _bcClean = _code39Clean(ticket.wmsOrder);
+    if (_bcClean) {
+      const _bcH = 13, _bcNarrow = 0.58, _bcRatio = 2.7;   // larger X-dim + taller bars
+      const _bcW = _code39Width(_bcClean, _bcNarrow, _bcRatio);
+      const _bcX = pageW - margin - 6 - _bcW;
+      const _bcY = wY + (wmsBoxH - _bcH)/2;
+      _drawCode39(doc, _bcClean, _bcX, _bcY, {narrow:_bcNarrow, ratio:_bcRatio, height:_bcH});
+    }
+    _afterHeaderY = wY + wmsBoxH;
+  }
+
   // ── DESTINATION / PICKER ROW ─────────────────────────────────────────────
-  const dY = 34;
+  const dY = _afterHeaderY + 3;
   const halfW = (pageW-margin*2)/2 - 1;
   const destBoxX = margin;
   const pickerBoxX = margin + halfW + 2;
@@ -2773,15 +2845,7 @@ function exportPickTicketPDF(id, fromArchive=false) {
         doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,82,118);
         doc.text(l.vpo, vpoX+17, skuY);
       }
-      // WMS ORDER # (ticket-level) — printed right after ZMO/VPO
-      if (ticket.wmsOrder) {
-        const wmsX = l.vpo ? ((l.zmo?margin+18+165:margin+18+110)+52) : (l.zmo?margin+18+165 : (l.bu?margin+18+110:margin+18+58));
-        doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(80);
-        doc.text('\u00B7', wmsX, skuY);
-        doc.text('WMS Order #:', wmsX+5, skuY);
-        doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,82,118);
-        doc.text(String(ticket.wmsOrder), wmsX+30, skuY);
-      }
+      // WMS ORDER # moved to its own dedicated line + scannable barcode below.
       // QTY - right aligned, bold green, same size
       doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(26,122,74);
       doc.text(String(qty)+' '+unitNoun(ticket.customer), pageW-margin-4, skuY, {align:'right'});
@@ -3648,6 +3712,10 @@ function showEDIImportFile() {
   // Sort rolls within each shipment by batch (lot) ascending
   Object.values(sciGroups).forEach(g => g.lots.sort((a,b) => a.lot.localeCompare(b.lot)));
 
+  // Merge in packing-list-built loads (orders received early / missing from DIR).
+  // Keyed by their own _id so they never collide with a DIR shipment key.
+  (window._sciPackLoads||[]).forEach(function(g){ if (g && g._id && g.lots && g.lots.length) sciGroups[g._id] = g; });
+
   if (!window._ediSciDeleted) window._ediSciDeleted = new Set();
   const sciKeys = Object.keys(sciGroups).filter(k => !window._ediSciDeleted.has(k)).sort();
   window._ediSciGroups = sciGroups;
@@ -3763,12 +3831,19 @@ function showEDIImportFile() {
       <div style="display:flex;align-items:center;justify-content:space-between">
         <div>
           <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent2)">🔬 SCI GAMES LOADS</div>
-          <div style="font-size:10px;color:var(--text2);margin-top:2px">Built from loaded DIR data</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Built from loaded DIR data &nbsp;·&nbsp; or drop a Packing List for orders received early</div>
         </div>
         <div style="display:flex;gap:6px">
           <button class="btn btn-sm" onclick="ediCheckAll('sci',true);document.querySelectorAll('.edi-hbh-chk').forEach(c=>c.checked=false)" title="Select All">☑</button>
           <button class="btn btn-sm" onclick="ediCheckAll('sci',false)" title="Deselect All">☐</button>
         </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <div id="scipack-dropzone" ondragover="event.preventDefault();this.style.borderColor='var(--accent2)';this.style.background='rgba(46,160,67,0.06)'" ondragleave="this.style.borderColor='var(--border)';this.style.background=''" ondrop="event.preventDefault();this.style.borderColor='var(--border)';this.style.background='';handleSciPackDrop(event)" style="flex:1;min-width:240px;border:2px dashed var(--border);border-radius:8px;padding:10px 18px;text-align:center;cursor:pointer;font-size:12px;color:var(--text2);transition:.2s" onclick="document.getElementById('scipack-input').click()">
+          <span style="font-size:15px">📄</span><span style="font-weight:600;margin-left:6px">Drop a Packing List PDF to build a load</span><span style="font-size:10px;margin-left:8px;color:var(--text2)">for orders received early / missing from DIR — merges DIR details where available</span>
+          <input type="file" id="scipack-input" accept=".pdf" multiple style="display:none" onchange="_sciPackRoute(Array.from(this.files))">
+        </div>
+        ${(window._sciPackLoads||[]).length ? '<button class="btn btn-sm" onclick="clearSciPackLoads()" title="Remove all packing-list loads" style="white-space:nowrap">✕ Clear Packlist</button>' : ''}
       </div>`;
     if (!sciKeys.length) {
       h += `<div style="border:2px dashed var(--border);border-radius:6px;padding:24px;text-align:center;color:var(--text2);font-size:13px;font-weight:bold;letter-spacing:1px">
@@ -3783,6 +3858,7 @@ function showEDIImportFile() {
         if (_ediSciDeleted.has(key)) return;
         const g = sciGroups[key];
         if (!g||!g.lots||!g.lots.length) return;
+        const isPack = g.source==='packlist';
         const sciStamp = _stamps[key] || null;
         const sciStampStr = sciStamp ? 'Exported: '+new Date(sciStamp.exportedAt).toLocaleString() : '';
         const totLF = g.lots.reduce(function(s,l){return s+(parseFloat(l.qtyMlf)||0);},0).toFixed(3);
@@ -3814,13 +3890,13 @@ function showEDIImportFile() {
           +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
           +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked onchange='+dq+'onEDISciChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
           +'<div style='+dq+'flex:1;min-width:0'+dq+'>'
-          +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+g.shipment+'</div>'
+          +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+g.shipment+(isPack?(' <span style='+dq+'font-size:8px;background:var(--accent2);color:#fff;padding:1px 5px;border-radius:3px;letter-spacing:.5px;vertical-align:middle'+dq+'>📄 PACKING LIST</span>'):'')+'</div>'
           +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>'+g.customerName+' &nbsp;·&nbsp; '+g.lots.length+' rolls'+(sciVeh?(' &nbsp;·&nbsp; <span style='+dq+'color:var(--accent);font-weight:bold'+dq+'>🚛 Trailer '+sciVeh+'</span>'):'')+'</div>'
           +(sciStampStr?'<div style='+dq+'font-size:9px;color:var(--accent2)'+dq+'>✓ '+sciStampStr+'</div>':'')
           +'</div>'
           +'<button onclick='+dq+'exportSingleSci(&quot;'+key+'&quot;)'+dq
           +' style='+dq+'background:var(--accent2);color:#fff;border:none;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:700;margin-right:4px'+dq+'>Export</button>'
-          +'<button onclick='+dq+'deleteEDISciLoad(&quot;'+key+'&quot;)'+dq
+          +'<button onclick='+dq+(isPack?('deleteSciPackLoad(&quot;'+g._id+'&quot;)'):('deleteEDISciLoad(&quot;'+key+'&quot;)'))+dq
           +' style='+dq+'background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px'+dq+' title='+dq+'Remove load'+dq+'>✕</button>'
           +'<button id='+dq+detailId+'-btn'+dq+' onclick='+dq+'toggleEDIDetail(&quot;'+detailId+'&quot;)'+dq
           +' style='+dq+'background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px'+dq+'>▼</button>'
@@ -5680,6 +5756,161 @@ function buildEDISheet_HBH(load) {
 }
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCI GAMES — PACKING LIST → LOAD BUILDER
+// When an order is inadvertently received it drops out of DIR "I" (in-transit)
+// status, so its rolls never surface in the DIR-built Sci Games list. Dropping the
+// mill "PACKLIST FOR DELIVERY" PDF here rebuilds the load straight from the packing
+// list, and merges in DIR details for any roll that IS still in DIR. These loads
+// persist and sync through the shared EDI store, exactly like the other segments,
+// and export through the same buildEDISheet_SciGames path.
+// ═══════════════════════════════════════════════════════════════════════════════
+window._sciPackLoads = window._sciPackLoads || [];
+
+function _sciPackNum(s){ const n = parseFloat(String(s==null?'':s).replace(/,/g,'')); return isNaN(n)?0:n; }
+// Strip leading zeros for the SAP-style PO / ZMO refs (0040138310 → 40138310,
+// 000010 → 10). Keeps a single 0 if the whole value is zeros.
+function _sciStripZeros(s){ s = String(s==null?'':s).trim(); const t = s.replace(/^0+/,''); return t===''? (s?'0':'') : t; }
+
+// Parse pdf.js text lines of a "PACKLIST FOR DELIVERY" into header + roll rows.
+function _sciPackParse(rawLines){
+  const L = (rawLines||[]).map(function(s){ return String(s).replace(/^\[P\d+\]\s*/,'').replace(/\s+/g,' ').trim(); }).filter(Boolean);
+  let shipment='', delivery='', vehicle='', shipTo='';
+  // Header data row sits right under the "Shipment # ... Vehicle ID" label row.
+  for (let i=0;i<L.length;i++){
+    if (/Shipment\s*#/i.test(L[i]) && /Vehicle\s*ID/i.test(L[i])){
+      for (let k=i+1;k<Math.min(i+4,L.length);k++){
+        const toks = L[k].split(' ');
+        const digs = toks.filter(function(t){ return /^\d{6,}$/.test(t); });
+        if (digs.length>=1 && !shipment){ shipment=digs[0]; if(digs[1]) delivery=digs[1]; }
+        const v = toks.find(function(t){ return /^[A-Z]{2,6}\d{3,}[A-Z0-9]*$/.test(t); });
+        if (v && !vehicle) vehicle=v;
+        if (shipment) break;
+      }
+      break;
+    }
+  }
+  if (!vehicle){ for (const l of L){ const m=l.match(/\b([A-Z]{3,6}\d{4,})\b/); if(m){ vehicle=m[1]; break; } } }
+  const stIdx = L.findIndex(function(l){ return /Ship\s*To\s*\/\s*Consignee/i.test(l); });
+  if (stIdx>=0){ for(let k=stIdx+1;k<Math.min(stIdx+4,L.length);k++){ const c=L[k].replace(/Sold To.*/i,'').trim(); if(c && !/Pack list|Gross Weight|Units/i.test(c)){ shipTo=c; break; } } }
+
+  const ORDER = /^(\d{9,})\s+(\d{5,})\s+(.+\S)$/;   // Order#  Material#  Grade/Description
+  // Optional leading item # (000010) precedes the batch on the first roll of an order.
+  const ROLL  = /^(?:(\d{4,6})\s+)?([A-Z][A-Z0-9]{4,})\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d,]+\.\d+)\s+([\d,]+\.\d+)\s+([\d,]+\.\d+)/;
+  const rolls = [];
+  let curMat='', curDesc='', curPO='', curOrder='', curItem='';
+  for (let i=0;i<L.length;i++){
+    const line = L[i];
+    let m = line.match(ROLL);
+    if (m){
+      if (m[1]) curItem = m[1];   // line item carries forward to the rest of the order's rolls
+      rolls.push({ lot:m[2], item:curItem, pk:parseInt(m[3],10)||1, width:_sciPackNum(m[4]), diam:_sciPackNum(m[5]),
+        caliper:_sciPackNum(m[6]), grossWt:_sciPackNum(m[7]), netWt:_sciPackNum(m[8]), linear:_sciPackNum(m[9]),
+        material:curMat, matDesc:curDesc, customerPO:curPO, orderNo:curOrder });
+      continue;
+    }
+    m = line.match(ORDER);
+    if (m && !/Shipment|Consignor|Ship\s*To|Sold\s*To|Pack list|Totals|Gross|Linear/i.test(line)){
+      curOrder=m[1]; curMat=m[2]; curDesc=m[3].trim(); curPO=''; curItem='';
+      continue;
+    }
+    // Order line-item sits just under the order # (e.g. "000010 SFI") — capture as fallback.
+    m = line.match(/^(\d{4,6})\s+(?:SFI|FSC|NSF|C2S|[A-Z]{2,4})\b/);
+    if (m && curOrder && !curItem){ curItem = m[1]; continue; }
+    const t = line.trim();
+    if (/^\d{8,12}$/.test(t) && t!==curOrder && t!==shipment && t!==delivery){ if(!curPO) curPO=t; continue; }
+  }
+  return { shipment:shipment, delivery:delivery, vehicle:vehicle, shipTo:shipTo, rolls:rolls };
+}
+
+// Build a Sci Games load group from a parsed packing list, MERGING DIR details for
+// any roll still present in state.dirData (packing list wins on physical weight/LF).
+function _sciPackBuildGroup(p){
+  const rolls = p.rolls||[];
+  if (!rolls.length) return null;
+  const inv = {}; (state.inventory||[]).forEach(function(r){ if(r.lot) inv[r.lot]=r; });
+  const shipment = p.shipment || p.delivery || ('PACK-'+_ediNewId());
+  const invoice  = p.delivery || p.shipment || '';
+  const lots = rolls.map(function(r){
+    const dir = (state.dirData && state.dirData[r.lot]) ? state.dirData[r.lot] : null;
+    const iv  = inv[r.lot] || {};
+    // PO # (Col E) = Order# + '-' + line item (zeros stripped)  → e.g. 4512584182-10
+    // Prod ID 2 (ZMO) = Customer PO (leading zeros stripped) + '-' + line item → e.g. 40138310-10
+    const item   = _sciStripZeros(r.item);
+    const ordNo  = String(r.orderNo||'').trim();
+    const poBase = _sciStripZeros(r.customerPO);
+    const poCol  = ordNo ? (ordNo + (item?('-'+item):'')) : (r.customerPO||'');
+    const zmo    = poBase ? (poBase + (item?('-'+item):'')) : '';
+    return {
+      lot: r.lot,
+      material: (dir&&dir.material) || r.material || '',
+      matDesc:  (dir&&dir.matDesc)  || r.matDesc  || '',
+      grossWt:  r.grossWt || (dir&&dir.grossWt) || 0,
+      width:    r.width   || (dir&&dir.width)   || 0,
+      qtyMlf:   r.linear  || (dir&&dir.qtyMlf)  || 0,
+      expDate:  iv.expDate || null,
+      bol:      iv.bol || '',
+      po:       poCol,                                   // Col E — Order#-Item
+      prod2:    'Scientific Games ' + (zmo || invoice),  // Prod ID 2 — "Scientific Games <ZMO>"
+      purchDoc: '', purchItem: '',                       // force PO # to use the packing-list value
+      vehicleId: p.vehicle || (dir&&dir.vehicleId) || '',
+      fromPack: !dir
+    };
+  });
+  lots.sort(function(a,b){ return String(a.lot).localeCompare(String(b.lot)); });
+  return {
+    _id: _ediNewId(), _ts: Date.now(), _by: _ediWho(),
+    source:'packlist',
+    shipment: shipment,
+    delivery: p.delivery || '',
+    invoiceRef: invoice,
+    zmo: (rolls[0]&&rolls[0].customerPO) || '',
+    customerName: 'Scientific Games',
+    vehicleId: p.vehicle || '',
+    shipTo: p.shipTo || '',
+    lots: lots
+  };
+}
+
+function handleSciPackDrop(e){ _sciPackRoute(Array.from((e.dataTransfer&&e.dataTransfer.files)||[])); }
+
+async function _sciPackRoute(files){
+  const pdfs = Array.from(files||[]).filter(function(f){ return /\.pdf$/i.test(f.name); });
+  if (!pdfs.length){ showAlert('Sci Games: drop the mill Packing List PDF (PACKLIST FOR DELIVERY).', 'warning'); return; }
+  showAlert('Sci Games: reading '+pdfs.length+' packing list'+(pdfs.length===1?'':'s')+'…', 'info');
+  let built=0;
+  for (const f of pdfs){
+    let lines=[];
+    try { lines = await trExtractPdfLines(await f.arrayBuffer()); }
+    catch(err){ showAlert('Sci Games: '+f.name+' — could not read PDF ('+((err&&err.message)||err)+')', 'danger'); continue; }
+    if (!lines || !lines.length){ showAlert('Sci Games: '+f.name+' — no text found (scanned image PDFs are not supported here).', 'danger'); continue; }
+    const parsed = _sciPackParse(lines);
+    if (!parsed.rolls.length){ showAlert('Sci Games: '+f.name+' — found no roll lines. (text logged to console)', 'danger'); console.log('[SciPack] lines from '+f.name+':\n'+lines.join('\n')); continue; }
+    const grp = _sciPackBuildGroup(parsed);
+    if (!grp){ continue; }
+    window._sciPackLoads = (window._sciPackLoads||[]).filter(function(g){ return g.shipment!==grp.shipment; });
+    window._sciPackLoads.push(grp);
+    const dirHits = grp.lots.filter(function(l){ return !l.fromPack; }).length;
+    built++;
+    showAlert('✓ Sci Games: built '+grp.shipment+' — '+grp.lots.length+' rolls'+(grp.vehicleId?(' · 🚛 '+grp.vehicleId):'')+(dirHits?(' · '+dirHits+' matched to DIR'):' · packing-list only')+'. Verify, then Export.', 'success');
+  }
+  if (built){ _ediSave(); showEDIImportFile(); }
+}
+
+function deleteSciPackLoad(id){
+  window._sciPackLoads = (window._sciPackLoads||[]).filter(function(g){ return g._id!==id; });
+  _ediSave();
+  showEDIImportFile();
+}
+
+function clearSciPackLoads(){
+  if(!(window._sciPackLoads||[]).length) return;
+  if(!confirm('Remove all '+window._sciPackLoads.length+' packing-list Sci Games load(s)?')) return;
+  window._sciPackLoads = [];
+  _ediSave();
+  showEDIImportFile();
+}
 
 function exportSingleSci(key) {
   const group = (window._ediSciGroups||{})[key];
@@ -10071,6 +10302,7 @@ function _ediSnapshot(){
     ipg: _ediPack(_ipgLoads),
     cat: _ediPack(_catLoads),
     catMerge: _ediPack(_catMergeGroups),
+    sciPack: _ediPack(window._sciPackLoads),
     tr:  _ediPackTR(window._ediTRLoads),
     upm: _ediPack(window._upmLoads),
     domtar: _ediPack(window._domtarLoads),
@@ -10115,6 +10347,7 @@ function _ediRestore(){
       if (Array.isArray(d.ipg)) _ipgLoads = d.ipg;
       if (Array.isArray(d.cat)) _catLoads = d.cat;
       if (Array.isArray(d.catMerge)) _catMergeGroups = d.catMerge;
+      if (Array.isArray(d.sciPack)) window._sciPackLoads = d.sciPack;
       if (d.tr && typeof d.tr === 'object') window._ediTRLoads = d.tr;
       if (Array.isArray(d.upm)) window._upmLoads = d.upm;
       if (Array.isArray(d.domtar)) window._domtarLoads = d.domtar;
@@ -10123,6 +10356,7 @@ function _ediRestore(){
       _ipgLoads    = _ediUnpack(d.ipg);
       _catLoads    = _ediUnpack(d.cat);
       _catMergeGroups = _ediUnpack(d.catMerge);
+      window._sciPackLoads = _ediUnpack(d.sciPack);
       window._ediTRLoads = _ediUnpackTR(d.tr);
       window._upmLoads   = _ediUnpack(d.upm);
       window._domtarLoads = _ediUnpack(d.domtar);
@@ -10144,12 +10378,12 @@ function _ediListen(){
     const d = snap.val() || {};
     // One-time migration: loads created before shared sync existed still live in
     // this browser's localStorage. Push them up once, then never resurrect again.
-    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.catMerge && !d.tr && !d.upm && !d.domtar;
+    const remoteEmpty = !d.hbh && !d.ipg && !d.cat && !d.catMerge && !d.sciPack && !d.tr && !d.upm && !d.domtar;
     let migrated = false;
     try { migrated = !!localStorage.getItem(EDI_MIG_KEY); } catch(e){}
     if (remoteEmpty && !migrated) {
       try { localStorage.setItem(EDI_MIG_KEY, String(Date.now())); } catch(e){}
-      const localHas = (_ediHBHLoads||[]).length || (_ipgLoads||[]).length || (_catLoads||[]).length || (_catMergeGroups||[]).length
+      const localHas = (_ediHBHLoads||[]).length || (_ipgLoads||[]).length || (_catLoads||[]).length || (_catMergeGroups||[]).length || (window._sciPackLoads||[]).length
         || Object.keys(window._ediTRLoads||{}).length || (window._upmLoads||[]).length || (window._domtarLoads||[]).length;
       if (localHas) { _ediLastWritten = {}; _ediSave(); return; }
     }
@@ -10157,6 +10391,7 @@ function _ediListen(){
     _ipgLoads          = _ediUnpack(d.ipg);
     _catLoads          = _ediUnpack(d.cat);
     _catMergeGroups    = _ediUnpack(d.catMerge);
+    window._sciPackLoads = _ediUnpack(d.sciPack);
     window._ediTRLoads = _ediUnpackTR(d.tr);
     window._upmLoads   = _ediUnpack(d.upm);
     window._domtarLoads = _ediUnpack(d.domtar);
