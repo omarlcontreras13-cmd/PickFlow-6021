@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 75;
+const APP_BUILD = 77;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -816,6 +816,10 @@ function logout() {
 }
 
 function isAdmin() { return state.currentUser&&state.currentUser.role==='admin'; }
+// Per-user access list. Admins implicitly have every permission; non-admins get a
+// permission only when it's checked on their user profile (perms.<key> === true).
+function userHasPerm(key){ return isAdmin() || !!(state.currentUser && state.currentUser.perms && state.currentUser.perms[key]===true); }
+function canUnarchive(){ return userHasPerm('unarchive'); }
 
 // ─── IMPORT ───────────────────────────────────────────────────────────────────
 function showImport() {
@@ -1694,7 +1698,7 @@ function renderPTArchMatch(q){
 }
 function ptDismissArchMatch(){ var h=document.getElementById('pt-arch-match'); if(h) h.innerHTML=''; }
 function ptMoveArchivedToOpen(id){
-  if(typeof isAdmin==='function' && !isAdmin()){ if(typeof showAlert==='function') showAlert('Only admins can move a ticket back to OPEN.','warning'); return; }
+  if(typeof canUnarchive==='function' && !canUnarchive()){ if(typeof showAlert==='function') showAlert('You do not have permission to move tickets back to OPEN. Ask an admin to grant it in Manage Users.','warning'); return; }
   try{ restoreTicket(id); }catch(e){}
   var s=document.getElementById('pt-ref-search'); if(s) s.value='';
   ptDismissArchMatch();
@@ -2593,7 +2597,7 @@ function viewArchivedTicket(id) {
         <div style="font-size:11px;color:var(--text2)">Archived ${new Date(ticket.archivedAt).toLocaleString()} by ${ticket.archivedBy||'—'}</div>
         <div style="flex:1"></div>
         <button class="btn btn-sm" onclick="exportPickTicketPDF('${id}',true)">📄 Pick Ticket</button>
-        ${isAdmin()?`<button class="btn btn-sm" style="color:var(--accent2);border-color:var(--accent2)" onclick="restoreTicket('${id}')">↩ Restore</button>`:''}
+        ${canUnarchive()?`<button class="btn btn-sm" style="color:var(--accent2);border-color:var(--accent2)" onclick="restoreTicket('${id}')">↩ Restore</button>`:''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
         <div><span style="font-size:10px;color:var(--text2)">REF #: </span><strong>${ticket.refNum||'—'}</strong></div>
@@ -2625,7 +2629,7 @@ function viewArchivedTicket(id) {
 }
 
 function restoreTicket(id) {
-  if (!isAdmin()) return;
+  if (!canUnarchive()) { showAlert('You do not have permission to move tickets back to OPEN.','warning'); return; }
   const ticket = state.archivedTickets.find(t=>t.id===id); if (!ticket) return;
   delete ticket.archivedAt; delete ticket.archivedBy;
   state.tickets.push(ticket);
@@ -6727,7 +6731,7 @@ function _domtarRolls(pages){
     _domtarRows(words).forEach(function(row){
       const leftLine = row.filter(function(t){ return t.x < 285; }).map(function(t){ return t.s; }).join(' ');
       let m;
-      m = leftLine.match(/Order-?Item:\s*([0-9]+\s*-\s*\d+)/i); if (m){ curOI = m[1].replace(/\s+/g,' ').trim(); if (!attrs[curOI]) attrs[curOI] = { po:'', product:'', widthIn:'' }; }
+      m = leftLine.match(/Order-?Item:\s*([0-9]+\s*-\s*\d+)/i); if (m){ curOI = m[1].replace(/\s+/g,'').trim(); if (!attrs[curOI]) attrs[curOI] = { po:'', product:'', widthIn:'' }; }   // strip spaces around the dash → "015341-16" (Prod ID 2 / PO search)
       m = leftLine.match(/Customer PO:\s*(.+)$/i); if (m && curOI) attrs[curOI].po = m[1].trim();
       m = leftLine.match(/Product:\s*(.+)$/i);      if (m && curOI) attrs[curOI].product = m[1].trim();
       m = leftLine.match(/Width:\s*([\d.]+)\s*in/i); if (m && curOI) attrs[curOI].widthIn = parseFloat(m[1]);
@@ -6745,22 +6749,28 @@ function _domtarRolls(pages){
   return rolls;
 }
 // Build a load: pair rolls into 2-roll packs (parent first) and keep them contiguous.
-function _domtarBuildLoad(pages, fileName, source){
+function _domtarBuildLoad(pages, fileName, source, preSku){
   const H = _domtarHeader(pages);
   const raw = _domtarRolls(pages);
+  // SKU entered up-front (before the drop) is applied to every roll at build time so
+  // the load generates ready — Product ID resolves from the SKU table immediately.
+  const _sku = String(preSku==null?'':preSku).trim().toUpperCase();
+  const _pid = _sku ? _domtarProdId(_sku) : '';
   const rows = [];
   for (let i=0;i<raw.length;i++){
     const r = raw[i];
     rows.push({ lot:r.lot, track:r.track, lf:Math.round(r.lf), adwt:Math.round(r.adwt),
       widthIn:(r.widthIn||''), orderItem:r.orderItem, po:r.po, product:r.product,
-      pack:(Math.floor(i/2)+1), parent:(i%2===0), sku:'', pcs:1 });
+      pack:(Math.floor(i/2)+1), parent:(i%2===0), sku:_sku, productId:_pid, pcs:1 });
   }
   const orderItems = [];
   rows.forEach(function(r){ if (r.orderItem && orderItems.indexOf(r.orderItem)<0) orderItems.push(r.orderItem); });
+  const skuByOrder = {};
+  if (_sku) orderItems.forEach(function(oi){ skuByOrder[oi] = _sku; });
   const poHeader = ((orderItems.join(' / ')) + ' ' + (H.truck||'')).trim();
   return { fileName:fileName, source:source,
     header:{ receiver:(H.receiver||''), po:poHeader, invoice:(H.invoice||''), truck:(H.truck||''), dateLoaded:(H.dateLoaded||'') },
-    orderItems:orderItems, skuByOrder:{}, rows:rows,
+    orderItems:orderItems, skuByOrder:skuByOrder, rows:rows,
     packCount:Math.floor(rows.length/2), rollCount:rows.length, reconciled:(rows.length%2===0) };
 }
 
@@ -6806,14 +6816,16 @@ async function _domtarImport(f){
     let pages = await _domtarWordsPdf(buf), source = 'pdf';
     const hasRolls = pages.some(function(pg){ return pg.some(function(w){ return /^DTA[0-9A-Z]{6,}$/i.test(w.s); }); });
     if (!hasRolls){ showAlert('Domtar slip has no text layer — running OCR (first run downloads the engine)…', 'info'); pages = await _domtarOcrPdf(buf); source = 'ocr'; }
-    const load = _domtarBuildLoad(pages, f.name, source);
+    const preSku = ((document.getElementById('domtar-presku')||{}).value || window._domtarPreSku || '').trim().toUpperCase();
+    const load = _domtarBuildLoad(pages, f.name, source, preSku);
     if (!load.rows.length){ showAlert('Domtar: no rolls found in ' + f.name + (source==='ocr'?' (OCR could not read the table — check scan quality).':' (is this a pulp roll packing slip?)'), 'warning'); return; }
     _ediStampLoad(load); load.createdAt = Date.now();
     window._domtarLoads = window._domtarLoads || [];
     window._domtarLoads.push(load);
     _ediSave(); showEDIImportFile();
     if (typeof _ediReopenDetail==='function') _ediReopenDetail('domtar-detail-'+(window._domtarLoads.length-1));
-    showAlert('✓ Domtar ' + f.name + (source==='ocr'?' (OCR)':'') + ' — ' + load.rollCount + ' rolls · ' + load.packCount + ' packs — enter the SKU for each order' + (load.reconciled?'':' · ⚠ odd roll count, verify packs'), 'success');
+    const _skuMsg = preSku ? (' · SKU ' + preSku + ' applied') : ' — enter the SKU for each order';
+    showAlert('✓ Domtar ' + f.name + (source==='ocr'?' (OCR)':'') + ' — ' + load.rollCount + ' rolls · ' + load.packCount + ' packs' + _skuMsg + (load.reconciled?'':' · ⚠ odd roll count, verify packs'), 'success');
   }catch(err){ console.error(err); showAlert('Domtar read failed — ' + ((err&&err.message)||err), 'danger'); }
 }
 function handleDomtarUpload(e){ const f = e && e.target && e.target.files && e.target.files[0]; if (e&&e.target) e.target.value=''; if (f) _domtarImport(f); }
@@ -6967,13 +6979,25 @@ function renderDomtarSection(){
   const dl = '<datalist id="domtar-skulist">'+_domtarSkuRecords().map(function(r){ return '<option value="'+String(r.sku).replace(/"/g,'&quot;')+'">'; }).join('')+'</datalist>';
   return '<div style="'+sectionStyle+';order:8">'
     +'<div><div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:'+G+'">🟢 DOMTAR LOADS</div>'
-    +'<div style="font-size:10px;color:var(--text2);margin-top:2px">Drop the Domtar pulp roll packing slip (PDF — digital or scanned). Rolls import as 2-roll packs (parent + child kept together). Enter the SKU for each order — Product ID auto-fills from the SKU table. 1 slip = 1 load.</div></div>'
+    +'<div style="font-size:10px;color:var(--text2);margin-top:2px">Enter the SKU first, then drop the Domtar pulp roll packing slip (PDF — digital or scanned). Rolls import as 2-roll packs (parent + child kept together) with the SKU + Product ID already applied. 1 slip = 1 load.</div></div>'
     + _domtarSkuTableHtml()
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border:1.5px solid #2e7d32;border-radius:8px;background:rgba(46,125,50,0.05)">'
+      +'<label style="font-size:9px;letter-spacing:1px;font-weight:700;color:#2e7d32;text-transform:uppercase;white-space:nowrap">SKU — enter before dropping</label>'
+      +'<input id="domtar-presku" list="domtar-skulist" value="'+String(window._domtarPreSku||'').replace(/"/g,'&quot;')+'" oninput="window._domtarPreSku=this.value.toUpperCase();this.value=this.value.toUpperCase();_domtarPreSkuPid()" placeholder="e.g. WP3446" style="padding:5px 9px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:12px;font-weight:700;background:var(--surface);color:var(--text);outline:none;width:150px">'
+      +'<span id="domtar-presku-pid" style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:120px" title="'+String(_domtarProdId(window._domtarPreSku||'')||'').replace(/"/g,'&quot;')+'">'+((_domtarProdId(window._domtarPreSku||''))?('→ '+_domtarProdId(window._domtarPreSku||'')):'Product ID auto-fills from the SKU table')+'</span>'
+    +'</div>'
     +'<div ondragover="event.preventDefault();this.style.borderColor=\'#2e7d32\';this.style.background=\'rgba(46,125,50,0.08)\'" ondragleave="this.style.borderColor=\'\';this.style.background=\'\'" ondrop="handleDomtarDrop(event);this.style.borderColor=\'\';this.style.background=\'\'" onclick="document.getElementById(\'domtar-file-input\').click()" style="border:2px dashed var(--border);border-radius:8px;padding:18px;text-align:center;cursor:pointer;user-select:none">'
       +'<div style="font-size:22px;margin-bottom:6px">📂</div><div style="font-size:12px;font-weight:bold;color:'+G+'">Drop Domtar packing slip here</div>'
       +'<div style="font-size:10px;color:var(--text2);margin-top:4px">.pdf · digital or scanned · parent/child packs kept together</div>'
       +'<input type="file" id="domtar-file-input" accept=".pdf" onchange="handleDomtarUpload(event)" style="display:none"></div>'
     + dl + body + '</div>';
+}
+function _domtarPreSkuPid(){
+  var el=document.getElementById('domtar-presku-pid'); if(!el) return;
+  var v=((document.getElementById('domtar-presku')||{}).value||'').trim().toUpperCase();
+  var p=_domtarProdId(v);
+  el.textContent = p ? ('→ '+p) : (v ? 'SKU not in table — Product ID will be blank' : 'Product ID auto-fills from the SKU table');
+  el.title = p||'';
 }
 function deleteDomtarLoad(idx){ (window._domtarLoads||[]).splice(idx,1); _ediSave(); showEDIImportFile(); }
 function clearDomtarLoads(){ const L=window._domtarLoads||[]; if(!L.length) return; if(!confirm('Remove all '+L.length+' Domtar load(s)?')) return; window._domtarLoads=[]; _ediSave(); showEDIImportFile(); }
@@ -10090,14 +10114,20 @@ function showUserManagement() {
 
   // User list
   h += '<div style="margin-bottom:16px">';
-  h += '<table class="data-table" style="font-size:12px"><thead><tr><th>NAME</th><th>ROLE</th><th>PASSWORD</th><th style="text-align:center">ACTIONS</th></tr></thead><tbody>';
+  h += '<table class="data-table" style="font-size:12px"><thead><tr><th>NAME</th><th>ROLE</th><th>PASSWORD</th><th>ACCESS</th><th style="text-align:center">ACTIONS</th></tr></thead><tbody>';
   users.forEach(u => {
     const isSelf = state.currentUser && u.id === state.currentUser.id;
     const roleColor = u.role==='admin' ? 'var(--warning)' : 'var(--accent2)';
+    const accessTxt = u.role==='admin'
+      ? '<span style="color:var(--text2);font-size:11px">All (admin)</span>'
+      : ((u.perms && u.perms.unarchive)
+          ? '<span style="font-size:10px;background:rgba(26,122,74,0.15);color:var(--accent2);border-radius:10px;padding:1px 7px;font-weight:bold">↩ Unarchive</span>'
+          : '<span style="color:var(--text2);font-size:11px">—</span>');
     h += '<tr>';
     h += '<td style="font-weight:bold">'+u.name+(isSelf?' <span style="font-size:10px;color:var(--text2)">(you)</span>':'')+'</td>';
     h += '<td><span style="font-weight:bold;color:'+roleColor+'">'+u.role.toUpperCase()+'</span></td>';
     h += '<td style="color:var(--text2);font-size:11px">'+(u.password ? '&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;' : '<em>No password</em>')+'</td>';
+    h += '<td>'+accessTxt+'</td>';
     h += '<td style="text-align:center;white-space:nowrap">';
     h += '<button class="btn btn-sm" data-uid="'+u.id+'" onclick="editUserModal(this.dataset.uid)" style="margin-right:4px">&#9998; Edit</button>';
     if (!isSelf) h += '<button class="btn btn-sm btn-danger" data-uid="'+u.id+'" onclick="deleteUserConfirm(this.dataset.uid)">&#x2715; Delete</button>';
@@ -10145,6 +10175,15 @@ function editUserModal(uid) {
   h += '<div class="form-group"><label>NEW PASSWORD <span style="font-weight:normal;font-size:10px">(leave blank to keep current / clear for no password)</span></label>';
   h += '<input type="text" id="eu-pwd" placeholder="Enter new password or leave blank..." style="'+fi+'"></div>';
   h += '<div style="font-size:11px;color:var(--text2);margin-top:6px">Current: '+(u.password?'Password set':'<em>No password</em>')+'</div>';
+  // ── ACCESS PERMISSIONS (granular grants for non-admins; admins always have all) ──
+  const _isAdminRole = u.role==='admin';
+  const _hasUnarch = _isAdminRole || !!(u.perms && u.perms.unarchive);
+  h += '<div class="form-group" style="margin-top:14px">';
+  h += '<label>ACCESS PERMISSIONS</label>';
+  h += '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:normal;font-size:12px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">';
+  h += '<input type="checkbox" id="eu-unarchive"'+(_hasUnarch?' checked':'')+(_isAdminRole?' disabled':'')+' style="width:15px;height:15px;margin-top:1px;flex-shrink:0">';
+  h += '<span>Move archived pick tickets back to <strong>Open</strong>'+(_isAdminRole?' <span style="color:var(--text2)">(admins always allowed)</span>':'')+'</span>';
+  h += '</label></div>';
   h += '<div class="modal-actions">';
   h += '<button class="btn" onclick="showUserManagement()">&#8592; Back</button>';
   h += '<button class="btn btn-danger" data-uid="'+uid+'" onclick="clearUserPassword(this.dataset.uid)">Clear Password</button>';
@@ -10200,6 +10239,10 @@ function saveUserEdit(uid) {
   const newPwdField = (document.getElementById('eu-pwd').value||'').trim();
   const newPwd = newPwdField==='' ? u.password : (newPwdField||null);
   const pwdChanged = newPwdField !== '';
+  // Access permission: checkbox is disabled for admins (they always have it), so
+  // fall back to the stored value in that case.
+  const _unEl = document.getElementById('eu-unarchive');
+  const canUn = newRole==='admin' ? true : (_unEl ? _unEl.checked : !!(u.perms && u.perms.unarchive));
 
   // Show confirmation if password is being changed
   if (pwdChanged) {
@@ -10212,20 +10255,21 @@ function saveUserEdit(uid) {
     h += '<p style="margin:16px 0;font-size:14px">'+msg+'</p>';
     h += '<div class="modal-actions">';
     h += '<button class="btn" data-uid="'+uid+'" onclick="editUserModal(this.dataset.uid)">&#8592; Back</button>';
-    h += '<button class="btn btn-primary" data-uid="'+uid+'" data-role="'+newRole+'" data-pwd="'+(newPwd||'__null__')+'" onclick="confirmSaveUser(this.dataset.uid,this.dataset.role,this.dataset.pwd)">Yes, Save</button>';
+    h += '<button class="btn btn-primary" data-uid="'+uid+'" data-role="'+newRole+'" data-pwd="'+(newPwd||'__null__')+'" data-un="'+(canUn?1:0)+'" onclick="confirmSaveUser(this.dataset.uid,this.dataset.role,this.dataset.pwd,this.dataset.un)">Yes, Save</button>';
     h += '</div></div></div>';
     document.getElementById('modal-container').innerHTML = h;
   } else {
-    // No password change — just save role
-    db.ref('6021/users/'+uid).update({ role:newRole })
+    // No password change — save role + access permissions
+    db.ref('6021/users/'+uid).update({ role:newRole, 'perms/unarchive':canUn })
       .then(()=>{ showAlert('✓ User updated.','success'); showUserManagement(); })
       .catch(e=>showAlert('Error: '+e.message,'danger'));
   }
 }
 
-function confirmSaveUser(uid, role, pwdRaw) {
+function confirmSaveUser(uid, role, pwdRaw, unRaw) {
   const pwd = pwdRaw === '__null__' ? null : pwdRaw;
-  db.ref('6021/users/'+uid).update({ role, password: pwd })
+  const canUn = String(unRaw)==='1';
+  db.ref('6021/users/'+uid).update({ role, password: pwd, 'perms/unarchive':canUn })
     .then(()=>{ showAlert('✓ Password saved successfully.','success'); showUserManagement(); })
     .catch(e=>showAlert('Error saving: '+e.message,'danger'));
 }
