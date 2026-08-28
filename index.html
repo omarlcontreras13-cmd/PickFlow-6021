@@ -467,7 +467,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 74;
+const APP_BUILD = 75;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -3107,6 +3107,7 @@ function applyInvFilter(page) {
   }
   const bu   = (buSel||{}).value||'';
   const sku  = (document.getElementById('f-sku')||{}).value||'';
+  const prod2= (document.getElementById('f-prod2')||{}).value||'';
   const loc  = (document.getElementById('f-loc')||{}).value||'';
   const lot  = (document.getElementById('f-lot')||{}).value||'';
   const zmoF = (document.getElementById('f-zmo')||{}).value||'';
@@ -3116,6 +3117,7 @@ function applyInvFilter(page) {
   if (cust) filtered = filtered.filter(r=>r.customer.toLowerCase().includes(cust.toLowerCase()));
   if (bu)   filtered = filtered.filter(r=>(r.bu||'').toLowerCase()===bu.toLowerCase());
   if (sku)  filtered = filtered.filter(r=>r.sku.toLowerCase().includes(sku.toLowerCase()));
+  if (prod2)filtered = filtered.filter(r=>(r.prod2||'').toLowerCase().includes(prod2.toLowerCase()));
   if (loc)  filtered = filtered.filter(r=>r.location.toLowerCase().includes(loc.toLowerCase()));
   if (lot)  filtered = filtered.filter(r=>(r.lot||'').toLowerCase().includes(lot.toLowerCase()));
   if (zmoF) filtered = filtered.filter(r=>{ const z=(r.zmo||(r.lot&&state.dirData[r.lot]?state.dirData[r.lot].zmo:'')||'').toString(); return z.toLowerCase().includes(zmoF.toLowerCase()); });
@@ -3129,7 +3131,7 @@ function applyInvFilter(page) {
   });
 
   const ps=50, st=page*ps, sl=filtered.slice(st,st+ps), tot=filtered.length, pg=Math.ceil(tot/ps)||1;
-  const isFiltered = cust||bu||sku||loc||lot||zmoF;
+  const isFiltered = cust||bu||sku||prod2||loc||lot||zmoF;
 
   let h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
   h += '<span style="font-size:11px;color:var(--text2)">Showing '+(st+1)+'–'+Math.min(st+ps,tot)+' of '+tot.toLocaleString()+' '+unitNoun(bu||cust)+(isFiltered?' (filtered)':'')+'</span>';
@@ -3173,7 +3175,7 @@ function applyInvFilter(page) {
 }
 
 function clearInvFilters() {
-  ['f-cust','f-sku','f-loc','f-lot','f-zmo'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  ['f-cust','f-sku','f-prod2','f-loc','f-lot','f-zmo'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   const buSel2=document.getElementById('f-bu'); if(buSel2) buSel2.value='';
   applyInvFilter(0);
 }
@@ -9898,10 +9900,11 @@ function showDataPreview() {
       // Only build filter inputs once; update table separately to preserve focus
       if (!document.getElementById('inv-filter-bar')) {
         document.getElementById('pcontent').innerHTML = `
-          <div id="inv-filter-bar" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:flex-end">
+          <div id="inv-filter-bar" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:flex-end">
             <div class="form-group"><label>FILTER CUSTOMER</label><input type="text" id="f-cust" placeholder="Customer..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
             <div class="form-group"><label>FILTER BU</label><select id="f-bu" onchange="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"><option value="">All BUs...</option></select></div>
             <div class="form-group"><label>FILTER SKU</label><input type="text" id="f-sku" placeholder="SKU..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
+            <div class="form-group"><label>FILTER PROD ID 2</label><input type="text" id="f-prod2" placeholder="Prod ID 2..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
             <div class="form-group"><label>FILTER LOCATION</label><input type="text" id="f-loc" placeholder="Location..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
             <div class="form-group"><label>FILTER LOT #</label><input type="text" id="f-lot" placeholder="Lot #..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
             <div class="form-group"><label>FILTER ZMO</label><input type="text" id="f-zmo" placeholder="ZMO..." oninput="applyInvFilter()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%"></div>
@@ -10261,6 +10264,7 @@ function exportInvToExcel() {
   const cust = (document.getElementById('f-cust')||{}).value||'';
   const bu   = (document.getElementById('f-bu')||{}).value||'';
   const sku  = (document.getElementById('f-sku')||{}).value||'';
+  const prod2= (document.getElementById('f-prod2')||{}).value||'';
   const loc  = (document.getElementById('f-loc')||{}).value||'';
   const lot  = (document.getElementById('f-lot')||{}).value||'';
   const zmoF = (document.getElementById('f-zmo')||{}).value||'';
@@ -10268,6 +10272,7 @@ function exportInvToExcel() {
   if (cust) rows = rows.filter(r=>r.customer.toLowerCase().includes(cust.toLowerCase()));
   if (bu)   rows = rows.filter(r=>(r.bu||'').toLowerCase()===bu.toLowerCase());
   if (sku)  rows = rows.filter(r=>(r.sku||'').toLowerCase().includes(sku.toLowerCase()));
+  if (prod2)rows = rows.filter(r=>(r.prod2||'').toLowerCase().includes(prod2.toLowerCase()));
   if (loc)  rows = rows.filter(r=>(r.location||'').toLowerCase().includes(loc.toLowerCase()));
   if (lot)  rows = rows.filter(r=>(r.lot||'').toLowerCase().includes(lot.toLowerCase()));
   if (zmoF) rows = rows.filter(r=>{ const z=(r.zmo||(r.lot&&state.dirData[r.lot]?state.dirData[r.lot].zmo:'')||'').toString(); return z.toLowerCase().includes(zmoF.toLowerCase()); });
