@@ -375,12 +375,62 @@ function unitNoun(ctx) {
   return /MAXXON/i.test(cust) ? 'skids' : 'rolls';
 }
 function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperCase() + u.slice(1); }
+
+// ── IPG per-item UOM, surfaced across Ton View, Cycle Count, Put Away & reports ──
+// A row is "IPG" if its SKU is in the imported IPG Materials master OR it carries an
+// IPG/SOM business unit (buRaw) or an "IPG " Prod ID 2. When the SKU is in the master
+// the UOM is authoritative (BUND for DuraBubble, else the master UOM). ipgSkuLookup /
+// ipgSkuUom are defined lower in the file but exist by the time these run at runtime.
+function _rowIsIPG(r){
+  if(!r) return false;
+  if(typeof ipgSkuLookup==='function' && ipgSkuLookup(r.sku)) return true;
+  const bu=String(r.buRaw||r.bu||'').toUpperCase();
+  if(bu==='IPG'||bu==='SOM'||bu.indexOf('IPG')===0||bu.indexOf('SOM')===0) return true;
+  const p2=String(r.prod2||'').toUpperCase();
+  return p2.indexOf('IPG')===0;
+}
+// Authoritative UOM code for an inventory row ('' when the SKU isn't in the master).
+function uomForRow(r){
+  if(!r || typeof ipgSkuLookup!=='function') return '';
+  const m=ipgSkuLookup(r.sku);
+  return m ? ipgSkuUom(m) : '';
+}
+// Plural unit word for a UOM code — used in "N bundles / cases / rolls" count labels.
+var _UOM_WORDS={BUND:'bundle',CS:'case',CA:'case',E:'each',EA:'each',RL:'roll',ROLL:'roll',ROLLS:'roll',LB:'lb',SQF:'sq ft',P:'pallet',PLT:'pallet',PAL:'pallet',BAG:'bag',BX:'box',BOX:'box',SKD:'skid',SKID:'skid'};
+function uomWord(uom,n){
+  const c=String(uom||'').toUpperCase(); if(!c) return '';
+  const base=_UOM_WORDS[c]||c.toLowerCase();
+  if(base==='each'||base==='sq ft'||base==='lb') return (base==='lb')?(n===1?'lb':'lbs'):base;
+  return (n===1)?base:base+'s';
+}
+// Unit word for a GROUP of rows: if every row is IPG and shares one UOM, use that word;
+// if all IPG but mixed/unknown, 'units'; otherwise fall back to the customer/BU noun.
+function unitNounForRows(rows, fallbackCtx){
+  if(rows && rows.length){
+    let u=null, allIPG=true, agree=true;
+    for(let i=0;i<rows.length;i++){
+      const r=rows[i];
+      if(!_rowIsIPG(r)){ allIPG=false; break; }
+      const uu=uomForRow(r);
+      if(!uu){ agree=false; continue; }
+      if(u===null) u=uu; else if(u!==uu) agree=false;
+    }
+    if(allIPG){ return (u && agree) ? uomWord(u,2) : 'units'; }
+  }
+  return unitNoun(fallbackCtx);
+}
+function unitNounForCust(c){
+  const rows=(state.inventory||[]).filter(r=>(r.customer||'UNKNOWN')===c);
+  return unitNounForRows(rows, c);
+}
 // MAXXON is counted in skids; everyone else in rolls. Resolve the unit for a cycle count
 // from the customer of the counted locations (falls back to the session's stored BU codes).
 function ccUnitForLocs(locs) {
   if (!locs || !locs.length) return 'rolls';
   const set = new Set(locs);
   const rows = (state.inventory||[]).filter(r => set.has(r.location));
+  // IPG locations report in the item's UOM (BUND for DuraBubble, cases, etc.)
+  if (rows.length && rows.every(r => _rowIsIPG(r))) return unitNounForRows(rows, rows[0] && rows[0].customer);
   if (rows.length && rows.every(r => _isNexusRoll(r))) return 'pallets';
   if (rows.length && rows.every(r => unitNoun(r.customer)==='skids')) return 'pallets';
   return 'rolls';
@@ -389,9 +439,11 @@ function ccSessionUnit(session) {
   if (!session) return 'rolls';
   // Unit comes from the customer/BU recorded in the count itself, so a saved count
   // always displays and prints correctly regardless of later inventory moves.
-  const bus = [];
-  (session.entries||[]).forEach(e => { if (e && !e.empty) (e.rows||[]).forEach(r => { if (r && r.bu) bus.push(resolveBU(r.bu)); }); });
-  const named = bus.filter(Boolean);
+  const allRows = [];
+  (session.entries||[]).forEach(e => { if (e && !e.empty) (e.rows||[]).forEach(r => { if (r) allRows.push(r); }); });
+  // IPG counts print in the item's UOM, resolved from the SKUs recorded in the count.
+  if (allRows.length && allRows.every(r => _rowIsIPG(r))) return unitNounForRows(allRows, allRows[0] && allRows[0].customer);
+  const named = allRows.map(r => r.bu ? resolveBU(r.bu) : '').filter(Boolean);
   if (named.length) return named.every(b => /MAXXON/i.test(b) || /NEXUS/i.test(b)) ? 'pallets' : 'rolls';
   return ccUnitForLocs(session.locations || (session.entries||[]).map(e=>e.loc));
 }
@@ -434,6 +486,8 @@ let state = {
   buSeqMap: {},
   buZmoMap: {},
   ipgWidthTable: {},
+  ipgSkuTable: {},          // imported IPG Materials master: SKU -> {desc, uom}
+  ipgManualReceipts: [],    // manual "New Inbound" receipts built in the IPG segment
   hbhWidthTable: {},
   domtarSku: {},
   importMode: 'inventory',
@@ -476,7 +530,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 83;
+const APP_BUILD = 89;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -669,6 +723,20 @@ function listenToFirebase() {
     const data = snap.val() || {};
     state.nexusReceipts = Object.values(data).sort((a,b) => (b.created||0)-(a.created||0));
     if (document.getElementById('nx-saved')) nxRenderSaved();
+  });
+
+  // IPG Materials master (SKU -> Description/UOM), used by the manual New Inbound builder
+  db.ref('6021/ipgSkuTable').on('value', snap => {
+    state.ipgSkuTable = snap.val() || {};
+    if (typeof updateIPGSkuCount === 'function') updateIPGSkuCount();
+    if (document.getElementById('ipm-sku-list') && typeof ipmRefreshSkuList === 'function') ipmRefreshSkuList();
+  });
+
+  // Manual IPG "New Inbound" receipts
+  db.ref('6021/ipgManualReceipts').on('value', snap => {
+    const data = snap.val() || {};
+    state.ipgManualReceipts = Object.values(data).sort((a,b) => (b.created||0)-(a.created||0));
+    if (document.getElementById('ipm-saved') && typeof ipmRenderSaved === 'function') ipmRenderSaved();
   });
 }
 
@@ -3151,7 +3219,7 @@ function applyInvFilter(page) {
   const isFiltered = cust||bu||sku||prod2||loc||lot||zmoF;
 
   let h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-shrink:0">';
-  h += '<span style="font-size:11px;color:var(--text2)">Showing '+(st+1)+'–'+Math.min(st+ps,tot)+' of '+tot.toLocaleString()+' '+unitNoun(bu||cust)+(isFiltered?' (filtered)':'')+'</span>';
+  h += '<span style="font-size:11px;color:var(--text2)">Showing '+(st+1)+'–'+Math.min(st+ps,tot)+' of '+tot.toLocaleString()+' '+unitNounForRows(filtered, bu||cust)+(isFiltered?' (filtered)':'')+'</span>';
   h += '<div style="display:flex;gap:6px">';
   if (page>0) h += '<button class="btn btn-sm" onclick="applyInvFilter('+(page-1)+')">← Prev</button>';
   h += '<span style="font-size:11px;color:var(--text2);padding:5px 8px">Page '+(page+1)+'/'+pg+'</span>';
@@ -3159,7 +3227,7 @@ function applyInvFilter(page) {
   h += '</div></div>';
 
   h += '<div style="flex:1;min-height:0;overflow:auto"><table class="data-table pv-sticky" style="font-size:11px">';
-  h += '<thead><tr><th>CUSTOMER</th><th>SKU</th><th>PROD ID 1</th><th>PROD ID 2</th><th>PCS</th><th>PCS PEND</th><th>STATUS</th><th>LOT #</th><th>SKID ID</th><th>LOCATION</th><th>DATE REC\'D</th><th>INBOUND BOL</th><th>EXP DATE</th><th>ZMO</th><th>WEIGHT</th></tr></thead><tbody>';
+  h += '<thead><tr><th>CUSTOMER</th><th>SKU</th><th>UOM</th><th>PROD ID 1</th><th>PROD ID 2</th><th>PCS</th><th>PCS PEND</th><th>STATUS</th><th>LOT #</th><th>SKID ID</th><th>LOCATION</th><th>DATE REC\'D</th><th>INBOUND BOL</th><th>EXP DATE</th><th>ZMO</th><th>WEIGHT</th></tr></thead><tbody>';
 
   sl.forEach(r => {
     const expD = r.dirExpDate||r.expDate;
@@ -3167,6 +3235,7 @@ function applyInvFilter(page) {
     h += '<tr class="'+(r.status==='DAMAGED'?'dmg-row':'')+'">';
     h += '<td style="color:var(--accent)">'+(r.customer||'—')+'</td>';
     h += '<td>'+(r.sku||'—')+'</td>';
+    h += '<td style="font-size:10px;font-weight:bold">'+(uomForRow(r)||'—')+'</td>';
     h += '<td style="font-size:10px">'+(r.productId||'—')+'</td>';
     h += '<td style="font-size:10px">'+(r.prod2||'—')+'</td>';
     h += '<td style="text-align:center">'+r.pcs+'</td>';
@@ -3466,7 +3535,7 @@ function showInventorySummary() {
     <tr style="background:${altBg?'var(--surface)':''}">
       <td style="font-weight:bold">${c}</td>
       ${accCell(map[c])}
-      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s], unitNoun(c))).join('')}
+      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s], unitNounForCust(c))).join('')}
     </tr>`;
 
   // Build all rows
@@ -4028,7 +4097,7 @@ function showEDIImportFile() {
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div>
           <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent)">📦 IPG / SOM LOADS</div>
-          <div style="font-size:10px;color:var(--text2);margin-top:2px">Intertape Polymer Group — drag &amp; drop or click to upload</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px">Intertape Polymer Group — drag &amp; drop a file, or build a manual receipt</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <div style="display:flex;flex-direction:column;gap:4px">
@@ -4048,17 +4117,29 @@ function showEDIImportFile() {
             <input type="file" id="ipg-file-input" accept=".xlsx,.xls" style="display:none"
               onchange="if(this.files[0])processIPGFile(this.files[0])">
           </div>
+          <button onclick="showIPGManual()" title="Build a manual inbound receipt from the SKU master"
+            style="background:#16a34a;color:#fff;border:none;border-radius:7px;padding:10px 16px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;align-self:flex-end;margin-left:6px">📥 New Inbound</button>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px">
+      <div style="display:grid;grid-template-columns:max-content max-content max-content 1fr;align-items:center;column-gap:10px;row-gap:8px;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
         <span style="font-size:10px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Width → SKU Table</span>
         <button onclick="document.getElementById('ipg-width-input').click()"
-          style="background:var(--surface);color:var(--accent);border:1.5px solid var(--accent);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:700">⬆ Import Table</button>
+          style="background:var(--surface);color:var(--accent);border:1.5px solid var(--accent);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:700;width:100%">⬆ Import Table</button>
         <button onclick="downloadIPGWidthTemplate()"
-          style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600">⬇ Download Current / Template</button>
+          style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600;width:100%">⬇ Download Current / Template</button>
         <span id="ipg-width-count" style="font-size:10px;color:var(--text2)"></span>
+
+        <span style="font-size:10px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">Materials · SKU → Description</span>
+        <button onclick="document.getElementById('ipg-sku-input').click()"
+          style="background:var(--surface);color:var(--accent);border:1.5px solid var(--accent);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:700;width:100%">⬆ Import Table</button>
+        <button onclick="downloadIPGSkuTemplate()"
+          style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600;width:100%">⬇ Download Current / Template</button>
+        <span id="ipg-sku-count" style="font-size:10px;color:var(--text2)"></span>
+
         <input type="file" id="ipg-width-input" accept=".xlsx,.xls" style="display:none"
           onchange="if(this.files[0])handleIPGWidthFile(this.files[0])">
+        <input type="file" id="ipg-sku-input" accept=".xlsx,.xls" style="display:none"
+          onchange="if(this.files[0])handleIPGSkuFile(this.files[0])">
       </div>
       <div id="ipg-load-list" style="max-height:420px;overflow-y:auto;overflow-x:hidden"></div>
   </div>`;
@@ -4070,6 +4151,7 @@ function showEDIImportFile() {
   if (_catLoads && _catLoads.length) renderCatalystLoads();
   if (_catMergeGroups && _catMergeGroups.length) renderCatMerge();
   updateIPGWidthCount();
+  updateIPGSkuCount();
   updateHBHWidthCount();
 }
 
@@ -4447,6 +4529,474 @@ function exportIPGLoad(idx) {
   const fname = 'IPG_Import_' + load.custOrder + '_' + loadId + '.xlsx';
   XLSX.writeFile(wb, fname);
   showAlert('✓ Exported ' + fname, 'success');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IPG MATERIALS MASTER (SKU → Description / UOM)  +  MANUAL "NEW INBOUND" BUILDER
+// ---------------------------------------------------------------------------
+// Same idea as the Nexus Circular manual receipt: fill a header (Receiver / PO /
+// Invoice / Truck), add SKU lines that auto-fill Description + UOM from an imported
+// master, enter a Qty per SKU (generates that many rows) and one Total Weight
+// (split EVENLY across every generated row). Exports on the shared EDI template.
+// Master persists to Firebase 6021/ipgSkuTable; receipts to 6021/ipgManualReceipts.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ---- SKU master: import / lookup / template --------------------------------
+// Stored in Firebase as a LIST of {sku,desc,uom} records (NOT keyed by SKU) because
+// SKUs contain '.' and '/' (e.g. "EZ8X11.5", "EZ8X11.5/400") which Firebase forbids
+// in keys. getIpgSkuTable() rebuilds an in-memory {sku:{desc,uom}} map for lookups.
+function getIpgSkuTable(){
+  const raw=(state && state.ipgSkuTable) ? state.ipgSkuTable : null;
+  const map={};
+  if(raw){
+    const recs=Array.isArray(raw)?raw:Object.values(raw);
+    if(recs.length && recs[0] && recs[0].sku!==undefined){
+      // list-of-records form (current)
+      recs.forEach(r=>{ if(r&&r.sku!=null&&String(r.sku).trim()) map[String(r.sku).trim()]={desc:r.desc||'',uom:r.uom||'',line:r.line||''}; });
+    } else {
+      // legacy keyed-object form
+      for(const k in raw){ const v=raw[k]; if(v&&typeof v==='object') map[k]={desc:v.desc||'',uom:v.uom||'',line:v.line||''}; }
+    }
+  }
+  return map;
+}
+function ipgSkuCount(){ return Object.keys(getIpgSkuTable()).length; }
+// DuraBubble products ship in bundles → UOM "BUND". Detect from the product family
+// (PTDESC01, stored as .line) or the item description. Matches
+// DURABUBBLE / ENDURABUBBLE / ASDURABUBBLE / DURABUBBLE LITE; NOT DuraMask/DuraBond.
+function _ipgIsDura(rec){ const blob=((rec&&rec.line)||'')+' '+((rec&&rec.desc)||''); return /DURABUBBLE/i.test(blob); }
+// UOM a SKU should carry on the manual receipt: BUND for DuraBubble, else the master UOM.
+function ipgSkuUom(rec){ return _ipgIsDura(rec) ? 'BUND' : String((rec&&rec.uom)||'').toUpperCase(); }
+// DuraBubble anti-static SKUs carry an "AS" prefix (ASDBL48, ASEZ8X11.5). The base SKU
+// (DBL48, EZ8X11.5) is what shows in the New Inbound picker and every generated/exported
+// row. Only strips when the item is DuraBubble AND the SKU starts with AS; idempotent.
+function ipgBaseSku(sku, rec){
+  const s=String(sku==null?'':sku).trim();
+  if(!s || !/^AS/i.test(s)) return s;
+  const r=rec || (typeof ipgSkuLookup==='function' ? ipgSkuLookup(s) : null);
+  return (r && _ipgIsDura(r)) ? s.replace(/^AS/i,'') : s;
+}
+function ipgSkuLookup(sku){
+  const t=getIpgSkuTable(); const k=String(sku==null?'':sku).trim();
+  if(!k) return null;
+  if(t[k]) return t[k];
+  // a base SKU entered for an anti-static DuraBubble resolves to its "AS"-prefixed record
+  if(t['AS'+k]) return t['AS'+k];
+  if(t['AS'+k.toUpperCase()]) return t['AS'+k.toUpperCase()];
+  // tolerant: match ignoring leading zeros / case (also try the AS-prefixed form)
+  const kl=k.replace(/^0+/,'').toLowerCase(); const kAs='as'+kl;
+  for(const key in t){ const nk=String(key).replace(/^0+/,'').toLowerCase(); if(nk===kl||nk===kAs) return t[key]; }
+  return null;
+}
+function updateIPGSkuCount(){
+  const el=document.getElementById('ipg-sku-count'); if(!el) return;
+  const n=ipgSkuCount();
+  el.textContent = n ? (n+' SKU'+(n===1?'':'s')+' loaded') : 'no SKU master yet — import to enable auto-fill';
+}
+function _ipgSkuFindCol(hdr, cands){
+  const norm=x=>String(x==null?'':x).trim().toLowerCase();
+  for(const c of cands){ const i=hdr.findIndex(h=>norm(h)===norm(c)); if(i>=0) return i; }
+  // loose contains
+  for(const c of cands){ const i=hdr.findIndex(h=>norm(h).includes(norm(c))); if(i>=0) return i; }
+  return -1;
+}
+function importIPGSkuTable(wb){
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
+  // find header row (first row containing a 'SKU' cell)
+  let hi=rows.findIndex(r=>r.some(c=>String(c||'').trim().toLowerCase()==='sku'));
+  if(hi<0) hi=0;
+  const hdr=rows[hi];
+  const cSku =_ipgSkuFindCol(hdr,['SKU','Item','Item #','Material']);
+  const cDesc=_ipgSkuFindCol(hdr,['DESCRIPTION','Description','Desc','Item Description']);
+  const cUom =_ipgSkuFindCol(hdr,['UOM','U/M','Unit']);
+  // PTDESC01 carries the product family (DURABUBBLE / ENDURABUBBLE / ASDURABUBBLE /
+  // DURABUBBLE LITE) — the reliable DuraBubble signal. PTDESC02 is only STANDARD/CUSTOM.
+  const cLine=_ipgSkuFindCol(hdr,['PTDESC01','Product Line','PRODLINE','Line','PTDESC02']);
+  if(cSku<0||cDesc<0){ showAlert('Could not find SKU and DESCRIPTION columns in the file.','danger'); return; }
+  const records=[]; const seen={}; let n=0;
+  rows.slice(hi+1).forEach(r=>{
+    let sku=String(r[cSku]==null?'':r[cSku]).trim();
+    const desc=String(r[cDesc]==null?'':r[cDesc]).trim();
+    const uom=cUom>=0?String(r[cUom]==null?'':r[cUom]).trim():'';
+    const line=cLine>=0?String(r[cLine]==null?'':r[cLine]).trim():'';
+    if(!sku) return;
+    if(seen[sku]) return;      // first occurrence wins on duplicate SKU
+    seen[sku]=1;
+    records.push({sku:sku,desc:desc,uom:uom,line:line}); n++;
+  });
+  if(!n){ showAlert('No SKU rows found. Expected a SKU column and a DESCRIPTION column.','warning'); return; }
+  state.ipgSkuTable=records;
+  if(db){ db.ref('6021/ipgSkuTable').set(records).catch(err=>showAlert('Loaded locally, cloud sync failed: '+err.message,'warning')); }
+  showAlert('✓ IPG SKU master loaded — '+n+' SKU'+(n===1?'':'s')+'.','success');
+  updateIPGSkuCount();
+  if(typeof ipmRefreshSkuList==='function') ipmRefreshSkuList();
+}
+function handleIPGSkuFile(file){
+  const reader=new FileReader();
+  reader.onload=ev=>{ try{ const wb=XLSX.read(ev.target.result,{type:'binary'}); importIPGSkuTable(wb); }
+    catch(err){ showAlert('SKU master import failed: '+err.message,'danger'); console.error(err); } };
+  reader.readAsBinaryString(file);
+}
+function downloadIPGSkuTemplate(){
+  const t=getIpgSkuTable();
+  const aoa=[['SKU','DESCRIPTION','UOM','PTDESC01']];
+  const keys=Object.keys(t);
+  if(keys.length){ keys.forEach(k=>aoa.push([k,t[k].desc||'',t[k].uom||'',t[k].line||''])); }
+  else { aoa.push(['99321','CURBY MLR #5 RTL','E','CURBY']); aoa.push(['DBL48','1/2" DURABUBBLE 4\'X250\'','E','DURABUBBLE']); } // samples show the format
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  for(let i=2;i<=aoa.length;i++){ const cell=ws['A'+i]; if(cell){ cell.t='s'; cell.z='@'; } } // keep SKU as text
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'IPG Materials');
+  XLSX.writeFile(wb,'IPG_Materials_Table.xlsx');
+}
+
+// ---- Manual New Inbound builder --------------------------------------------
+const IPM = { lines: [], exportRows: [], activeId: null };
+function ipmGv(id){ return (document.getElementById(id)||{}).value||''; }
+function ipmStatus(msg,color){ const el=document.getElementById('ipm-status'); if(el){ el.textContent=msg||''; el.style.color=color||'var(--text2)'; } }
+function ipmEsc(s){ return String(s==null?'':s).replace(/"/g,'&quot;'); }
+
+function showIPGManual(id){
+  state.currentView='ipm';
+  document.getElementById('modal-container').innerHTML = `
+  <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="width:1120px;max-width:97vw">
+      <style>
+        .ipm-stage{border:1px solid var(--border);border-radius:10px;margin-bottom:16px;overflow:hidden}
+        .ipm-shead{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2);border-bottom:1px solid var(--border)}
+        .ipm-num{width:20px;height:20px;border-radius:5px;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:bold}
+        .ipm-shead h3{font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:0}
+        .ipm-shead .ipm-hint{margin-left:auto;font-size:10px;color:var(--text2)}
+        .ipm-sbody{padding:14px}
+        .ipm-grid{display:grid;gap:12px;grid-template-columns:repeat(3,1fr)}
+        @media(max-width:760px){.ipm-grid{grid-template-columns:1fr 1fr}}
+        .ipm-grid label{display:block;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text2);margin-bottom:4px}
+        .ipm-grid input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--text);font-family:var(--font);font-size:12px;outline:none}
+        .ipm-tbl{width:100%;border-collapse:collapse;font-size:12px}
+        .ipm-tbl th{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);text-align:left;padding:6px 8px;border-bottom:2px solid var(--border);white-space:nowrap}
+        .ipm-tbl td{padding:5px 8px;border-bottom:1px solid var(--surface2);vertical-align:middle;white-space:nowrap}
+        .ipm-tbl input{background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 6px;color:var(--text);font-family:var(--font);font-size:11px;outline:none}
+        .ipm-nospin::-webkit-inner-spin-button,.ipm-nospin::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+        .ipm-nospin{-moz-appearance:textfield}
+        .ipm-empty{padding:18px;text-align:center;color:var(--text2);font-style:italic}
+        .ipm-note{background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.3);border-left:3px solid var(--warning);border-radius:6px;padding:8px 11px;font-size:11px;color:#7a4d08;margin-top:12px}
+        .ipm-req{color:var(--danger)}
+        .ipm-sum{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:10px}
+        .ipm-sum b{font-size:18px;color:var(--accent);display:block} .ipm-sum span{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
+        .ipm-wrap{display:flex;gap:14px;align-items:flex-start}
+        .ipm-side{width:230px;flex-shrink:0;border:1px solid var(--border);border-radius:10px;display:flex;flex-direction:column;max-height:72vh;background:var(--surface)}
+        .ipm-side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)}
+        .ipm-side-list{flex:1;overflow-y:auto;padding:8px}
+        .ipm-main{flex:1;min-width:0;max-height:72vh;overflow-y:auto;padding-right:4px}
+        .ipm-item{position:relative;padding:9px 30px 9px 11px;border:1px solid var(--border);border-radius:8px;margin-bottom:7px;cursor:pointer;background:var(--bg)}
+        .ipm-item:hover{border-color:var(--accent)}
+        .ipm-item.on{border-color:var(--accent);background:rgba(79,110,247,0.10)}
+        .ipm-item .po{font-size:12px;color:var(--text);font-weight:bold}
+        .ipm-item .meta{font-size:10px;color:var(--text2);margin-top:2px}
+        .ipm-item-del{position:absolute;top:50%;right:7px;transform:translateY(-50%);width:20px;height:20px;border:none;border-radius:5px;background:transparent;color:var(--text2);cursor:pointer;font-size:13px;line-height:1;display:grid;place-items:center;padding:0}
+        .ipm-item-del:hover{background:rgba(220,38,38,0.12);color:var(--danger)}
+        .ipm-side-empty{padding:16px 10px;text-align:center;color:var(--text2);font-size:11px;font-style:italic}
+        @media(max-width:760px){.ipm-wrap{flex-direction:column}.ipm-side{width:100%;max-height:200px}.ipm-main{max-height:none;overflow:visible}}
+      </style>
+      <datalist id="ipm-sku-list"></datalist>
+      <h2>📥 IPG · MANUAL NEW INBOUND</h2>
+      <div class="ipm-wrap">
+        <div class="ipm-side">
+          <div class="ipm-side-head"><span>Saved Receipts</span><button class="btn btn-sm btn-success" onclick="ipmNew()" style="font-size:11px;padding:3px 9px">+ New</button></div>
+          <div class="ipm-side-list" id="ipm-saved"></div>
+        </div>
+        <div class="ipm-main">
+          <div class="ipm-stage">
+            <div class="ipm-shead"><span class="ipm-num">1</span><h3>Inbound Header</h3><span class="ipm-hint">maps to export header cells</span></div>
+            <div class="ipm-sbody">
+              <div class="ipm-grid">
+                <div><label>Initial Receiver</label><input id="ipm-receiver" oninput="this.value=this.value.toUpperCase();ipmHdrPreview()" placeholder="e.g. 12519228"></div>
+                <div><label>PO #</label><input id="ipm-po" oninput="this.value=this.value.toUpperCase();ipmSyncPO()" placeholder="e.g. 4512584182"></div>
+                <div><label>Invoice #</label><input id="ipm-invoice" oninput="this.value=this.value.toUpperCase();ipmHdrPreview()" placeholder="invoice #"></div>
+                <div><label>Truck #</label><input id="ipm-truck" oninput="this.value=this.value.toUpperCase();ipmHdrPreview()" placeholder="truck / trailer"></div>
+                <div><label>Exp Date</label><input id="ipm-date" type="date"></div>
+                <div><label>Total Weight (lbs)</label><input id="ipm-loadwt" class="ipm-nospin" type="number" step="0.0001" placeholder="0" oninput="ipmResetPreview();ipmUpdateTotals()"></div>
+              </div>
+              <div style="margin-top:12px;border:1px dashed var(--accent);background:rgba(79,110,247,0.06);border-radius:8px;padding:10px 12px">
+                <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);font-weight:bold;margin-bottom:4px">Export Header → Sheet1</div>
+                <div class="v" id="ipm-hdrprev" style="font-size:11px;display:flex;flex-wrap:wrap;gap:14px"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ipm-stage">
+            <div class="ipm-shead"><span class="ipm-num">2</span><h3>SKU Lines</h3><span class="ipm-hint">Qty per SKU generates that many rows</span></div>
+            <div class="ipm-sbody">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <button class="btn btn-sm btn-primary" onclick="ipmAddLine()">+ Add SKU Line</button>
+                <button class="btn btn-sm" onclick="ipmClearLines()">Clear Lines</button>
+                <span id="ipm-src" style="font-size:11px;color:var(--text2)"></span>
+              </div>
+              <div style="overflow:auto;margin-top:12px">
+                <table class="ipm-tbl">
+                  <thead><tr><th>SKU<span class="ipm-req">*</span></th><th>Description (auto)</th><th>UOM</th><th>Qty<span class="ipm-req">*</span></th><th></th></tr></thead>
+                  <tbody id="ipm-lines"><tr><td colspan="5" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr></tbody>
+                </table>
+              </div>
+              <div class="ipm-note"><b>Manual entry:</b> type a SKU (auto-completes from the imported master) and the <b>Description</b> &amp; <b>UOM</b> auto-fill. Enter a <b>Qty</b> per SKU — each unit becomes one export row. The <b>Total Weight</b> above is split <b>evenly</b> across every generated row.</div>
+            </div>
+          </div>
+
+          <div class="ipm-stage">
+            <div class="ipm-shead"><span class="ipm-num">3</span><h3>Generate, Save &amp; Export</h3><span class="ipm-hint">One row per unit</span></div>
+            <div class="ipm-sbody">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                <button class="btn btn-primary" id="ipm-gen" onclick="ipmGenerate()" disabled>Generate Rows</button>
+                <button class="btn btn-success" id="ipm-save" onclick="ipmSave()" disabled>Save Receipt</button>
+                <button class="btn" id="ipm-export" onclick="ipmExport()" disabled>Export EDI (.xlsx)</button>
+                <span id="ipm-status" style="font-size:11px;align-self:center"></span>
+              </div>
+              <div class="ipm-sum" id="ipm-sum" style="display:none">
+                <div><b id="ipm-rows">0</b><span>Export Rows</span></div>
+                <div><b id="ipm-wt">0</b><span>Total Weight</span></div>
+                <div><b id="ipm-ln">0</b><span>SKU Lines</span></div>
+              </div>
+              <div style="overflow:auto;border:1px solid var(--border);border-radius:8px;display:none" id="ipm-prevwrap">
+                <table class="ipm-tbl"><thead><tr><th>SKU</th><th>Product ID</th><th>Lot#</th><th>Prod ID 2</th><th>PO#</th><th>Weight</th><th>Gross Weight</th><th>UOM</th><th>LF</th><th>Pcs</th><th>Width</th><th>Exp Date</th></tr></thead><tbody id="ipm-prev"></tbody></table>
+              </div>
+              <div class="ipm-empty" id="ipm-prevempty">Generate rows to preview the export.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+    </div>
+  </div>`;
+  (function(){ const d=new Date(),p=n=>String(n).padStart(2,'0'); const el=document.getElementById('ipm-date'); if(el) el.value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); })();
+  ipmRefreshSkuList();
+  ipmRenderSaved();
+  if(id){ ipmLoad(id); } else { ipmNew(); }
+}
+
+function ipmRefreshSkuList(){
+  const dl=document.getElementById('ipm-sku-list'); if(!dl) return;
+  const t=getIpgSkuTable();
+  const seen={}, opts=[];
+  Object.keys(t).forEach(k=>{
+    const base=ipgBaseSku(k, t[k]);           // DuraBubble AS-prefix dropped for display
+    if(seen[base]) return; seen[base]=1;       // one option per base SKU
+    opts.push('<option value="'+ipmEsc(base)+'">'+ipmEsc(t[k].desc||'')+'</option>');
+  });
+  dl.innerHTML=opts.join('');
+}
+function ipmHdrPreview(){
+  const el=document.getElementById('ipm-hdrprev'); if(!el) return;
+  const parts=[
+    ['Receiver', ipmGv('ipm-receiver').trim().toUpperCase()||'—'],
+    ['PO #', ipmGv('ipm-po').trim().toUpperCase()||'—'],
+    ['Invoice #', ipmGv('ipm-invoice').trim().toUpperCase()||'—'],
+    ['Truck #', ipmGv('ipm-truck').trim().toUpperCase()||'—']
+  ];
+  el.innerHTML=parts.map(p=>'<span>'+p[0]+': <b style="color:var(--text)">'+ipmEsc(p[1])+'</b></span>').join('');
+}
+function ipmSyncPO(){
+  const po=ipmGv('ipm-po').trim().toUpperCase();
+  IPM.lines.forEach(ln=>ln.po=po);
+  ipmHdrPreview(); ipmResetPreview();
+}
+function ipmUpdateTotals(){
+  const totQty=IPM.lines.reduce((s,l)=>s+(parseInt(l.qty)||0),0);
+  const src=document.getElementById('ipm-src');
+  if(src) src.textContent = IPM.lines.length ? (IPM.lines.length+' SKU line'+(IPM.lines.length===1?'':'s')+' · '+totQty+' unit'+(totQty===1?'':'s')+' total') : '';
+  const gb=document.getElementById('ipm-gen'); if(gb) gb.disabled = totQty<=0;
+}
+function ipmRenderLines(){
+  const tb=document.getElementById('ipm-lines'); if(!tb) return; tb.innerHTML='';
+  if(!IPM.lines.length){ tb.innerHTML='<tr><td colspan="5" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr>'; ipmUpdateTotals(); return; }
+  IPM.lines.forEach((ln,i)=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=
+      '<td><input list="ipm-sku-list" value="'+ipmEsc(ln.sku)+'" placeholder="SKU" oninput="ipmEditLine('+i+',&quot;sku&quot;,this.value)" style="width:120px"></td>'+
+      '<td><input id="ipm-desc-'+i+'" value="'+ipmEsc(ln.desc)+'" placeholder="auto from SKU" oninput="ipmEditLine('+i+',&quot;desc&quot;,this.value)" style="width:250px"></td>'+
+      '<td><input id="ipm-uom-'+i+'" value="'+ipmEsc(ln.uom)+'" placeholder="UOM" oninput="ipmEditLine('+i+',&quot;uom&quot;,this.value)" style="width:64px;text-transform:uppercase"></td>'+
+      '<td><input class="ipm-nospin" type="number" min="0" step="1" value="'+(ln.qty===''||ln.qty==null?'':ln.qty)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;qty&quot;,this.value)" style="width:72px;text-align:right"></td>'+
+      '<td><button onclick="ipmRemoveLine('+i+')" title="Remove line" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 6px">✕</button></td>';
+    tb.appendChild(tr);
+  });
+  ipmUpdateTotals();
+}
+function ipmEditLine(i,k,v){
+  const ln=IPM.lines[i]; if(!ln) return;
+  if(k==='qty'){ ln.qty=(v===''?'':Math.max(0,parseInt(v)||0)); }
+  else if(k==='sku'){
+    ln.sku=String(v).trim();
+    const m=ipgSkuLookup(ln.sku);
+    if(m){
+      ln.desc=m.desc||''; ln.uom=ipgSkuUom(m); // DuraBubble → BUND, else master UOM
+      const de=document.getElementById('ipm-desc-'+i); if(de) de.value=ln.desc;
+      const ue=document.getElementById('ipm-uom-'+i); if(ue) ue.value=ln.uom;
+    }
+  }
+  else if(k==='uom'){ ln.uom=String(v).toUpperCase(); }
+  else { ln[k]=v; }
+  ipmUpdateTotals(); ipmResetPreview();
+}
+function ipmAddLine(){
+  const po=ipmGv('ipm-po').trim().toUpperCase();
+  IPM.lines.push({ po:po, sku:'', desc:'', uom:'', qty:'' });
+  ipmRenderLines(); ipmResetPreview();
+}
+function ipmRemoveLine(i){ IPM.lines.splice(i,1); ipmRenderLines(); ipmResetPreview(); }
+function ipmClearLines(){ IPM.lines=[]; ipmRenderLines(); ipmResetPreview(); }
+
+function ipmResetPreview(){
+  IPM.exportRows=[];
+  const w=document.getElementById('ipm-prevwrap'); if(w)w.style.display='none';
+  const s=document.getElementById('ipm-sum'); if(s)s.style.display='none';
+  const e=document.getElementById('ipm-prevempty'); if(e)e.style.display='block';
+  const ex=document.getElementById('ipm-export'); if(ex)ex.disabled=true;
+  const sv=document.getElementById('ipm-save'); if(sv)sv.disabled=true;
+}
+function ipmGenerate(){
+  const po=ipmGv('ipm-po').trim().toUpperCase();
+  const active=IPM.lines.filter(l=>String(l.sku).trim() && (parseInt(l.qty)||0)>0);
+  if(!active.length){ ipmStatus('Add at least one SKU line with a qty','var(--danger)'); return; }
+  const totalRows=active.reduce((s,l)=>s+(parseInt(l.qty)||0),0);
+  const totalWt=parseFloat(ipmGv('ipm-loadwt'))||0;
+  // even split across every generated row, remainder absorbed by the last row
+  const per = totalRows>0 ? Math.round((totalWt/totalRows)*10000)/10000 : 0;
+  const dv=ipmGv('ipm-date'); const expDate=dv?new Date(dv+'T00:00:00'):new Date();
+  IPM.exportRows=[]; let seq=0, acc=0;
+  active.forEach(ln=>{
+    const qty=parseInt(ln.qty)||0;
+    for(let k=0;k<qty;k++){
+      seq++;
+      const last=(seq===totalRows);
+      const w = totalWt>0 ? (last ? Math.round((totalWt-acc)*10000)/10000 : per) : 0;
+      acc += w;
+      const lot = po ? (po+'-'+String(seq).padStart(4,'0')) : String(seq).padStart(4,'0');
+      const prod2 = ('IPG '+po).trim();   // Prod ID 2 = "IPG " + PO
+      IPM.exportRows.push({
+        sku:ipgBaseSku(String(ln.sku).trim()), productID:ln.desc||'', lot:lot, prodID2:prod2, po:po,
+        weight:w, gross:w, uom:(ln.uom||'CS').toUpperCase(), lf:0, pcs:1, width:0, expDate:expDate.getTime()
+      });
+    }
+  });
+  ipmRenderPreview();
+  ipmStatus('Generated '+IPM.exportRows.length+' row(s)','var(--accent)');
+}
+function ipmRenderPreview(){
+  const tb=document.getElementById('ipm-prev'); if(!tb) return; tb.innerHTML=''; let tot=0;
+  const ds=ms=>{const d=new Date(ms);return (d.getMonth()+1)+'/'+d.getDate()+'/'+d.getFullYear();};
+  const fmt=n=>(Math.round(n*10000)/10000).toLocaleString(undefined,{maximumFractionDigits:4});
+  IPM.exportRows.forEach(r=>{ tot+=r.weight; const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+ipmEsc(r.sku)+'</td><td>'+ipmEsc(r.productID)+'</td><td>'+ipmEsc(r.lot)+'</td><td>'+ipmEsc(r.prodID2)+'</td><td>'+ipmEsc(r.po)+'</td><td style="text-align:right">'+fmt(r.weight)+'</td><td style="text-align:right">'+fmt(r.gross)+'</td><td>'+ipmEsc(r.uom)+'</td><td style="text-align:right">0</td><td style="text-align:right">'+r.pcs+'</td><td style="text-align:right">0</td><td>'+ds(r.expDate)+'</td>';
+    tb.appendChild(tr);
+  });
+  const tr=document.createElement('tr'); tr.style.fontWeight='bold'; tr.style.background='var(--surface2)';
+  tr.innerHTML='<td colspan="5">TOTAL · '+IPM.exportRows.length+' rows</td><td style="text-align:right">'+fmt(tot)+'</td><td style="text-align:right">'+fmt(tot)+'</td><td colspan="5"></td>';
+  tb.appendChild(tr);
+  document.getElementById('ipm-prevwrap').style.display='block';
+  document.getElementById('ipm-prevempty').style.display='none';
+  document.getElementById('ipm-sum').style.display='flex';
+  document.getElementById('ipm-rows').textContent=IPM.exportRows.length;
+  document.getElementById('ipm-wt').textContent=fmt(tot);
+  document.getElementById('ipm-ln').textContent=new Set(IPM.exportRows.map(r=>r.sku)).size;
+  document.getElementById('ipm-export').disabled=false;
+  document.getElementById('ipm-save').disabled=false;
+}
+function ipmNew(){
+  IPM.activeId=null; IPM.lines=[]; ipmResetPreview();
+  ['ipm-receiver','ipm-po','ipm-invoice','ipm-truck','ipm-loadwt'].forEach(id=>{const e=document.getElementById(id); if(e)e.value='';});
+  const d=new Date(),p=n=>String(n).padStart(2,'0'); const de=document.getElementById('ipm-date'); if(de) de.value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
+  ipmRenderLines(); ipmHdrPreview(); ipmRenderSaved(); ipmStatus('');
+}
+function syncIPGManualToFirebase(){
+  if(!db) return;
+  const map={}; state.ipgManualReceipts.forEach(r=>{ map[r.id]=r; });
+  if(typeof setSyncStatus==='function') setSyncStatus('pending');
+  db.ref('6021/ipgManualReceipts').set(map)
+    .then(()=>{ if(typeof setSyncStatus==='function') setSyncStatus('ok'); })
+    .catch(()=>{ if(typeof setSyncStatus==='function') setSyncStatus('err'); });
+}
+function ipmSave(){
+  if(!IPM.exportRows.length){ ipmStatus('Generate rows first','var(--danger)'); return; }
+  const id=IPM.activeId || ('IPM'+Date.now().toString(36).toUpperCase());
+  const existing=(state.ipgManualReceipts||[]).find(r=>r.id===id);
+  const U=eid=>ipmGv(eid).trim().toUpperCase();
+  const rec={ id:id, receiver:U('ipm-receiver'), po:U('ipm-po'), invoice:U('ipm-invoice'), truck:U('ipm-truck'),
+    loadWeight:ipmGv('ipm-loadwt'), expDate:IPM.exportRows[0].expDate, totalRows:IPM.exportRows.length,
+    lines:JSON.parse(JSON.stringify(IPM.lines)), rows:JSON.parse(JSON.stringify(IPM.exportRows)),
+    createdBy:(state.currentUser&&state.currentUser.name)?state.currentUser.name:'—',
+    created: existing?existing.created:Date.now() };
+  if(!state.ipgManualReceipts) state.ipgManualReceipts=[];
+  const idx=state.ipgManualReceipts.findIndex(r=>r.id===id);
+  if(idx>=0) state.ipgManualReceipts[idx]=rec; else state.ipgManualReceipts.unshift(rec);
+  IPM.activeId=id; ipmRenderSaved(); syncIPGManualToFirebase();
+  ipmStatus('✓ Receipt saved'+(db?' & synced':' (offline)'),'var(--accent)');
+}
+function ipmRenderSaved(){
+  const box=document.getElementById('ipm-saved'); if(!box) return;
+  const list=state.ipgManualReceipts||[];
+  if(!list.length){ box.innerHTML='<div class="ipm-side-empty">No saved receipts yet.<br>Click "+ New" to start.</div>'; return; }
+  box.innerHTML=list.map(r=>{
+    const d=r.expDate?new Date(r.expDate).toLocaleDateString():'';
+    const rows=(r.rows||[]).length;
+    return '<div class="ipm-item '+(r.id===IPM.activeId?'on':'')+'" onclick="ipmLoad(&quot;'+r.id+'&quot;)">'
+      +'<div class="po">'+ipmEsc(r.po||'(no PO)')+'</div>'
+      +'<div class="meta">'+(r.receiver?('RCV '+ipmEsc(r.receiver)+' · '):'')+rows+' row'+(rows===1?'':'s')+(d?' · '+d:'')+'</div>'
+      +'<button class="ipm-item-del" title="Delete receipt" onclick="event.stopPropagation();ipmDelete(&quot;'+r.id+'&quot;)">✕</button>'
+      +'</div>';
+  }).join('');
+}
+function ipmDelete(id){
+  const r=(state.ipgManualReceipts||[]).find(x=>x.id===id); if(!r) return;
+  if(!confirm('Delete saved receipt '+(r.po||id)+'? This cannot be undone.')) return;
+  state.ipgManualReceipts=(state.ipgManualReceipts||[]).filter(x=>x.id!==id);
+  if(IPM.activeId===id){ ipmNew(); } else { ipmRenderSaved(); }
+  syncIPGManualToFirebase(); ipmStatus('Receipt deleted','var(--text2)');
+}
+function ipmLoad(id){
+  const r=(state.ipgManualReceipts||[]).find(x=>x.id===id); if(!r) return;
+  IPM.activeId=id;
+  const set=(eid,v)=>{const e=document.getElementById(eid); if(e)e.value=v||'';};
+  set('ipm-receiver',r.receiver); set('ipm-po',r.po); set('ipm-invoice',r.invoice); set('ipm-truck',r.truck); set('ipm-loadwt',r.loadWeight||'');
+  const d=new Date(r.expDate),p=n=>String(n).padStart(2,'0'); set('ipm-date',d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()));
+  ipmHdrPreview();
+  IPM.lines=JSON.parse(JSON.stringify(r.lines||[])); ipmRenderLines();
+  IPM.exportRows=JSON.parse(JSON.stringify(r.rows||[]));
+  if(IPM.exportRows.length) ipmRenderPreview(); else ipmResetPreview();
+  ipmRenderSaved(); ipmStatus('');
+}
+// ---- Export — shared EDI template (matches the IPG / Nexus export layout) ----
+function ipmExport(){
+  if(!IPM.exportRows.length){ ipmStatus('Generate rows first','var(--danger)'); return; }
+  const rows=IPM.exportRows;
+  const expDate=new Date(rows[0].expDate);
+  const serial=Date.UTC(expDate.getFullYear(),expDate.getMonth(),expDate.getDate())/86400000 + 25569;
+  const ws={};
+  const LBL=(addr,v)=>{ ws[addr]={t:'s',v:v}; };
+  const PUT=(addr,v)=>{ if(v===''||v==null){ ws[addr]={t:'n',v:0}; } else if(typeof v==='number'){ ws[addr]={t:'n',v:v}; } else { ws[addr]={t:'s',v:String(v)}; } };
+  const DATE=(addr)=>{ ws[addr]={t:'n',v:serial,z:'m/d/yy'}; };
+  LBL('A2','Receiver');        PUT('B2', ipmGv('ipm-receiver').trim().toUpperCase());
+  LBL('D2','Total Rolls');     PUT('E2', rows.length);
+  LBL('H2','Fraction  Decimal');
+  LBL('A3','PO #');            PUT('B3', ipmGv('ipm-po').trim().toUpperCase());
+  PUT('H3',0.5);               PUT('I3',0.5);
+  LBL('A4','Invoice #');       PUT('B4', ipmGv('ipm-invoice').trim().toUpperCase());
+  LBL('A5','Truck #');         PUT('B5', ipmGv('ipm-truck').trim().toUpperCase());
+  LBL('H5','Piper IBD Order #');
+  const HDR=['SKU','Product ID','Lot#','Prod ID 2','PO#','Weight','Gross Weight','UOM','LF','Pcs','Width','Exp Date'];
+  const COL=['A','B','C','D','E','F','G','H','I','J','K','L'];
+  HDR.forEach((h,i)=>LBL(COL[i]+'8',h));
+  rows.forEach((r,ri)=>{ const R=9+ri;
+    PUT('A'+R,r.sku); PUT('B'+R,r.productID); PUT('C'+R,r.lot); PUT('D'+R,r.prodID2); PUT('E'+R,r.po);
+    PUT('F'+R,r.weight); PUT('G'+R,r.gross); PUT('H'+R,r.uom); PUT('I'+R,0); PUT('J'+R,r.pcs); PUT('K'+R,0);
+    DATE('L'+R);
+  });
+  ws['!ref']='A1:L'+(8+rows.length);
+  ws['!cols']=[{wch:8.71},{wch:30.57},{wch:13.43},{wch:10.29},{wch:8.71},{wch:7},{wch:12.57},{wch:16.57},{wch:6},{wch:4.14},{wch:6.14},{wch:8.43}];
+  const wb=XLSX.utils.book_new(); wb.SheetNames.push('Sheet1'); wb.Sheets['Sheet1']=ws;
+  const po=ipmGv('ipm-po').trim()||'IPG';
+  const fn='IPG_EDI_'+po+'_'+expDate.getFullYear()+String(expDate.getMonth()+1).padStart(2,'0')+String(expDate.getDate()).padStart(2,'0')+'.xlsx';
+  XLSX.writeFile(wb,fn);
+  ipmStatus('EDI file exported','var(--accent)');
 }
 
 // ─── CATALYST INBOUND FILE PROCESSING ───────────────────────────────────────
@@ -7338,7 +7888,7 @@ function showPendingPutAway() {
           bodyRows += `<tr id="${rowId}-lot-hdr" style="display:none;background:rgba(61,92,230,0.08)">
             <td style="padding-left:28px;font-size:9px;font-weight:bold;color:var(--text2);letter-spacing:1px" colspan="4">↳ LOTS</td>
             <td style="font-size:9px;font-weight:bold;color:var(--accent);letter-spacing:1px;text-align:right;padding-right:12px">LOT #</td>
-            <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">${unitNoun(cust).toUpperCase()}</td>
+            <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">${unitNounForRows(custRolls, cust).toUpperCase()}</td>
             <td style="font-size:9px;font-weight:bold;color:var(--text2);text-align:right">TONS</td>
           </tr>`;
           // Individual lot rows (hidden by default)
@@ -7366,7 +7916,7 @@ function showPendingPutAway() {
            onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
         <span id="pa-chev-${ci}" style="color:var(--accent);font-size:13px">▶</span>
         <span style="font-weight:bold;font-size:13px;flex:1">${cust}</span>
-        <span style="font-size:11px;color:var(--text2)">${custRolls.length} ${unitNoun(cust)}</span>
+        <span style="font-size:11px;color:var(--text2)">${custRolls.length} ${unitNounForRows(custRolls, cust)}</span>
         <span style="font-size:11px;color:var(--accent2);margin-left:8px">${custBOLs} BOLs</span>
         <span style="font-size:13px;font-weight:bold;color:var(--warning);margin-left:8px">${Math.round(custTons).toLocaleString()} tons</span>
       </div>
@@ -7410,10 +7960,10 @@ function exportPendingPutAway() {
     (a.location||'').localeCompare(b.location||'') ||
     (a.lot||'').localeCompare(b.lot||'') ||
     (a.skidId||'').localeCompare(b.skidId||''));
-  const data = [['CUSTOMER','DATE RECD','BU','INBOUND BOL','SKU','LOCATION','LOT #','SKID ID']];
-  rows.forEach(r => data.push([ r.customer||'', fmtD(r.dateRecd), r.bu||'', r.bol||'', r.sku||'', r.location||'', r.lot||'', r.skidId||'' ]));
+  const data = [['CUSTOMER','DATE RECD','BU','INBOUND BOL','SKU','UOM','LOCATION','LOT #','SKID ID']];
+  rows.forEach(r => data.push([ r.customer||'', fmtD(r.dateRecd), r.bu||'', r.bol||'', r.sku||'', uomForRow(r), r.location||'', r.lot||'', r.skidId||'' ]));
   const ws = XLSX.utils.aoa_to_sheet(data);
-  ws['!cols'] = [{wch:20},{wch:12},{wch:14},{wch:16},{wch:16},{wch:16},{wch:16},{wch:16}];
+  ws['!cols'] = [{wch:20},{wch:12},{wch:14},{wch:16},{wch:16},{wch:8},{wch:16},{wch:16},{wch:16}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Pending Put Away');
   XLSX.writeFile(wb, 'PickFlow_6021_PendingPutAway_'+new Date().toISOString().slice(0,10)+'.xlsx');
@@ -7523,7 +8073,7 @@ function showLastPutAway(filterDate='') {
              onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='var(--surface)'">
           <span id="lpa-chev-${ci}" style="color:var(--accent);font-size:13px">▶</span>
           <span style="font-weight:bold;font-size:13px;flex:1">${cust}</span>
-          <span style="font-size:11px;color:var(--text2)">${custRolls.length} ${unitNoun(cust)}</span>
+          <span style="font-size:11px;color:var(--text2)">${custRolls.length} ${unitNounForRows(custRolls, cust)}</span>
           <span style="font-size:13px;font-weight:bold;color:var(--warning);margin-left:8px">${Math.round(custTons).toLocaleString()} tons</span>
         </div>
         <div id="lpa-${ci}" style="display:none">
@@ -7531,7 +8081,7 @@ function showLastPutAway(filterDate='') {
             <thead><tr>
               <th style="text-align:left">LOCATION</th>
               <th style="text-align:left">LOT #</th>
-              <th style="text-align:right">${unitNoun(cust).toUpperCase()}</th>
+              <th style="text-align:right">${unitNounForRows(custRolls, cust).toUpperCase()}</th>
               <th style="text-align:right">TONS</th>
             </tr></thead>
             <tbody>`;
@@ -10362,12 +10912,12 @@ function exportInvToExcel() {
   if (lot)  rows = rows.filter(r=>(r.lot||'').toLowerCase().includes(lot.toLowerCase()));
   if (zmoF) rows = rows.filter(r=>{ const z=(r.zmo||(r.lot&&state.dirData[r.lot]?state.dirData[r.lot].zmo:'')||'').toString(); return z.toLowerCase().includes(zmoF.toLowerCase()); });
 
-  const data = [['CUSTOMER','BU','SKU','LOT #','SKID ID','PRODUCT ID','PROD ID 2','LOCATION','DATE RECD','INBOUND BOL','EXP DATE','ZMO','STATUS','PCS PENDING','WEIGHT']];
+  const data = [['CUSTOMER','BU','SKU','UOM','LOT #','SKID ID','PRODUCT ID','PROD ID 2','LOCATION','DATE RECD','INBOUND BOL','EXP DATE','ZMO','STATUS','PCS PENDING','WEIGHT']];
   rows.forEach(r => {
     const expD = r.dirExpDate||r.expDate;
     const isPicked = (r.pcsPending||0)>0;
     data.push([
-      r.customer||'', r.bu||'', r.sku||'', r.lot||'', r.skidId||'',
+      r.customer||'', r.bu||'', r.sku||'', uomForRow(r), r.lot||'', r.skidId||'',
       r.productId||'', r.prod2||'', r.location||'',
       r.dateRecd ? new Date(r.dateRecd).toLocaleDateString() : '',
       r.bol||'',
@@ -10430,7 +10980,7 @@ function exportEodReport(code){
     rows.forEach(function(r){
       const expD=r.dirExpDate||r.expDate; const wt=r.grossWt||0; const pcs=r.pcs||1;
       det.push([ r.customer||'', r.po||'', r.sku||'', r.productId||'', r.prod2||'',
-        (r.buRaw||'').toString().toUpperCase(), pcs, '', r.pcsPending||0, r.dmg||0, r.status||'', r.lot||'',
+        (r.buRaw||'').toString().toUpperCase(), pcs, uomForRow(r), r.pcsPending||0, r.dmg||0, r.status||'', r.lot||'',
         expD ? new Date(expD).toLocaleDateString() : '', '', r.location||'', r.skidId||'',
         r.dateRecd ? new Date(r.dateRecd).toLocaleDateString() : '', '', r.invoice||'', '',
         wt, wt, wt*pcs, wt*pcs, '', '', r.bol||'' ]);
