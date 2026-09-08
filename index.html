@@ -423,6 +423,15 @@ function unitNounForCust(c){
   const rows=(state.inventory||[]).filter(r=>(r.customer||'UNKNOWN')===c);
   return unitNounForRows(rows, c);
 }
+// Plural unit word for a SINGLE row — the item's master UOM (bundles for DuraBubble,
+// rolls, cases…) or the customer/BU fallback. Used to break an IPG customer out by UOM.
+function _rowUnitLabel(r){
+  const u=uomForRow(r);
+  return u ? uomWord(u,2) : unitNoun(r);
+}
+// Sort order for UOM sub-rows: rolls, then bundles, then the rest.
+var _UOM_ROW_ORDER={rolls:0,bundles:1,cases:2,pallets:3,skids:4,boxes:5,bags:6,each:7};
+function _uomLabelSort(a,b){ return ((_UOM_ROW_ORDER[a]!=null?_UOM_ROW_ORDER[a]:9)-(_UOM_ROW_ORDER[b]!=null?_UOM_ROW_ORDER[b]:9)) || String(a).localeCompare(String(b)); }
 // MAXXON is counted in skids; everyone else in rolls. Resolve the unit for a cycle count
 // from the customer of the counted locations (falls back to the session's stored BU codes).
 function ccUnitForLocs(locs) {
@@ -530,7 +539,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 89;
+const APP_BUILD = 90;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -3475,6 +3484,10 @@ function showInventorySummary() {
 
   // Build BU map for Smurfit rows
   const buMap = {}; // bu → status → {tons,rolls}
+  // Per-customer UOM breakout (rolls / bundles / cases…) for IPG customers
+  const uomMap = {};        // cust → label → status → {tons,rolls}
+  const custLabels = {};    // cust → Set(labels)
+  const custHasIPG = {};    // cust → true when any row resolves to an IPG item
 
   inv.forEach(r => {
     const c = r.customer||'UNKNOWN';
@@ -3486,7 +3499,16 @@ function showInventorySummary() {
       if (!buMap[bu]) { buMap[bu]={}; allCols.forEach(s2=>buMap[bu][s2]=emptyBucket()); }
       addTo(buMap[bu][s], r); addTo(buMap[bu]['TOTAL'], r);
     }
+    // UOM breakout
+    const label = _rowUnitLabel(r);
+    if (!uomMap[c]) uomMap[c] = {};
+    if (!uomMap[c][label]) { uomMap[c][label]={}; allCols.forEach(x=>uomMap[c][label][x]=emptyBucket()); }
+    addTo(uomMap[c][label][s], r); addTo(uomMap[c][label]['TOTAL'], r);
+    (custLabels[c] = custLabels[c] || new Set()).add(label);
+    if (uomForRow(r) || _rowIsIPG(r)) custHasIPG[c] = true;
   });
+  // A customer breaks out by UOM when it holds IPG product across more than one unit.
+  const isUomBreak = c => !!custHasIPG[c] && custLabels[c] && custLabels[c].size > 1 && !isSmurfit(c);
 
   // Grand totals
   const grand = {}; allCols.forEach(s => grand[s] = emptyBucket());
@@ -3531,12 +3553,40 @@ function showInventorySummary() {
     smurfitTotal[s].rolls += map[c][s].rolls;
   }));
 
-  const renderCustomerRow = (c, ci, altBg) => `
+  window._summaryUomExpanded = window._summaryUomExpanded || {};
+  const renderCustomerRow = (c, ci, altBg) => {
+    if (isUomBreak(c)) return renderUomCustomer(c, altBg);
+    return `
     <tr style="background:${altBg?'var(--surface)':''}">
       <td style="font-weight:bold">${c}</td>
       ${accCell(map[c])}
       ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s], unitNounForCust(c))).join('')}
     </tr>`;
+  };
+  // IPG customer as an expandable row: top row = customer total, sub-rows per UOM.
+  const renderUomCustomer = (c, altBg) => {
+    const exp = !!window._summaryUomExpanded[c];
+    const labels = [...(custLabels[c]||[])].sort(_uomLabelSort);
+    const cEsc = c.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    let out = `
+    <tr style="background:${altBg?'var(--surface)':''};cursor:pointer" onclick="toggleUomCust('${cEsc}')" title="Click to ${exp?'collapse':'break out'} by UOM">
+      <td style="font-weight:bold">
+        <span style="color:var(--accent);margin-right:6px;font-size:12px">${exp?'▼':'▶'}</span>${c}
+        <span style="font-size:10px;color:var(--text2);margin-left:6px">${exp?'(collapse)':'(by UOM)'}</span>
+      </td>
+      ${accCell(map[c])}
+      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s], unitNounForCust(c))).join('')}
+    </tr>`;
+    labels.forEach(lb => {
+      out += `
+      <tr style="display:${exp?'table-row':'none'};background:rgba(61,92,230,0.03)">
+        <td style="padding-left:28px;color:var(--accent);font-size:11px">↳ ${lb}</td>
+        ${accCell(uomMap[c][lb])}
+        ${allCols.map(s=>cell(uomMap[c][lb][s], s==='TOTAL', statusColors[s], lb)).join('')}
+      </tr>`;
+    });
+    return out;
+  };
 
   // Build all rows
   let rows = '';
@@ -3629,6 +3679,11 @@ function showInventorySummary() {
   document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">'+h+'</div>';
 }
 
+function toggleUomCust(c) {
+  window._summaryUomExpanded = window._summaryUomExpanded || {};
+  window._summaryUomExpanded[c] = !window._summaryUomExpanded[c];
+  showInventorySummary();
+}
 function toggleSmurfitBU() {
   window._summarySmurfitExpanded = !window._summarySmurfitExpanded;
   showInventorySummary();
