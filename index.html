@@ -539,7 +539,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 90;
+const APP_BUILD = 91;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -9205,10 +9205,10 @@ function startCycleCount() {
   selected.forEach(loc => { locData[loc] = []; });
   state.inventory.forEach(r => {
     if (!selected.includes(r.location)) return;
-    if ((r.pcsPending||0) > 0) return;
-    if (window._ccCustFilter && window._ccCustFilter!=='__all__' && (r.customer||'')!==window._ccCustFilter) return;   // customer filter — inert unless a customer is chosen
-    if (window._ccSkuFilter && window._ccSkuFilter!=='__all__' && (r.sku||'')!==window._ccSkuFilter) return;          // SKU filter — inert unless a SKU is chosen
-    if (window._ccLotSet && window._ccLotSet.size && !window._ccLotSet.has((r.lot||'').trim().toUpperCase())) return; // lot filter — inert unless lots are checked (ANY of them)
+    if ((r.pcsPending||0) > 0) return;   // Available only — picked/allocated rolls are excluded
+    // The customer/SKU/lot filters narrow the LOCATION PICKER only — they must NOT scope the
+    // count itself. A physical bin count lists EVERY available roll in the selected bin, so the
+    // sheet always matches Raw Data for that location. (Do not re-add per-row filtering here.)
     locData[r.location].push(r);
   });
 
