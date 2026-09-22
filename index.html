@@ -496,6 +496,7 @@ let state = {
   buZmoMap: {},
   ipgWidthTable: {},
   ipgSkuTable: {},          // imported IPG Materials master: SKU -> {desc, uom}
+  ipgSkuList: {},           // imported IPG SKU reference list (new EDI): Sku -> {desc, vendorSku}
   ipgManualReceipts: [],    // manual "New Inbound" receipts built in the IPG segment
   hbhWidthTable: {},
   domtarSku: {},
@@ -539,7 +540,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 91;
+const APP_BUILD = 101;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -738,6 +739,13 @@ function listenToFirebase() {
   db.ref('6021/ipgSkuTable').on('value', snap => {
     state.ipgSkuTable = snap.val() || {};
     if (typeof updateIPGSkuCount === 'function') updateIPGSkuCount();
+    if (document.getElementById('ipm-sku-list') && typeof ipmRefreshSkuList === 'function') ipmRefreshSkuList();
+  });
+
+  // IPG SKU reference list (new EDI): Sku -> Description, used for the preliminary SKU lookup
+  db.ref('6021/ipgSkuList').on('value', snap => {
+    state.ipgSkuList = snap.val() || {};
+    if (typeof updateIPGSkuListCount === 'function') updateIPGSkuListCount();
     if (document.getElementById('ipm-sku-list') && typeof ipmRefreshSkuList === 'function') ipmRefreshSkuList();
   });
 
@@ -4172,6 +4180,19 @@ function showEDIImportFile() {
             <input type="file" id="ipg-file-input" accept=".xlsx,.xls" style="display:none"
               onchange="if(this.files[0])processIPGFile(this.files[0])">
           </div>
+          <div id="ckp-dropzone"
+            ondragover="event.preventDefault();this.style.borderColor='#16a34a';this.style.background='rgba(22,163,74,0.06)'"
+            ondragleave="this.style.borderColor='var(--border)';this.style.background=''"
+            ondrop="event.preventDefault();this.style.borderColor='var(--border)';this.style.background='';if(event.dataTransfer.files[0])processCKPBol(event.dataTransfer.files[0])"
+            title="Drop a Canadian Kraft Paper Bill of Lading PDF — auto-fills a New Inbound receipt header; you scan the Roll IDs"
+            style="border:2px dashed var(--border);border-radius:8px;padding:12px 20px;text-align:center;cursor:pointer;font-size:12px;color:var(--text2);transition:.2s;min-width:200px"
+            onclick="document.getElementById('ckp-file-input').click()">
+            <span style="font-size:16px">📄</span>
+            <span style="font-weight:600;margin-left:6px">Drop BOL PDF → Inbound</span>
+            <div style="font-size:10px;margin-top:2px">Canadian Kraft Paper · scanned .pdf</div>
+            <input type="file" id="ckp-file-input" accept=".pdf" style="display:none"
+              onchange="if(this.files[0])processCKPBol(this.files[0])">
+          </div>
           <button onclick="showIPGManual()" title="Build a manual inbound receipt from the SKU master"
             style="background:#16a34a;color:#fff;border:none;border-radius:7px;padding:10px 16px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;align-self:flex-end;margin-left:6px">📥 New Inbound</button>
         </div>
@@ -4191,10 +4212,19 @@ function showEDIImportFile() {
           style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600;width:100%">⬇ Download Current / Template</button>
         <span id="ipg-sku-count" style="font-size:10px;color:var(--text2)"></span>
 
+        <span style="font-size:10px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">IPG SKU List</span>
+        <button onclick="document.getElementById('ipg-skulist-input').click()"
+          style="background:var(--surface);color:var(--accent);border:1.5px solid var(--accent);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:700;width:100%">⬆ Import Table</button>
+        <button onclick="downloadIPGSkuListTemplate()"
+          style="background:none;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600;width:100%">⬇ Download Current / Template</button>
+        <span id="ipg-skulist-count" style="font-size:10px;color:var(--text2)"></span>
+
         <input type="file" id="ipg-width-input" accept=".xlsx,.xls" style="display:none"
           onchange="if(this.files[0])handleIPGWidthFile(this.files[0])">
         <input type="file" id="ipg-sku-input" accept=".xlsx,.xls" style="display:none"
           onchange="if(this.files[0])handleIPGSkuFile(this.files[0])">
+        <input type="file" id="ipg-skulist-input" accept=".xlsx,.xls" style="display:none"
+          onchange="if(this.files[0])handleIPGSkuListFile(this.files[0])">
       </div>
       <div id="ipg-load-list" style="max-height:420px;overflow-y:auto;overflow-x:hidden"></div>
   </div>`;
@@ -4207,6 +4237,7 @@ function showEDIImportFile() {
   if (_catMergeGroups && _catMergeGroups.length) renderCatMerge();
   updateIPGWidthCount();
   updateIPGSkuCount();
+  updateIPGSkuListCount();
   updateHBHWidthCount();
 }
 
@@ -4706,6 +4737,82 @@ function downloadIPGSkuTemplate(){
   XLSX.writeFile(wb,'IPG_Materials_Table.xlsx');
 }
 
+// ---- IPG SKU reference list (new EDI): Sku → Description (+ Vendor Sku) ------
+// A separate, importable list of the IPG SKUs used by the new BOL/EDI process. Feeds
+// the preliminary-SKU description lookup (inventory → IPG SKU list → Materials master)
+// and the New Inbound SKU picker. Stored at 6021/ipgSkuList as {sku,desc,vendorSku,…}.
+function getIpgSkuList(){
+  const raw=(state && state.ipgSkuList) ? state.ipgSkuList : null;
+  const map={};
+  if(raw){
+    const recs=Array.isArray(raw)?raw:Object.values(raw);
+    recs.forEach(r=>{ if(r&&r.sku!=null&&String(r.sku).trim()) map[String(r.sku).trim()]={desc:r.desc||'',vendorSku:r.vendorSku||'',dept:r.dept||'',active:r.active||''}; });
+  }
+  return map;
+}
+function ipgSkuListCount(){ return Object.keys(getIpgSkuList()).length; }
+function ipgSkuListLookup(sku){
+  const t=getIpgSkuList(); const k=String(sku==null?'':sku).trim(); if(!k) return null;
+  if(t[k]) return t[k];
+  const ku=k.toUpperCase();
+  for(const key in t){ if(key.toUpperCase()===ku) return t[key]; }                              // case-insensitive
+  for(const key in t){ if(String(t[key].vendorSku||'').trim().toUpperCase()===ku) return t[key]; } // by Vendor Sku
+  return null;
+}
+function updateIPGSkuListCount(){
+  const el=document.getElementById('ipg-skulist-count'); if(!el) return;
+  const n=ipgSkuListCount();
+  el.textContent = n ? (n+' IPG SKU'+(n===1?'':'s')+' loaded') : 'no IPG SKU list yet — import to reference';
+}
+function importIPGSkuList(wb){
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
+  let hi=rows.findIndex(r=>r.some(c=>String(c||'').trim().toLowerCase()==='sku'));
+  if(hi<0) hi=0;
+  const hdr=rows[hi];
+  const cSku =_ipgSkuFindCol(hdr,['Sku','SKU','Item','Item #']);
+  const cDesc=_ipgSkuFindCol(hdr,['Description','DESCRIPTION','Desc','Item Description']);
+  const cVen =_ipgSkuFindCol(hdr,['Vendor Sku','Vendor SKU','VendorSku','Vendor']);
+  const cDept=_ipgSkuFindCol(hdr,['Department','Dept']);
+  const cAct =_ipgSkuFindCol(hdr,['Active']);
+  if(cSku<0||cDesc<0){ showAlert('Could not find Sku and Description columns in the IPG SKU file.','danger'); return; }
+  const records=[]; const seen={}; let n=0;
+  rows.slice(hi+1).forEach(r=>{
+    const sku=String(r[cSku]==null?'':r[cSku]).trim();
+    const desc=String(r[cDesc]==null?'':r[cDesc]).trim();
+    if(!sku) return;
+    const key=sku.toUpperCase(); if(seen[key]) return; seen[key]=1;   // first occurrence wins on duplicate
+    records.push({ sku:sku, desc:desc,
+      vendorSku:(cVen>=0?String(r[cVen]==null?'':r[cVen]).trim():''),
+      dept:(cDept>=0?String(r[cDept]==null?'':r[cDept]).trim():''),
+      active:(cAct>=0?String(r[cAct]==null?'':r[cAct]).trim():'') });
+    n++;
+  });
+  if(!n){ showAlert('No SKU rows found. Expected a Sku column and a Description column.','warning'); return; }
+  state.ipgSkuList=records;
+  if(db){ db.ref('6021/ipgSkuList').set(records).catch(err=>showAlert('Loaded locally, cloud sync failed: '+err.message,'warning')); }
+  showAlert('✓ IPG SKU list loaded — '+n+' SKU'+(n===1?'':'s')+'.','success');
+  updateIPGSkuListCount();
+  if(typeof ipmRefreshSkuList==='function') ipmRefreshSkuList();
+}
+function handleIPGSkuListFile(file){
+  const reader=new FileReader();
+  reader.onload=ev=>{ try{ const wb=XLSX.read(ev.target.result,{type:'binary'}); importIPGSkuList(wb); }
+    catch(err){ showAlert('IPG SKU list import failed: '+err.message,'danger'); console.error(err); } };
+  reader.readAsBinaryString(file);
+}
+function downloadIPGSkuListTemplate(){
+  const raw=(state&&state.ipgSkuList)?(Array.isArray(state.ipgSkuList)?state.ipgSkuList:Object.values(state.ipgSkuList)):[];
+  const aoa=[['Sku','Description','Department','Active','Vendor Sku']];
+  if(raw.length){ raw.forEach(r=>aoa.push([r.sku||'',r.desc||'',r.dept||'',r.active||'',r.vendorSku||''])); }
+  else { aoa.push(['EX553TK01900',"EX553TK,19'',50,LONGVIEWWA",'',1,'EX553TK01900']); }
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  for(let i=2;i<=aoa.length;i++){ const c=ws['A'+i]; if(c){c.t='s';c.z='@';} const cv=ws['E'+i]; if(cv){cv.t='s';cv.z='@';} } // keep SKUs as text
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'IPG SKUs');
+  XLSX.writeFile(wb,'IPG_SKU_List.xlsx');
+}
+
 // ---- Manual New Inbound builder --------------------------------------------
 const IPM = { lines: [], exportRows: [], activeId: null };
 function ipmGv(id){ return (document.getElementById(id)||{}).value||''; }
@@ -4790,8 +4897,8 @@ function showIPGManual(id){
               </div>
               <div style="overflow:auto;margin-top:12px">
                 <table class="ipm-tbl">
-                  <thead><tr><th>SKU<span class="ipm-req">*</span></th><th>Description (auto)</th><th>UOM</th><th>Qty<span class="ipm-req">*</span></th><th></th></tr></thead>
-                  <tbody id="ipm-lines"><tr><td colspan="5" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr></tbody>
+                  <thead><tr><th>SKU<span class="ipm-req">*</span></th><th>Description (auto)</th><th>UOM</th><th>Width</th><th>Qty<span class="ipm-req">*</span></th><th></th></tr></thead>
+                  <tbody id="ipm-lines"><tr><td colspan="6" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr></tbody>
                 </table>
               </div>
               <div class="ipm-note"><b>Manual entry:</b> type a SKU (auto-completes from the imported master) and the <b>Description</b> &amp; <b>UOM</b> auto-fill. Enter a <b>Qty</b> per SKU — each unit becomes one export row. The <b>Total Weight</b> above is split <b>evenly</b> across every generated row.</div>
@@ -4831,13 +4938,11 @@ function showIPGManual(id){
 
 function ipmRefreshSkuList(){
   const dl=document.getElementById('ipm-sku-list'); if(!dl) return;
-  const t=getIpgSkuTable();
   const seen={}, opts=[];
-  Object.keys(t).forEach(k=>{
-    const base=ipgBaseSku(k, t[k]);           // DuraBubble AS-prefix dropped for display
-    if(seen[base]) return; seen[base]=1;       // one option per base SKU
-    opts.push('<option value="'+ipmEsc(base)+'">'+ipmEsc(t[k].desc||'')+'</option>');
-  });
+  const add=(sku,desc)=>{ const base=ipgBaseSku(String(sku||'')); if(!base) return; const bk=base.toUpperCase(); if(seen[bk]) return; seen[bk]=1; opts.push('<option value="'+ipmEsc(base)+'">'+ipmEsc(desc||'')+'</option>'); };
+  // IPG SKU list (new EDI) first, then the Materials master; dedupe by base SKU
+  const L=getIpgSkuList(); Object.keys(L).forEach(k=>add(k, L[k].desc));
+  const t=getIpgSkuTable(); Object.keys(t).forEach(k=>add(k, t[k].desc));
   dl.innerHTML=opts.join('');
 }
 function ipmHdrPreview(){
@@ -4863,13 +4968,14 @@ function ipmUpdateTotals(){
 }
 function ipmRenderLines(){
   const tb=document.getElementById('ipm-lines'); if(!tb) return; tb.innerHTML='';
-  if(!IPM.lines.length){ tb.innerHTML='<tr><td colspan="5" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr>'; ipmUpdateTotals(); return; }
+  if(!IPM.lines.length){ tb.innerHTML='<tr><td colspan="6" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr>'; ipmUpdateTotals(); return; }
   IPM.lines.forEach((ln,i)=>{
     const tr=document.createElement('tr');
     tr.innerHTML=
       '<td><input list="ipm-sku-list" value="'+ipmEsc(ln.sku)+'" placeholder="SKU" oninput="ipmEditLine('+i+',&quot;sku&quot;,this.value)" style="width:120px"></td>'+
       '<td><input id="ipm-desc-'+i+'" value="'+ipmEsc(ln.desc)+'" placeholder="auto from SKU" oninput="ipmEditLine('+i+',&quot;desc&quot;,this.value)" style="width:250px"></td>'+
       '<td><input id="ipm-uom-'+i+'" value="'+ipmEsc(ln.uom)+'" placeholder="UOM" oninput="ipmEditLine('+i+',&quot;uom&quot;,this.value)" style="width:64px;text-transform:uppercase"></td>'+
+      '<td><input class="ipm-nospin" type="number" min="0" step="0.01" value="'+(ln.width===''||ln.width==null?'':ln.width)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;width&quot;,this.value)" style="width:72px;text-align:right"></td>'+
       '<td><input class="ipm-nospin" type="number" min="0" step="1" value="'+(ln.qty===''||ln.qty==null?'':ln.qty)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;qty&quot;,this.value)" style="width:72px;text-align:right"></td>'+
       '<td><button onclick="ipmRemoveLine('+i+')" title="Remove line" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 6px">✕</button></td>';
     tb.appendChild(tr);
@@ -4881,20 +4987,37 @@ function ipmEditLine(i,k,v){
   if(k==='qty'){ ln.qty=(v===''?'':Math.max(0,parseInt(v)||0)); }
   else if(k==='sku'){
     ln.sku=String(v).trim();
-    const m=ipgSkuLookup(ln.sku);
-    if(m){
-      ln.desc=m.desc||''; ln.uom=ipgSkuUom(m); // DuraBubble → BUND, else master UOM
+    const d=ipmDescForSku(ln.sku);   // inventory Product ID first, then IPG Materials master
+    if(d){
+      ln.desc=d.desc||'';
+      if(d.uom) ln.uom=d.uom;        // a master hit sets UOM; an inventory hit keeps the line's UOM (e.g. ROLLS)
       const de=document.getElementById('ipm-desc-'+i); if(de) de.value=ln.desc;
-      const ue=document.getElementById('ipm-uom-'+i); if(ue) ue.value=ln.uom;
+      const ue=document.getElementById('ipm-uom-'+i); if(ue && d.uom) ue.value=ln.uom;
     }
   }
   else if(k==='uom'){ ln.uom=String(v).toUpperCase(); }
+  else if(k==='width'){ ln.width=(v===''?'':(parseFloat(v)||0)); }
   else { ln[k]=v; }
   ipmUpdateTotals(); ipmResetPreview();
 }
+// Description for a SKU: live inventory Product ID first, then the IPG Materials master.
+function ipmDescForSku(sku){
+  const k=String(sku==null?'':sku).trim(); if(!k) return null;
+  const ku=k.toUpperCase();
+  const inv=(state.inventory||[]).find(r=>String(r.sku==null?'':r.sku).trim().toUpperCase()===ku && String(r.productId||'').trim());
+  if(inv) return {desc:String(inv.productId).trim(), uom:null, src:'inventory'};
+  // IPG SKU reference list (new EDI) — authoritative for these SKUs; keep master UOM if any (DuraBubble→BUND)
+  const li=(typeof ipgSkuListLookup==='function')?ipgSkuListLookup(k):null;
+  if(li && li.desc){ const mm=(typeof ipgSkuLookup==='function')?ipgSkuLookup(k):null; return {desc:li.desc, uom:(mm&&typeof ipgSkuUom==='function'?ipgSkuUom(mm):null), src:'ipglist'}; }
+  const m=(typeof ipgSkuLookup==='function')?ipgSkuLookup(k):null;
+  if(m) return {desc:m.desc||'', uom:(typeof ipgSkuUom==='function'?ipgSkuUom(m):(m.uom||'')), src:'master'};
+  return null;
+}
+// Scan/edit a generated row's Lot (Roll ID) in place — no re-render, keeps input focus.
+function ipmSetLot(i,v){ if(IPM.exportRows[i]) IPM.exportRows[i].lot=String(v).trim(); }
 function ipmAddLine(){
   const po=ipmGv('ipm-po').trim().toUpperCase();
-  IPM.lines.push({ po:po, sku:'', desc:'', uom:'', qty:'' });
+  IPM.lines.push({ po:po, sku:'', desc:'', uom:'', qty:'', width:'' });
   ipmRenderLines(); ipmResetPreview();
 }
 function ipmRemoveLine(i){ IPM.lines.splice(i,1); ipmRenderLines(); ipmResetPreview(); }
@@ -4908,7 +5031,14 @@ function ipmResetPreview(){
   const ex=document.getElementById('ipm-export'); if(ex)ex.disabled=true;
   const sv=document.getElementById('ipm-save'); if(sv)sv.disabled=true;
 }
+// Prod ID 2 on the EDI export = "IPG" + Invoice (CKP Order #) + PO #, space-separated.
+function ipmProd2(){
+  const inv=ipmGv('ipm-invoice').trim().toUpperCase();
+  const po =ipmGv('ipm-po').trim().toUpperCase();
+  return ('IPG '+inv+' '+po).replace(/\s+/g,' ').trim();
+}
 function ipmGenerate(){
+  if(IPM.ckpMode){ return ipmGenerateFromRolls(); }
   const po=ipmGv('ipm-po').trim().toUpperCase();
   const active=IPM.lines.filter(l=>String(l.sku).trim() && (parseInt(l.qty)||0)>0);
   if(!active.length){ ipmStatus('Add at least one SKU line with a qty','var(--danger)'); return; }
@@ -4923,27 +5053,98 @@ function ipmGenerate(){
     for(let k=0;k<qty;k++){
       seq++;
       const last=(seq===totalRows);
-      const w = totalWt>0 ? (last ? Math.round((totalWt-acc)*10000)/10000 : per) : 0;
-      acc += w;
-      const lot = po ? (po+'-'+String(seq).padStart(4,'0')) : String(seq).padStart(4,'0');
-      const prod2 = ('IPG '+po).trim();   // Prod ID 2 = "IPG " + PO
+      // Weight only splits when a Total Weight is entered; otherwise left BLANK to scan in.
+      const w = totalWt>0 ? (last ? Math.round((totalWt-acc)*10000)/10000 : per) : '';
+      acc += (typeof w==='number'?w:0);
+      const lot = '';   // no auto-generated Lot# — left blank for the receiver to scan/fill
+      // LF blank unless a line LF was entered — scanned in alongside Weight.
+      const lfv = (ln.lf===''||ln.lf==null) ? '' : (parseFloat(ln.lf)||0);
+      const prod2 = ipmProd2();   // Prod ID 2 = "IPG " + Invoice + " " + PO
       IPM.exportRows.push({
         sku:ipgBaseSku(String(ln.sku).trim()), productID:ln.desc||'', lot:lot, prodID2:prod2, po:po,
-        weight:w, gross:w, uom:(ln.uom||'CS').toUpperCase(), lf:0, pcs:1, width:0, expDate:expDate.getTime()
+        weight:w, gross:(typeof w==='number'?w:0), uom:(ln.uom||'CS').toUpperCase(), lf:lfv, pcs:1, width:(parseFloat(ln.width)||0), expDate:expDate.getTime()
       });
     }
   });
   ipmRenderPreview();
   ipmStatus('Generated '+IPM.exportRows.length+' row(s)','var(--accent)');
 }
+// CKP mode: build one row per OCR'd roll (actual Roll ID / weight / LF / width),
+// padded with blank rows up to the BOL roll count for the receiver to fill in.
+function ipmGenerateFromRolls(){
+  const line=IPM.lines[0]||{};
+  const sku=String(line.sku||'').trim();
+  if(!sku){ ipmStatus('Enter the SKU first','var(--danger)'); return; }
+  const skuOut=ipgBaseSku(sku), desc=line.desc||'';
+  const po=ipmGv('ipm-po').trim().toUpperCase();
+  const prod2=ipmProd2();                              // "IPG " + Invoice(Order) + " " + PO
+  const uom=(line.uom||'ROLLS').toUpperCase();
+  const w=parseFloat(line.width)||'';
+  const dv=ipmGv('ipm-date'); const expDate=dv?new Date(dv+'T00:00:00'):new Date();
+  const rolls=(IPM.ckpRolls&&IPM.ckpRolls.length)?IPM.ckpRolls:[];
+  const target=Math.max(parseInt(IPM.ckpUnits)||0, rolls.length, 1);
+  IPM.exportRows=[];
+  for(let i=0;i<target;i++){
+    const r=rolls[i]||{};
+    const rawId=String(r.rollId||'').toUpperCase();
+    // Legible Roll ID (passes the strict pattern) → apply it with its weight/LF.
+    // Otherwise leave Roll ID, Weight and LF BLANK so the receiver scans them into the
+    // Excel export. Everything else (SKU / Description / Prod ID 2 / Width…) still fills.
+    const legible = !!rawId && !_ckpRollSuspect(rawId);
+    IPM.exportRows.push({
+      sku:skuOut, productID:desc, lot:(legible?rawId:''), prodID2:prod2, po:po,
+      weight:(legible?(parseFloat(r.weight)||0):''), gross:(legible?(parseFloat(r.weight)||0):0), uom:uom,
+      lf:(legible?(parseFloat(r.lf)||0):''), pcs:1, width:(parseFloat(r.width)||w), expDate:expDate.getTime()
+    });
+  }
+  ipmRenderPreview();
+  const blanks=IPM.exportRows.filter(r=>!r.lot).length;
+  ipmStatus('Generated '+IPM.exportRows.length+' roll(s) — '+blanks+' blank line(s) to scan (Roll ID/Weight/LF).','var(--accent)');
+}
+// Edit a generated row's value in place (no re-render — keeps input focus).
+function ipmSetRowVal(i,key,v){
+  const r=IPM.exportRows[i]; if(!r) return;
+  if(key==='weight'){ const n=parseFloat(v)||0; r.weight=n; r.gross=n; }
+  else if(key==='lf'){ r.lf=parseFloat(v)||0; }
+  else if(key==='lot'){ r.lot=String(v).trim(); const inp=document.querySelector('#ipm-prev input[data-lot="'+i+'"]'); if(inp) inp.style.borderColor=(!r.lot||_ckpRollSuspect(r.lot))?'var(--danger)':'var(--border)'; }
+  else r[key]=v;
+}
+function ipmAddCkpRow(){
+  const line=IPM.lines[0]||{}; const po=ipmGv('ipm-po').trim().toUpperCase();
+  const dv=ipmGv('ipm-date'); const expDate=dv?new Date(dv+'T00:00:00'):new Date();
+  IPM.exportRows.push({ sku:ipgBaseSku(String(line.sku||'').trim()), productID:line.desc||'', lot:'', prodID2:ipmProd2(),
+    po:po, weight:'', gross:0, uom:(line.uom||'ROLLS').toUpperCase(), lf:'', pcs:1, width:(parseFloat(line.width)||''), expDate:expDate.getTime() });
+  ipmRenderPreview();
+}
+function ipmRemoveRow(i){ IPM.exportRows.splice(i,1); ipmRenderPreview(); }
 function ipmRenderPreview(){
   const tb=document.getElementById('ipm-prev'); if(!tb) return; tb.innerHTML=''; let tot=0;
   const ds=ms=>{const d=new Date(ms);return (d.getMonth()+1)+'/'+d.getDate()+'/'+d.getFullYear();};
   const fmt=n=>(Math.round(n*10000)/10000).toLocaleString(undefined,{maximumFractionDigits:4});
-  IPM.exportRows.forEach(r=>{ tot+=r.weight; const tr=document.createElement('tr');
-    tr.innerHTML='<td>'+ipmEsc(r.sku)+'</td><td>'+ipmEsc(r.productID)+'</td><td>'+ipmEsc(r.lot)+'</td><td>'+ipmEsc(r.prodID2)+'</td><td>'+ipmEsc(r.po)+'</td><td style="text-align:right">'+fmt(r.weight)+'</td><td style="text-align:right">'+fmt(r.gross)+'</td><td>'+ipmEsc(r.uom)+'</td><td style="text-align:right">0</td><td style="text-align:right">'+r.pcs+'</td><td style="text-align:right">0</td><td>'+ds(r.expDate)+'</td>';
+  const ckp=!!IPM.ckpMode;
+  const inp='font-size:11px;padding:2px 4px';
+  IPM.exportRows.forEach((r,idx)=>{ tot+=(parseFloat(r.weight)||0); const tr=document.createElement('tr');
+    const bad = ckp && (!r.lot || _ckpRollSuspect(r.lot));
+    const lotCell = '<td><input data-lot="'+idx+'" value="'+ipmEsc(r.lot)+'" oninput="ipmSetRowVal('+idx+',&quot;lot&quot;,this.value)" placeholder="'+(ckp?'roll ID':'scan roll ID')+'" style="width:120px;'+inp+';border-color:'+(bad?'var(--danger)':'var(--border)')+'"'+(bad?' title="Check this Roll ID — OCR was unsure"':'')+'>'
+      + (ckp?' <button onclick="ipmRemoveRow('+idx+')" title="Remove roll" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:12px;padding:0 2px">✕</button>':'') + '</td>';
+    const wtCell = ckp
+      ? '<td style="text-align:right"><input class="ipm-nospin" type="number" step="0.0001" value="'+(r.weight||'')+'" oninput="ipmSetRowVal('+idx+',&quot;weight&quot;,this.value)" style="width:80px;text-align:right;'+inp+'"></td>'
+      : '<td style="text-align:right">'+((r.weight===''||r.weight==null)?'':fmt(r.weight))+'</td>';
+    const lfCell = ckp
+      ? '<td style="text-align:right"><input class="ipm-nospin" type="number" step="1" value="'+(r.lf||'')+'" oninput="ipmSetRowVal('+idx+',&quot;lf&quot;,this.value)" style="width:72px;text-align:right;'+inp+'"></td>'
+      : '<td style="text-align:right">'+((r.lf===''||r.lf==null)?'':r.lf)+'</td>';
+    tr.innerHTML='<td>'+ipmEsc(r.sku)+'</td><td>'+ipmEsc(r.productID)+'</td>'
+      + lotCell
+      +'<td>'+ipmEsc(r.prodID2)+'</td><td>'+ipmEsc(r.po)+'</td>'
+      + wtCell +'<td style="text-align:right">'+((r.gross===''||r.gross==null)?'':fmt(r.gross))+'</td>'
+      +'<td>'+ipmEsc(r.uom)+'</td>'+ lfCell +'<td style="text-align:right">'+r.pcs+'</td><td style="text-align:right">'+(r.width||0)+'</td><td>'+ds(r.expDate)+'</td>';
     tb.appendChild(tr);
   });
+  if(ckp){
+    const af=document.createElement('tr');
+    af.innerHTML='<td colspan="12" style="padding:6px 4px"><button onclick="ipmAddCkpRow()" style="background:var(--surface);color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:700">＋ Add Roll</button></td>';
+    tb.appendChild(af);
+  }
   const tr=document.createElement('tr'); tr.style.fontWeight='bold'; tr.style.background='var(--surface2)';
   tr.innerHTML='<td colspan="5">TOTAL · '+IPM.exportRows.length+' rows</td><td style="text-align:right">'+fmt(tot)+'</td><td style="text-align:right">'+fmt(tot)+'</td><td colspan="5"></td>';
   tb.appendChild(tr);
@@ -4957,7 +5158,7 @@ function ipmRenderPreview(){
   document.getElementById('ipm-save').disabled=false;
 }
 function ipmNew(){
-  IPM.activeId=null; IPM.lines=[]; ipmResetPreview();
+  IPM.activeId=null; IPM.lines=[]; IPM.ckpMode=false; IPM.ckpRolls=[]; IPM.ckpUnits=0; ipmResetPreview();
   ['ipm-receiver','ipm-po','ipm-invoice','ipm-truck','ipm-loadwt'].forEach(id=>{const e=document.getElementById(id); if(e)e.value='';});
   const d=new Date(),p=n=>String(n).padStart(2,'0'); const de=document.getElementById('ipm-date'); if(de) de.value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
   ipmRenderLines(); ipmHdrPreview(); ipmRenderSaved(); ipmStatus('');
@@ -5009,7 +5210,7 @@ function ipmDelete(id){
 }
 function ipmLoad(id){
   const r=(state.ipgManualReceipts||[]).find(x=>x.id===id); if(!r) return;
-  IPM.activeId=id;
+  IPM.activeId=id; IPM.ckpMode=false; IPM.ckpRolls=[]; IPM.ckpUnits=0;
   const set=(eid,v)=>{const e=document.getElementById(eid); if(e)e.value=v||'';};
   set('ipm-receiver',r.receiver); set('ipm-po',r.po); set('ipm-invoice',r.invoice); set('ipm-truck',r.truck); set('ipm-loadwt',r.loadWeight||'');
   const d=new Date(r.expDate),p=n=>String(n).padStart(2,'0'); set('ipm-date',d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()));
@@ -5020,19 +5221,38 @@ function ipmLoad(id){
   ipmRenderSaved(); ipmStatus('');
 }
 // ---- Export — shared EDI template (matches the IPG / Nexus export layout) ----
-function ipmExport(){
+// Lazy-load the style-capable SheetJS fork (xlsx-js-style) so we can shade the
+// empty scan cells. Captures it under _XLSXS and restores the base XLSX global so
+// the app's other exports/imports keep using the original build unchanged.
+function ensureXlsxStyle(){
+  if(window._XLSXS) return Promise.resolve(window._XLSXS);
+  return new Promise((res,rej)=>{
+    const base=window.XLSX;
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js';
+    s.onload=()=>{ window._XLSXS=window.XLSX; if(base) window.XLSX=base; res(window._XLSXS); };
+    s.onerror=()=>rej(new Error('style engine load failed'));
+    document.head.appendChild(s);
+  });
+}
+async function ipmExport(){
   if(!IPM.exportRows.length){ ipmStatus('Generate rows first','var(--danger)'); return; }
   const rows=IPM.exportRows;
   const expDate=new Date(rows[0].expDate);
   const serial=Date.UTC(expDate.getFullYear(),expDate.getMonth(),expDate.getDate())/86400000 + 25569;
   const ws={};
+  // light-yellow fill marking an empty cell the receiver must scan a value into
+  const SCAN={ fill:{ patternType:'solid', fgColor:{ rgb:'FFF2CC' } } };
   const LBL=(addr,v)=>{ ws[addr]={t:'s',v:v}; };
   const PUT=(addr,v)=>{ if(v===''||v==null){ ws[addr]={t:'n',v:0}; } else if(typeof v==='number'){ ws[addr]={t:'n',v:v}; } else { ws[addr]={t:'s',v:String(v)}; } };
+  // blank-allowed: an empty scan cell → left blank AND shaded light yellow so the receiver
+  // knows to scan it in (style honored by the style-capable writer; ignored otherwise)
+  const PUTB=(addr,v)=>{ if(v===''||v==null){ ws[addr]={t:'s',v:'',s:SCAN}; return; } if(typeof v==='number'){ ws[addr]={t:'n',v:v}; } else { ws[addr]={t:'s',v:String(v)}; } };
   const DATE=(addr)=>{ ws[addr]={t:'n',v:serial,z:'m/d/yy'}; };
   LBL('A2','Receiver');        PUT('B2', ipmGv('ipm-receiver').trim().toUpperCase());
   LBL('D2','Total Rolls');     PUT('E2', rows.length);
   LBL('H2','Fraction  Decimal');
-  LBL('A3','PO #');            PUT('B3', ipmGv('ipm-po').trim().toUpperCase());
+  LBL('A3','PO #');            PUT('B3', ipmProd2());          // B3 PO # mirrors Prod ID 2 ("IPG " + Invoice + " " + PO)
   PUT('H3',0.5);               PUT('I3',0.5);
   LBL('A4','Invoice #');       PUT('B4', ipmGv('ipm-invoice').trim().toUpperCase());
   LBL('A5','Truck #');         PUT('B5', ipmGv('ipm-truck').trim().toUpperCase());
@@ -5041,8 +5261,8 @@ function ipmExport(){
   const COL=['A','B','C','D','E','F','G','H','I','J','K','L'];
   HDR.forEach((h,i)=>LBL(COL[i]+'8',h));
   rows.forEach((r,ri)=>{ const R=9+ri;
-    PUT('A'+R,r.sku); PUT('B'+R,r.productID); PUT('C'+R,r.lot); PUT('D'+R,r.prodID2); PUT('E'+R,r.po);
-    PUT('F'+R,r.weight); PUT('G'+R,r.gross); PUT('H'+R,r.uom); PUT('I'+R,0); PUT('J'+R,r.pcs); PUT('K'+R,0);
+    PUT('A'+R,r.sku); PUT('B'+R,r.productID); PUTB('C'+R,r.lot); PUT('D'+R,r.prodID2); PUT('E'+R,r.po);
+    PUTB('F'+R,r.weight); PUTB('G'+R,r.gross); PUT('H'+R,r.uom); PUTB('I'+R,r.lf); PUT('J'+R,r.pcs); PUT('K'+R,r.width||0);
     DATE('L'+R);
   });
   ws['!ref']='A1:L'+(8+rows.length);
@@ -5050,8 +5270,179 @@ function ipmExport(){
   const wb=XLSX.utils.book_new(); wb.SheetNames.push('Sheet1'); wb.Sheets['Sheet1']=ws;
   const po=ipmGv('ipm-po').trim()||'IPG';
   const fn='IPG_EDI_'+po+'_'+expDate.getFullYear()+String(expDate.getMonth()+1).padStart(2,'0')+String(expDate.getDate()).padStart(2,'0')+'.xlsx';
-  XLSX.writeFile(wb,fn);
-  ipmStatus('EDI file exported','var(--accent)');
+  try{
+    const XS=await ensureXlsxStyle();     // writer that honors the yellow scan-cell fill
+    XS.writeFile(wb,fn);
+    ipmStatus('EDI file exported — blank scan cells shaded yellow','var(--accent)');
+  }catch(e){
+    XLSX.writeFile(wb,fn);                 // fallback: data intact, no shading
+    ipmStatus('EDI file exported (shading unavailable offline)','var(--accent)');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CKP BILL OF LADING → NEW INBOUND  (scanned PDF drag-and-drop)
+// ---------------------------------------------------------------------------
+// A Canadian Kraft Paper BOL is a scanned image. The HEADER (page 1) OCRs
+// reliably; the per-roll Tally Sheet does NOT (roll IDs garble on a fax scan),
+// so we only auto-fill the header + roll count + total weight, seed a single
+// preliminary SKU line into the New Inbound builder, and the receiver enters the
+// SKU (description auto-fills from inventory→master) and scans the Roll IDs into
+// the Lot column after generating the rows.
+// ═══════════════════════════════════════════════════════════════════════════
+async function _ckpOcr(buf){
+  const pdfjsLib = await ensurePdfJs();
+  const worker   = await _catTimeout(_catEnsureTesseract(), 120000, 'OCR engine load');
+  const pdf = await pdfjsLib.getDocument({ data:new Uint8Array(buf) }).promise;
+  const N = pdf.numPages||1;
+  const render=async(page,scale)=>{ const vp=page.getViewport({scale,rotation:0}); const cv=document.createElement('canvas'); cv.width=Math.ceil(vp.width); cv.height=Math.ceil(vp.height); await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise; return cv; };
+  let text=''; let rolls=[];
+  for (let i=1; i<=N; i++){
+    try{
+      const page=await pdf.getPage(i);
+      if(i===1){
+        // BOL header page — text OCR at moderate res
+        const cv=await render(page,2.2);
+        const r=await worker.recognize(cv); text += '\n' + ((r&&r.data&&r.data.text)||'');
+      } else {
+        // tally-sheet page(s) — high res + word positions for the roll table
+        showAlert('Reading Tally Sheet — page '+i+'/'+N+'…','info');
+        const cv=await render(page,3);
+        if(_catCanvasBlank(cv)) continue;
+        const r=await worker.recognize(cv);
+        text += '\n' + ((r&&r.data&&r.data.text)||'');
+        const words=(typeof _upmWordsFromOcr==='function')?_upmWordsFromOcr(r&&r.data):[];
+        const pr=_ckpRollsFromWords(words);
+        if(pr.length) rolls=rolls.concat(pr);
+      }
+    }catch(e){ /* skip a bad page */ }
+  }
+  // dedupe by (non-blank) roll id, keep first
+  const seen={}; const uniq=[];
+  rolls.forEach(r=>{ if(r.rollId){ if(seen[r.rollId]) return; seen[r.rollId]=1; } uniq.push(r); });
+  return { text:text, rolls:uniq };
+}
+// ---- Tally-sheet roll parser (best-effort; every cell is corrected in the grid) ----
+const _CKP_STRICT=/^\d{2}[A-Z]\d{4}[A-Z]{2}$/;       // e.g. 16J1401CE, 16H2612BZ (letter varies by mill run)
+function _ckpCleanRoll(s){
+  let t=String(s==null?'':s).toUpperCase().replace(/[^0-9A-Z]/g,'');
+  t=t.replace(/^[4T7](6)/,'1$1').replace(/^I6/,'16').replace(/^V6/,'16');   // fix the leading 16 only — never force the family letter
+  return t;
+}
+function _ckpRollish(t){ return t.length>=6 && t.length<=11 && /[A-Z]/.test(t) && (String(t).match(/\d/g)||[]).length>=4; }
+function _ckpRollSuspect(id){ return !_CKP_STRICT.test(String(id||'').toUpperCase()); }
+// Group OCR words (x,y,s) into row bands and pull rollId / weight / length / width per band.
+function _ckpRollsFromWords(wordsIn){
+  const words=(wordsIn||[]).filter(o=>o&&o.s!=null);
+  if(!words.length) return [];
+  const isNumTok=s=>/^[\d.,]+$/.test(String(s).trim());
+  const num=s=>isNumTok(s)?parseFloat(String(s).replace(/[^0-9.]/g,'')):null;
+  words.sort((a,b)=>a.y-b.y);
+  const rows=[]; let cur=null;
+  words.forEach(o=>{ if(!cur||o.y-cur.y>22){ cur={y:o.y,it:[o]}; rows.push(cur); } else { cur.it.push(o); cur.y=(cur.y*(cur.it.length-1)+o.y)/cur.it.length; } });
+  const out=[];
+  rows.forEach(r=>{
+    const nums=r.it.map(o=>({x:o.x,v:num(o.s)})).filter(o=>o.v!=null);
+    const len=nums.filter(o=>o.v>=34000 && o.v<=42000).sort((p,q)=>q.v-p.v)[0];          // web length (feet)
+    const wt =nums.filter(o=>o.v>=800   && o.v<=1800 ).sort((p,q)=>p.x-q.x)[0];           // roll weight (lbs)
+    // per-roll Width: a decimal 10–45" left of the roll id (diameter 50 is excluded by range)
+    const wd =r.it.map(o=>({x:o.x,v:parseFloat(String(o.s))})).filter(o=>/^\d{1,2}(?:\.\d{1,2})?"?$/.test(String(r.it.find(w=>w.x===o.x).s).trim()) && o.v>=10 && o.v<=45).sort((p,q)=>p.x-q.x)[0];
+    const ids=r.it.map(o=>_ckpCleanRoll(o.s)).filter(_ckpRollish);
+    if(!len && !(wt && ids.length)) return;   // not a roll row
+    out.push({ rollId:ids[0]||'', weight:(wt?wt.v:''), lf:(len?len.v:''), width:(wd?wd.v:''), flag:_ckpRollSuspect(ids[0]||'') });
+  });
+  return out;
+}
+// Best-effort header extraction from the OCR text. Every field is editable in the
+// modal afterward, so imperfect reads (carrier, description) are fine to pre-fill.
+function _ckpParseHeader(text){
+  // strip OCR punctuation noise (pipes / stray braces / brackets) before tokenizing
+  const one = String(text||'').replace(/[|{}\[\]]/g,' ').replace(/\s+/g,' ');
+  const g=(re)=>{ const m=one.match(re); return m?String(m[1]||'').trim():''; };
+  const out={};
+  // PRIMARY: tokenize the BOL data row (punctuation-tolerant). Layout on the row is
+  //   DATE  ORDER  PO  LOADID  [,]  CURRENCY  CARRIER…  VEHICLE  | Prepaid  BOL#
+  // OCR routinely leaves a comma after the Load ID and other stray marks, so we anchor
+  // on the date, split into words, trim edge punctuation, then pick fields positionally.
+  const di=one.search(/\d{4}-\d{2}-\d{2}/);
+  if(di>=0){
+    const seg=one.slice(di, di+170);
+    const toks=seg.split(' ').map(t=>t.replace(/^[^0-9A-Za-z]+|[^0-9A-Za-z]+$/g,'')).filter(Boolean);
+    out.date=toks[0]||'';
+    const nums=toks.slice(1).filter(t=>/^\d{5,8}$/.test(t));   // Order, PO, Load ID (+ maybe BOL#)
+    if(nums[0]) out.order=nums[0];
+    if(nums[1]) out.po=nums[1];
+    if(nums[2]) out.loadId=nums[2];
+    const veh=toks.find(t=>/^\d[A-Z]\d{3,5}$/i.test(t));       // Carrier Unit e.g. 7M2057
+    if(veh) out.vehicle=veh.toUpperCase();
+    const ci=toks.findIndex(t=>/^(USD|CAD|US|CA)$/i.test(t));  // currency marks the carrier name start
+    const vi=veh?toks.indexOf(veh):-1;
+    if(ci>=0){ const end=(vi>ci?vi:toks.length);
+      out.carrier=toks.slice(ci+1,end).filter(t=>/^[A-Za-z]{2,}$/.test(t)).join(' ').toUpperCase(); }
+  }
+  // label-based fallbacks (keep Load ID leading zeros)
+  if(!out.loadId) out.loadId=g(/load\s*(?:id|no\.?)\s*:?\s*(\d{5,})/i);
+  if(!out.po)     out.po=g(/\bpo\s*(?:no\.?|#)?\s*:?\s*(\d{6,8})\b/i);
+  if(!out.order)  out.order=g(/\border\s*:?\s*(\d{6,7})\b/i);
+  if(!out.date)   out.date=g(/\b(\d{4}-\d{2}-\d{2})\b/)||g(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/);
+  if(!out.vehicle)out.vehicle=g(/\b(\d[A-Z]\d{3,5})\b/);
+  // item row →  WIDTH  DIAM  UNITS  WEIGHT - TONS  (tolerant of stray marks between fields)
+  const item=one.match(/(\d{1,2}\.\d{2})[^0-9]{0,5}(\d{1,2}\.\d{2})[^0-9]{0,5}(\d{1,3})[^0-9]{1,6}([\d,]+\.\d+)[^0-9]{0,6}tons/i);
+  if(item){ out.width=item[1]; out.diam=item[2]; out.units=item[3]; out.tons=parseFloat(item[4].replace(/,/g,'')); }
+  if(!out.units) out.units=g(/\b(\d{1,3})\s*(?:rolls|units)\b/i);
+  if(!out.tons){ const t=g(/([\d,]+\.\d+)\s*[-–]?\s*tons?\b/i); out.tons=t?parseFloat(t.replace(/,/g,'')):0; }
+  if(!out.width) out.width=g(/width[^0-9]{0,10}(\d{1,2}\.\d{2})/i);
+  // description: order-item … Kraft Paper  (fallback only — the entered SKU drives the real desc)
+  const dm=one.match(/\d{5,7}\s*-\s*\d[\.\s]*(.+?kraft\s*paper)/i);
+  out.desc=dm?dm[1].replace(/(\d)([A-Za-z])/g,'$1 $2').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/\s+/g,' ').trim():'';
+  return out;
+}
+async function processCKPBol(file){
+  try{
+    if(!/pdf$/i.test(file.name||'')){ showAlert('Drop a PDF Bill of Lading.','warning'); return; }
+    showAlert('Reading Bill of Lading — OCR may take a moment…','info');
+    const buf  = await file.arrayBuffer();
+    const ocr  = await _ckpOcr(buf);
+    const h    = _ckpParseHeader(ocr.text);
+    const rolls= ocr.rolls||[];
+    window._ckpParsed = h; window._ckpOcrText = ocr.text; window._ckpRolls = rolls;
+    if(!h.loadId && !h.po && !h.units){
+      showAlert('Could not read the BOL header — opening a blank New Inbound; enter the details manually.','warning');
+    }
+    showIPGManual();          // open the New Inbound receipt builder
+    ipmSeedFromCKP(h, rolls);
+    const exp = parseInt(h.units)||rolls.length||0;
+    showAlert('✓ BOL '+(h.loadId||'')+' — header filled, OCR read '+rolls.length+' of '+(exp||'?')+' rolls. Enter the SKU, click Generate, then fix flagged Roll IDs and fill any blanks.','success');
+  }catch(err){
+    showAlert('BOL read failed: '+((err&&err.message)||err),'danger'); console.error('[CKP BOL]', err);
+  }
+}
+// Seed the (already-open) New Inbound modal from a parsed BOL header + OCR'd rolls.
+function ipmSeedFromCKP(h, rolls){
+  h=h||{}; rolls=rolls||[];
+  const set=(id,v)=>{ const e=document.getElementById(id); if(e) e.value=(v==null?'':v); };
+  set('ipm-receiver', String(h.loadId||'').toUpperCase());
+  set('ipm-po',       String(h.po||'').toUpperCase());
+  set('ipm-invoice',  String(h.order||'').toUpperCase());                 // CKP Order # → Invoice #
+  set('ipm-truck',    String(h.vehicle||'').toUpperCase());          // Equipment = Carrier Unit (vehicle only)
+  // date → yyyy-mm-dd
+  let d=null;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(h.date||'')) d=new Date(h.date+'T00:00:00');
+  else if(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(h.date||'')){ const p=h.date.split('/'); d=new Date(+p[2],+p[0]-1,+p[1]); }
+  if(d && !isNaN(d)){ const pz=n=>String(n).padStart(2,'0'); set('ipm-date', d.getFullYear()+'-'+pz(d.getMonth()+1)+'-'+pz(d.getDate())); }
+  const lbs = h.tons ? Math.round(h.tons*2000) : '';
+  set('ipm-loadwt', lbs);
+  const qty = parseInt(h.units)||rolls.length||0;
+  // CKP mode: the parsed per-roll rows drive Generate (not the qty even-split). Store them.
+  IPM.ckpRolls  = rolls.slice();
+  IPM.ckpUnits  = qty;
+  IPM.ckpMode   = true;
+  // one preliminary SKU line: blank SKU (receiver enters it), desc pre-filled from the BOL as a
+  // fallback, UOM ROLLS, qty = roll count, width from the BOL (flows onto every generated roll).
+  IPM.lines=[{ po:String(h.po||'').toUpperCase(), sku:'', desc:String(h.desc||''), uom:'ROLLS',
+               qty:(qty||''), width:(parseFloat(h.width)||''), lf:'' }];
+  ipmRenderLines(); ipmHdrPreview(); ipmUpdateTotals(); ipmResetPreview();
+  ipmStatus('Loaded from BOL '+(h.loadId||'')+' — OCR read '+rolls.length+' of '+(qty||'?')+' rolls. Enter the SKU, Generate, then fix flagged Roll IDs & fill blanks.','var(--accent)');
 }
 
 // ─── CATALYST INBOUND FILE PROCESSING ───────────────────────────────────────
