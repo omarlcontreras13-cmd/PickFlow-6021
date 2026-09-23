@@ -540,7 +540,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 101;
+const APP_BUILD = 104;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -4746,7 +4746,7 @@ function getIpgSkuList(){
   const map={};
   if(raw){
     const recs=Array.isArray(raw)?raw:Object.values(raw);
-    recs.forEach(r=>{ if(r&&r.sku!=null&&String(r.sku).trim()) map[String(r.sku).trim()]={desc:r.desc||'',vendorSku:r.vendorSku||'',dept:r.dept||'',active:r.active||''}; });
+    recs.forEach(r=>{ if(r&&r.sku!=null&&String(r.sku).trim()) map[String(r.sku).trim()]={desc:r.desc||'',vendorSku:r.vendorSku||'',vendor:r.vendor||'',width:(r.width===''||r.width==null?'':r.width),dept:r.dept||'',active:r.active||''}; });
   }
   return map;
 }
@@ -4767,23 +4767,32 @@ function updateIPGSkuListCount(){
 function importIPGSkuList(wb){
   const ws=wb.Sheets[wb.SheetNames[0]];
   const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
+  const rowsRaw=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:true});   // unformatted (exact width e.g. 23.625)
   let hi=rows.findIndex(r=>r.some(c=>String(c||'').trim().toLowerCase()==='sku'));
   if(hi<0) hi=0;
   const hdr=rows[hi];
+  const norm=x=>String(x==null?'':x).trim().toLowerCase();
   const cSku =_ipgSkuFindCol(hdr,['Sku','SKU','Item','Item #']);
   const cDesc=_ipgSkuFindCol(hdr,['Description','DESCRIPTION','Desc','Item Description']);
-  const cVen =_ipgSkuFindCol(hdr,['Vendor Sku','Vendor SKU','VendorSku','Vendor']);
+  const cVenSku=_ipgSkuFindCol(hdr,['Vendor Sku','Vendor SKU','VendorSku']);      // alt SKU (old format)
+  const cVen =hdr.findIndex(h=>norm(h)==='vendor');                                // vendor NAME (new format), exact only
+  const cWid =_ipgSkuFindCol(hdr,['Paper Size','Paper Size (in)','Width','Width Inch','Size']);
   const cDept=_ipgSkuFindCol(hdr,['Department','Dept']);
   const cAct =_ipgSkuFindCol(hdr,['Active']);
   if(cSku<0||cDesc<0){ showAlert('Could not find Sku and Description columns in the IPG SKU file.','danger'); return; }
   const records=[]; const seen={}; let n=0;
-  rows.slice(hi+1).forEach(r=>{
+  rows.slice(hi+1).forEach((r,idx)=>{
+    const rr=rowsRaw[hi+1+idx]||[];
     const sku=String(r[cSku]==null?'':r[cSku]).trim();
     const desc=String(r[cDesc]==null?'':r[cDesc]).trim();
     if(!sku) return;
     const key=sku.toUpperCase(); if(seen[key]) return; seen[key]=1;   // first occurrence wins on duplicate
+    let width='';
+    if(cWid>=0){ const wraw=rr[cWid]; const wn=(typeof wraw==='number')?wraw:parseFloat(String(wraw==null?'':wraw).replace(/[^0-9.]/g,'')); if(wraw!==''&&wraw!=null&&!isNaN(wn)) width=wn; }
     records.push({ sku:sku, desc:desc,
-      vendorSku:(cVen>=0?String(r[cVen]==null?'':r[cVen]).trim():''),
+      vendorSku:(cVenSku>=0?String(r[cVenSku]==null?'':r[cVenSku]).trim():''),
+      vendor:(cVen>=0?String(r[cVen]==null?'':r[cVen]).trim():''),
+      width:width,
       dept:(cDept>=0?String(r[cDept]==null?'':r[cDept]).trim():''),
       active:(cAct>=0?String(r[cAct]==null?'':r[cAct]).trim():'') });
     n++;
@@ -4803,18 +4812,19 @@ function handleIPGSkuListFile(file){
 }
 function downloadIPGSkuListTemplate(){
   const raw=(state&&state.ipgSkuList)?(Array.isArray(state.ipgSkuList)?state.ipgSkuList:Object.values(state.ipgSkuList)):[];
-  const aoa=[['Sku','Description','Department','Active','Vendor Sku']];
-  if(raw.length){ raw.forEach(r=>aoa.push([r.sku||'',r.desc||'',r.dept||'',r.active||'',r.vendorSku||''])); }
-  else { aoa.push(['EX553TK01900',"EX553TK,19'',50,LONGVIEWWA",'',1,'EX553TK01900']); }
+  const aoa=[['SKU','Vendor','Paper Size','Description']];
+  if(raw.length){ raw.forEach(r=>aoa.push([r.sku||'',r.vendor||'',(r.width===''||r.width==null?'':r.width),r.desc||''])); }
+  else { aoa.push(['9940903','CAN KRAFT PAPER',23.6,'CKP RUM D 55# EXTENSIBLE PAPER'],
+                  ['EX553TK01900','SMURFIT WESTROCK',19,"EX553TK,19'',50,LONGVIEWWA"]); }
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  for(let i=2;i<=aoa.length;i++){ const c=ws['A'+i]; if(c){c.t='s';c.z='@';} const cv=ws['E'+i]; if(cv){cv.t='s';cv.z='@';} } // keep SKUs as text
+  for(let i=2;i<=aoa.length;i++){ const c=ws['A'+i]; if(c){c.t='s';c.z='@';} } // keep SKUs as text
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'IPG SKUs');
   XLSX.writeFile(wb,'IPG_SKU_List.xlsx');
 }
 
 // ---- Manual New Inbound builder --------------------------------------------
-const IPM = { lines: [], exportRows: [], activeId: null };
+const IPM = { lines: [], exportRows: [], activeId: null, vendorFilter: '' };
 function ipmGv(id){ return (document.getElementById(id)||{}).value||''; }
 function ipmStatus(msg,color){ const el=document.getElementById('ipm-status'); if(el){ el.textContent=msg||''; el.style.color=color||'var(--text2)'; } }
 function ipmEsc(s){ return String(s==null?'':s).replace(/"/g,'&quot;'); }
@@ -4893,6 +4903,9 @@ function showIPGManual(id){
               <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                 <button class="btn btn-sm btn-primary" onclick="ipmAddLine()">+ Add SKU Line</button>
                 <button class="btn btn-sm" onclick="ipmClearLines()">Clear Lines</button>
+                <label style="font-size:11px;color:var(--text2);display:inline-flex;align-items:center;gap:5px">Vendor
+                  <select id="ipm-vendor-filter" onchange="ipmSetVendorFilter(this.value)" title="Filter the SKU picker by vendor" style="font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--text)"></select>
+                </label>
                 <span id="ipm-src" style="font-size:11px;color:var(--text2)"></span>
               </div>
               <div style="overflow:auto;margin-top:12px">
@@ -4936,14 +4949,43 @@ function showIPGManual(id){
   if(id){ ipmLoad(id); } else { ipmNew(); }
 }
 
+// Distinct vendor names from the IPG SKU list (sorted A→Z).
+function ipmVendorOptions(){
+  const L=getIpgSkuList(); const seen={}, out=[];
+  Object.keys(L).forEach(k=>{ const v=String(L[k].vendor||'').trim(); if(!v) return; const kk=v.toUpperCase(); if(seen[kk]) return; seen[kk]=1; out.push(v); });
+  out.sort((a,b)=>a.toUpperCase().localeCompare(b.toUpperCase()));
+  return out;
+}
+// (Re)build the Vendor filter dropdown, preserving the current selection.
+function ipmRefreshVendors(){
+  const sel=document.getElementById('ipm-vendor-filter'); if(!sel) return;
+  const cur=(IPM.vendorFilter||'');
+  const opts=['<option value="">All Vendors</option>'].concat(ipmVendorOptions().map(v=>'<option value="'+ipmEsc(v)+'">'+ipmEsc(v)+'</option>'));
+  sel.innerHTML=opts.join('');
+  sel.value=cur;
+  if(sel.value!==cur){ IPM.vendorFilter=''; sel.value=''; }   // selection no longer available → reset
+}
+function ipmSetVendorFilter(v){ IPM.vendorFilter=String(v||''); ipmRefreshSkuList(); }
 function ipmRefreshSkuList(){
+  ipmRefreshVendors();
   const dl=document.getElementById('ipm-sku-list'); if(!dl) return;
-  const seen={}, opts=[];
-  const add=(sku,desc)=>{ const base=ipgBaseSku(String(sku||'')); if(!base) return; const bk=base.toUpperCase(); if(seen[bk]) return; seen[bk]=1; opts.push('<option value="'+ipmEsc(base)+'">'+ipmEsc(desc||'')+'</option>'); };
-  // IPG SKU list (new EDI) first, then the Materials master; dedupe by base SKU
-  const L=getIpgSkuList(); Object.keys(L).forEach(k=>add(k, L[k].desc));
-  const t=getIpgSkuTable(); Object.keys(t).forEach(k=>add(k, t[k].desc));
-  dl.innerHTML=opts.join('');
+  const vf=String(IPM.vendorFilter||'').trim().toUpperCase();   // active vendor filter (blank = all)
+  const seen={}, items=[];
+  const add=(sku,desc)=>{ const base=ipgBaseSku(String(sku||'')); if(!base) return; const bk=base.toUpperCase(); if(seen[bk]) return; seen[bk]=1; items.push({base:base,desc:desc||''}); };
+  // IPG SKU list (new EDI) first, then the Materials master; dedupe by base SKU.
+  // When a vendor is chosen, only that vendor's SKUs (from the IPG list) are offered.
+  const L=getIpgSkuList(); Object.keys(L).forEach(k=>{ if(vf && String(L[k].vendor||'').trim().toUpperCase()!==vf) return; add(k, L[k].desc); });
+  if(!vf){ const t=getIpgSkuTable(); Object.keys(t).forEach(k=>add(k, t[k].desc)); }
+  // sort ascending: numeric SKUs first (by value), then alphanumeric (A→Z)
+  const isNum=s=>/^\d+$/.test(s);
+  items.sort((a,b)=>{
+    const an=isNum(a.base), bn=isNum(b.base);
+    if(an&&bn) return parseInt(a.base,10)-parseInt(b.base,10);
+    if(an) return -1;
+    if(bn) return 1;
+    return a.base.toUpperCase().localeCompare(b.base.toUpperCase());
+  });
+  dl.innerHTML=items.map(o=>'<option value="'+ipmEsc(o.base)+'">'+ipmEsc(o.desc)+'</option>').join('');
 }
 function ipmHdrPreview(){
   const el=document.getElementById('ipm-hdrprev'); if(!el) return;
@@ -4975,7 +5017,7 @@ function ipmRenderLines(){
       '<td><input list="ipm-sku-list" value="'+ipmEsc(ln.sku)+'" placeholder="SKU" oninput="ipmEditLine('+i+',&quot;sku&quot;,this.value)" style="width:120px"></td>'+
       '<td><input id="ipm-desc-'+i+'" value="'+ipmEsc(ln.desc)+'" placeholder="auto from SKU" oninput="ipmEditLine('+i+',&quot;desc&quot;,this.value)" style="width:250px"></td>'+
       '<td><input id="ipm-uom-'+i+'" value="'+ipmEsc(ln.uom)+'" placeholder="UOM" oninput="ipmEditLine('+i+',&quot;uom&quot;,this.value)" style="width:64px;text-transform:uppercase"></td>'+
-      '<td><input class="ipm-nospin" type="number" min="0" step="0.01" value="'+(ln.width===''||ln.width==null?'':ln.width)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;width&quot;,this.value)" style="width:72px;text-align:right"></td>'+
+      '<td><input id="ipm-width-'+i+'" class="ipm-nospin" type="number" min="0" step="0.01" value="'+(ln.width===''||ln.width==null?'':ln.width)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;width&quot;,this.value)" style="width:72px;text-align:right"></td>'+
       '<td><input class="ipm-nospin" type="number" min="0" step="1" value="'+(ln.qty===''||ln.qty==null?'':ln.qty)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;qty&quot;,this.value)" style="width:72px;text-align:right"></td>'+
       '<td><button onclick="ipmRemoveLine('+i+')" title="Remove line" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 6px">✕</button></td>';
     tb.appendChild(tr);
@@ -4993,6 +5035,8 @@ function ipmEditLine(i,k,v){
       if(d.uom) ln.uom=d.uom;        // a master hit sets UOM; an inventory hit keeps the line's UOM (e.g. ROLLS)
       const de=document.getElementById('ipm-desc-'+i); if(de) de.value=ln.desc;
       const ue=document.getElementById('ipm-uom-'+i); if(ue && d.uom) ue.value=ln.uom;
+      // Paper Size from the IPG SKU list → Width (only when the line's Width is still blank)
+      if(d.width!=null && d.width!=='' && (ln.width===''||ln.width==null)){ ln.width=d.width; const we=document.getElementById('ipm-width-'+i); if(we) we.value=ln.width; }
     }
   }
   else if(k==='uom'){ ln.uom=String(v).toUpperCase(); }
@@ -5005,12 +5049,12 @@ function ipmDescForSku(sku){
   const k=String(sku==null?'':sku).trim(); if(!k) return null;
   const ku=k.toUpperCase();
   const inv=(state.inventory||[]).find(r=>String(r.sku==null?'':r.sku).trim().toUpperCase()===ku && String(r.productId||'').trim());
-  if(inv) return {desc:String(inv.productId).trim(), uom:null, src:'inventory'};
+  if(inv) return {desc:String(inv.productId).trim(), uom:null, width:'', src:'inventory'};
   // IPG SKU reference list (new EDI) — authoritative for these SKUs; keep master UOM if any (DuraBubble→BUND)
   const li=(typeof ipgSkuListLookup==='function')?ipgSkuListLookup(k):null;
-  if(li && li.desc){ const mm=(typeof ipgSkuLookup==='function')?ipgSkuLookup(k):null; return {desc:li.desc, uom:(mm&&typeof ipgSkuUom==='function'?ipgSkuUom(mm):null), src:'ipglist'}; }
+  if(li && li.desc){ const mm=(typeof ipgSkuLookup==='function')?ipgSkuLookup(k):null; return {desc:li.desc, uom:(mm&&typeof ipgSkuUom==='function'?ipgSkuUom(mm):null), width:(li.width===''||li.width==null?'':li.width), src:'ipglist'}; }
   const m=(typeof ipgSkuLookup==='function')?ipgSkuLookup(k):null;
-  if(m) return {desc:m.desc||'', uom:(typeof ipgSkuUom==='function'?ipgSkuUom(m):(m.uom||'')), src:'master'};
+  if(m) return {desc:m.desc||'', uom:(typeof ipgSkuUom==='function'?ipgSkuUom(m):(m.uom||'')), width:'', src:'master'};
   return null;
 }
 // Scan/edit a generated row's Lot (Roll ID) in place — no re-render, keeps input focus.
