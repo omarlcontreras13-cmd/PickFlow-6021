@@ -540,7 +540,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 104;
+const APP_BUILD = 108;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1099,6 +1099,9 @@ function importDIR(wb) {
   const stockCatI = ['Stock Cat','Stock Category','Stk Cat','StkCat','Cat','Spec. Stock'].reduce((f,n)=>f>=0?f:col(n), -1);
   // Shipment Number
   const shipmentI = ['Shipment','Shipment Number','Ship No','Ship #','Delivery','Inbound Delivery','Trans. Order','Transfer Order'].reduce((f,n)=>f>=0?f:col(n), -1);
+  // Delivery Number ("Deliv No") — a distinct SAP delivery doc, shown alongside the shipment
+  let delivNoI = ['Deliv No','Deliv. No','Deliv No.','Delivery No','Delivery No.','Delivery Number','Delivery Document','Delivery Doc','Outbound Delivery','Deliv','Delivery'].reduce((f,n)=>f>=0?f:col(n), -1);
+  if (delivNoI === shipmentI) delivNoI = -1;   // don't duplicate the shipment column
   // Purchasing Document + Item (for PO# column in EDI)
   // Purchasing Document = Column U (index 20), PO Item = Column V (index 21)
   // Fixed column positions per DIR format; header name as fallback
@@ -1150,6 +1153,7 @@ function importDIR(wb) {
       customerName: nameI>=0   ? (r[nameI]||'').toString().trim()   : '',
       stockCat:     stockCatI>=0  ? (r[stockCatI]||'').toString().trim()  : '',
       shipment:     shipmentI>=0  ? (r[shipmentI]||'').toString().trim()  : '',
+      delivNo:      delivNoI>=0   ? (r[delivNoI]||'').toString().trim()   : '',
       purchDoc:     purchDocI>=0  ? (r[purchDocI]||'').toString().trim()  : '',
       // Store raw values at the EDI-mapped indices for PO# column (updated via picker)
       _pd: r[window._ediPurchDocIdx  !== undefined ? window._ediPurchDocIdx  : 20] !== undefined ? (r[window._ediPurchDocIdx  !== undefined ? window._ediPurchDocIdx  : 20]||'').toString().trim() : '',
@@ -3720,7 +3724,7 @@ function applyEDIColMapping() {
                 : (d.soDoc && d.soDoc !== '') ? d.soDoc : d.customerPO;
       if (!key) return;
       if (!sciGroups[key]) sciGroups[key] = {
-        shipment: key, zmo: d.customerPO||d.soDoc,
+        shipment: key, zmo: d.customerPO||d.soDoc, delivNo: d.delivNo||'',
         invoiceRef: d.zmo, customerName: d.customerName, lots: []
       };
       const inv = invByLot[lot] || {};
@@ -3732,7 +3736,7 @@ function applyEDIColMapping() {
         grossWt: d.grossWt, width: d.width, qtyMlf: d.qtyMlf,
         expDate: inv.expDate || null, bol: inv.bol || '', po: inv.po || '',
         prod2: inv.prod2 || ('Scientific Games ' + d.zmo),
-        purchDoc, purchItem, vehicleId: d.vehicleId || ''
+        purchDoc, purchItem, vehicleId: d.vehicleId || '', delivNo: d.delivNo || ''
       });
     });
   Object.values(sciGroups).forEach(g => g.lots.sort((a,b)=>a.lot.localeCompare(b.lot)));
@@ -3843,6 +3847,7 @@ function showEDIImportFile() {
       if (!sciGroups[key]) sciGroups[key] = {
         shipment: key,
         zmo: d.customerPO || d.soDoc,
+        delivNo: d.delivNo || '',
         invoiceRef: d.zmo,
         customerName: d.customerName,
         lots: []
@@ -3856,7 +3861,7 @@ function showEDIImportFile() {
         prod2: inv.prod2 || ('Scientific Games ' + d.zmo),
         purchDoc:  d.purchDoc  || '',
         purchItem: d.purchItem || '',
-        vehicleId: d.vehicleId || ''
+        vehicleId: d.vehicleId || '', delivNo: d.delivNo || ''
       });
     });
 
@@ -4015,6 +4020,10 @@ function showEDIImportFile() {
         const totLF = g.lots.reduce(function(s,l){return s+(parseFloat(l.qtyMlf)||0);},0).toFixed(3);
         const totWt = g.lots.reduce(function(s,l){return s+(l.grossWt||0);},0).toLocaleString();
         const sciVeh = [...new Set(g.lots.map(function(l){return (l.vehicleId||'').toString().trim();}).filter(Boolean))].join(', ');
+        const sciDelivArr = [...new Set(g.lots.map(function(l){return (l.delivNo||'').toString().trim();}).filter(Boolean))];
+        if (!sciDelivArr.length && g.delivNo) sciDelivArr.push(String(g.delivNo).trim());
+        const sciDeliv = sciDelivArr.join(', ');
+        const sciDelivLbl = sciDelivArr.length>1 ? 'Deliv Nos' : 'Deliv No';   // pluralize when a shipment spans multiple deliveries
         const dq = dq2;
         // Build expandable detail rows (Exp Date column = file export date, short format)
         const expDispSci = new Date().toLocaleDateString('en-US');
@@ -4041,8 +4050,8 @@ function showEDIImportFile() {
           +'<div style='+dq+'display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+(alt?'var(--surface2)':'var(--surface)')+dq+'>'
           +'<input type='+dq+'checkbox'+dq+' class='+dq+'edi-sci-chk'+dq+' value='+dq+key+dq+' checked onchange='+dq+'onEDISciChange(this)'+dq+' style='+dq+'cursor:pointer;width:16px;height:16px;flex-shrink:0'+dq+'>'
           +'<div style='+dq+'flex:1;min-width:0'+dq+'>'
-          +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+g.shipment+(isPack?(' <span style='+dq+'font-size:8px;background:var(--accent2);color:#fff;padding:1px 5px;border-radius:3px;letter-spacing:.5px;vertical-align:middle'+dq+'>📄 PACKING LIST</span>'):'')+'</div>'
-          +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>'+g.customerName+' &nbsp;·&nbsp; '+g.lots.length+' rolls'+(sciVeh?(' &nbsp;·&nbsp; <span style='+dq+'color:var(--accent);font-weight:bold'+dq+'>🚛 Trailer '+sciVeh+'</span>'):'')+'</div>'
+          +'<div style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>'+g.shipment+(sciDeliv?(' <span style='+dq+'font-weight:bold;color:var(--accent2);font-size:12px'+dq+'>· '+sciDelivLbl+' '+sciDeliv+'</span>'):'')+(isPack?(' <span style='+dq+'font-size:8px;background:var(--accent2);color:#fff;padding:1px 5px;border-radius:3px;letter-spacing:.5px;vertical-align:middle'+dq+'>📄 PACKING LIST</span>'):'')+'</div>'
+          +'<div style='+dq+'font-size:10px;color:var(--text2)'+dq+'>'+g.customerName+' &nbsp;·&nbsp; '+g.lots.length+' rolls'+(sciVeh?(' &nbsp;·&nbsp; <span style='+dq+'color:var(--accent);font-weight:bold;font-size:12px'+dq+'>🚛 Trailer / Rail Car '+sciVeh+'</span>'):'')+'</div>'
           +(sciStampStr?'<div style='+dq+'font-size:9px;color:var(--accent2)'+dq+'>✓ '+sciStampStr+'</div>':'')
           +'</div>'
           +'<button onclick='+dq+'exportSingleSci(&quot;'+key+'&quot;)'+dq
