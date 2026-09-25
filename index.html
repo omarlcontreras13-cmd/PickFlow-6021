@@ -342,8 +342,16 @@ function classifyRoll(r) {
   return 'AVAILABLE';
 }
 // Inventory Accuracy (by roll count): (Total - Cycle Count - Ghost) / Total.
-function inventoryAccuracyStats() {
-  const inv = state.inventory || [];
+// Outbound staging bins end in "-00" (e.g. 23-00-00, 23-02-00). These hold staged
+// outbound orders and are EXCLUDED from all Cycle Count logic (list, totals, suggested,
+// accuracy, tracker). Staged inventory will be handled by separate logic later.
+function isCCStaging(loc){
+  const p = String(loc==null?'':loc).trim().toUpperCase().split('-');
+  return p.length>=2 && /^0+$/.test(p[p.length-1]);
+}
+function inventoryAccuracyStats(excludeStaging) {
+  // excludeStaging (Cycle Count screens): drop rolls in outbound staging bins ending in -00
+  const inv = (state.inventory || []).filter(r => !excludeStaging || !isCCStaging(r.location));
   let ghost = 0, cc = 0;
   inv.forEach(r => { const s = classifyRoll(r); if (s==='GHOST') ghost++; else if (s==='CYCLE COUNT') cc++; });
   const total = inv.length;
@@ -540,7 +548,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 108;
+const APP_BUILD = 111;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -8763,7 +8771,7 @@ function showCycleCountStart() {
 
     // Filter skip locs
     const allLocs     = [...locSet].sort();
-    const storageLocs = allLocs.filter(l => !SKIP_LOCS.some(p => l.toUpperCase().includes(p.toUpperCase())));
+    const storageLocs = allLocs.filter(l => !isCCStaging(l) && !SKIP_LOCS.some(p => l.toUpperCase().includes(p.toUpperCase())));
 
     // Month window
     const now        = new Date();
@@ -8810,7 +8818,7 @@ function showCycleCountStart() {
     const locLastPutaway = {};
     state.inventory.forEach(r => {
       const loc = (r.location||'').toUpperCase();
-      if (!r.location || SKIP_LOCS.some(p => loc.includes(p.toUpperCase()))) return;
+      if (!r.location || isCCStaging(r.location) || SKIP_LOCS.some(p => loc.includes(p.toUpperCase()))) return;
       if ((r.pcsPending||0) > 0) return;
       if (r.dateRecd) {
         const t = r.dateRecd instanceof Date ? r.dateRecd.getTime() : new Date(r.dateRecd).getTime();
@@ -8857,7 +8865,7 @@ function showCycleCountStart() {
       (s.adjustments||[]).forEach(a=>{ adjMap[a.loc] = a; }); // keyed by location only
 
       // Accuracy is per LOCATION — a location is accurate if net adj = 0
-      const sessionLocs = [...new Set((s.entries||[]).filter(e=>!e.empty&&e.sku).map(e=>e.loc))];
+      const sessionLocs = [...new Set((s.entries||[]).filter(e=>!e.empty&&e.sku).map(e=>e.loc))].filter(loc=>!isCCStaging(loc));
       sessionLocs.forEach(loc=>{
         totalLines++;
         const saved = adjMap[loc];
@@ -8869,13 +8877,13 @@ function showCycleCountStart() {
       });
       // Expected rolls for count accuracy
       (s.entries||[]).forEach(e=>{
-        if (e.empty) return;
+        if (e.empty || isCCStaging(e.loc)) return;
         totalAdjExp += (e.expectedPlt||0);
       });
     });
     const binAcc = totalLines>0 ? Math.round(accurateLines/totalLines*100) : null;
     const cntAcc = totalAdjExp>0 ? Math.max(0,Math.round((1-(totalAdjAdd+totalAdjMiss)/totalAdjExp)*100)) : null;
-    const invAcc = inventoryAccuracyStats().pct;
+    const invAcc = inventoryAccuracyStats(true).pct;
 
     let html = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
@@ -9224,7 +9232,7 @@ function showCCTracker() {
   const locSet2 = new Set(window._ccHistoricLocs || []);
   state.inventory.forEach(r => { if (r.location) locSet2.add(r.location); });
   const allLocs     = [...locSet2].sort();
-  const storageLocs = allLocs.filter(l => !SKIP_LOCS.some(p=>l.toUpperCase().includes(p.toUpperCase())));
+  const storageLocs = allLocs.filter(l => !isCCStaging(l) && !SKIP_LOCS.some(p=>l.toUpperCase().includes(p.toUpperCase())));
 
   const now = new Date();
   const year  = now.getFullYear();
@@ -9270,7 +9278,7 @@ function showCCTracker() {
     const pct = storageLocs.length > 0 ? Math.round(countedLocs.length/storageLocs.length*100) : 0;
     const pctColor = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
     const wdColor  = remainWorkDays<=3?'var(--danger)':remainWorkDays<=7?'var(--warning)':'var(--accent2)';
-    const invAcc   = inventoryAccuracyStats().pct;
+    const invAcc   = inventoryAccuracyStats(true).pct;
     const invAccColor = invAcc===null?'var(--text2)':invAcc>=98?'var(--accent2)':invAcc>=95?'var(--warning)':'var(--danger)';
 
     // Build calendar day headers
@@ -9389,6 +9397,7 @@ function exportCCTrackerReport() {
   // Per-session results (accuracy + variance), mirroring the report screen's math.
   let aggLines = 0, aggAccurate = 0, aggExp = 0, aggAdj = 0, aggNet = 0, aggLocs = 0;
   const sessionRows = (T.sessions || []).map(s => {
+    s = Object.assign({}, s, { entries:(s.entries||[]).filter(e=>!isCCStaging(e.loc)), locations:(s.locations||[]).filter(l=>!isCCStaging(l)) });   // exclude -00 staging bins from report accuracy
     const adjs   = s.adjustments || [];
     const getAdj = loc => adjs.find(a => a.loc === loc);
     const entries = s.entries || [];
@@ -9823,6 +9832,7 @@ function printCCCurrentSheet() {
 }
 
 function _renderCCPrintWindow(session) {
+  session = Object.assign({}, session, { entries:(session.entries||[]).filter(e=>!isCCStaging(e.loc)), locations:(session.locations||[]).filter(l=>!isCCStaging(l)) });   // exclude -00 staging bins from the printed sheet
   const ccU = ccSessionUnit(session);
   let rows = '';
   let grandTotalRolls = 0, grandTotalPcs = 0;
@@ -9998,6 +10008,7 @@ function _renderCCPrintWindow(session) {
 
 
 function showCCReport(session) {
+  session = Object.assign({}, session, { entries:(session.entries||[]).filter(e=>!isCCStaging(e.loc)), locations:(session.locations||[]).filter(l=>!isCCStaging(l)) });   // exclude -00 staging bins from the report
   state.currentView = 'ccreport';
   const ccU = ccSessionUnit(session);
   const adjs = session.adjustments||[];
@@ -10157,6 +10168,7 @@ function showCCCountSheetView(sessionId) {
   state.currentView = 'ccsheet';
   const load = (session) => {
     window._ccLastSession = session;
+    session = Object.assign({}, session, { entries:(session.entries||[]).filter(e=>!isCCStaging(e.loc)), locations:(session.locations||[]).filter(l=>!isCCStaging(l)) });   // exclude -00 staging bins from the count-sheet view
     const ccU = ccSessionUnit(session);
 
     let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
