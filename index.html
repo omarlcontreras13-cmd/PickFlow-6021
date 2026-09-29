@@ -269,6 +269,9 @@ const BU_MAP = {
   'MAX': 'MAXXON',
   'PA0': 'NEXUS CIRCULAR',   // Nexus PO prefix -> BU
   'DTA': 'DOMTAR',          // Domtar pulp roll id prefix -> BU
+  // Catalyst BU is driven by the Customer column at import (not the Prod ID2 prefix),
+  // collapsing the many Catalyst prefixes into two clean BUs. See importInventory.
+  'CAT': 'CATALYST', 'CXD': 'CATALYST CROSS DOCK',
 };
 
 const BU_SEQ_DEFAULT = {
@@ -283,6 +286,7 @@ const BU_SEQ_DEFAULT = {
   '821':'FIFO','450':'FIFO','403':'FIFO','401':'FIFO','729':'FIFO','312':'FIFO',
   'ATL':'FIFO',
   'MAX':'FIFO',
+  'CAT':'FIFO','CXD':'FIFO',   // Catalyst / Catalyst Cross Dock
 };
 
 const BU_ZMO_DEFAULT = {
@@ -555,7 +559,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 113;
+const APP_BUILD = 116;
 const VERSION_PATH = '6021/appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -1305,8 +1309,16 @@ function importInventory(wb, filename, batchMode=false) {
     const _buCol    = buColI>=0 && r[buColI] && !String(r[buColI]).startsWith('=')
                       ? r[buColI].toString().trim() : '';
     // Priority: BU column (Smurfit) → LEFT(3) of Prod ID2 → LEFT(3) of Prod ID
-    const buRaw = (_buCol || _prod2val.substring(0,3) || _prod1val.substring(0,3)).substring(0,3).toUpperCase();
+    let buRaw = (_buCol || _prod2val.substring(0,3) || _prod1val.substring(0,3)).substring(0,3).toUpperCase();
     const cust = (r[custI]||'').toString().trim();
+    // Catalyst ONLY: the BU is driven by the Customer column (B), not the Prod ID2 prefix.
+    // Catalyst rolls carry many different prefixes (450, 234, 244, 563, 315…) which otherwise
+    // split into a dozen look-alike BUs and cause allocation issues. Collapse them into two:
+    // regular Catalyst → "Catalyst", the Cross Dock customer → "Catalyst Cross Dock".
+    const _custUp = cust.toUpperCase();
+    if (_custUp.includes('CATALYST')) {
+      buRaw = /CROSS\s*-?\s*DOCK|CROSSDOCK|X-?DOCK|\bXDK\b/.test(_custUp) ? 'CXD' : 'CAT';
+    }
     const bu = resolveBU(buRaw);
 
     // Calculate Unique Weight and Tons
@@ -4676,7 +4688,10 @@ function ipgSkuCount(){ return Object.keys(getIpgSkuTable()).length; }
 // DURABUBBLE / ENDURABUBBLE / ASDURABUBBLE / DURABUBBLE LITE; NOT DuraMask/DuraBond.
 function _ipgIsDura(rec){ const blob=((rec&&rec.line)||'')+' '+((rec&&rec.desc)||''); return /DURABUBBLE/i.test(blob); }
 // UOM a SKU should carry on the manual receipt: BUND for DuraBubble, else the master UOM.
-function ipgSkuUom(rec){ return _ipgIsDura(rec) ? 'BUND' : String((rec&&rec.uom)||'').toUpperCase(); }
+// IPG physical inventory is counted in ROLLS across the board; DuraBubble is the one
+// exception (bundles → BUND). Any other master UOM (e.g. SQF square-feet, an area/pricing
+// unit) is ignored for the physical count so IPG never breaks out as sq ft / cases / etc.
+function ipgSkuUom(rec){ return _ipgIsDura(rec) ? 'BUND' : 'ROLLS'; }
 // DuraBubble anti-static SKUs carry an "AS" prefix (ASDBL48, ASEZ8X11.5). The base SKU
 // (DBL48, EZ8X11.5) is what shows in the New Inbound picker and every generated/exported
 // row. Only strips when the item is DuraBubble AND the SKU starts with AS; idempotent.
