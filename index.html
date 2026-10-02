@@ -110,6 +110,12 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); heig
 .data-table tr:hover td { background:rgba(26,82,118,0.03); }
 .data-table tr.dmg-row td { background:rgba(192,57,43,0.05); }
 .data-table tr.totals-row td { font-weight:bold;background:#f0f0f0;border-top:2px solid var(--border); }
+/* Staged Inventory table — mirrors 6049's .sku-table so the view/font/layout match across apps. */
+.sku-table { width:100%;border-collapse:collapse;font-size:12px; }
+.sku-table th { padding:8px 10px;text-align:left;font-size:10px;letter-spacing:1px;color:var(--text2);border-bottom:1px solid var(--border);font-weight:normal; }
+.sku-table td { padding:8px 10px;border-bottom:1px solid rgba(46,50,80,0.5);vertical-align:middle; }
+.sku-table tr:last-child td { border-bottom:none; }
+.sku-table tr:hover td { background:rgba(26,82,118,0.03); }
 
 /* FORM */
 .form-grid { display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px; }
@@ -223,6 +229,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); heig
         <button class="btn" id="nexus-btn" onclick="showNexusReceipt()" style="font-size:11px;background:var(--surface2);border-color:var(--border)">Nexus Inbound</button>
         <button class="btn" id="putaway-btn" onclick="showPendingPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📥 Pending Put Away</button>
         <button class="btn" id="lastputaway-btn" onclick="showLastPutAway()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">📋 Last Put Away</button>
+        <button class="btn" id="staged-btn" onclick="showStagedInventory()" disabled style="font-size:11px;background:var(--surface2);border-color:var(--border)">🗂 Staged Inventory</button>
         <button class="btn" id="archive-settings-btn" onclick="showArchiveSettings()" style="font-size:11px;display:none">📁 Archive Settings</button>
         <button class="btn" id="manage-users-btn" onclick="showUserManagement()" style="font-size:11px;display:none">👥 Manage Users</button>
       </div>
@@ -559,7 +566,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 119;
+const APP_BUILD = 130;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -829,6 +836,8 @@ function enableAppButtons() {
   if (tb) tb.disabled = false;
   if (pab) pab.disabled = false;
   if (lpb) lpb.disabled = false;
+  const sgb = document.getElementById('staged-btn');
+  if (sgb) sgb.disabled = false;
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -1369,6 +1378,8 @@ function importInventory(wb, filename, batchMode=false) {
   }));
   state.lastImport = Date.now();
   state.dataLoaded = true;
+  _writeCCInvSnapshot();   // freeze this month's inventory-accuracy snapshot (month-end = last import of the month)
+  _syncStagedDates();      // record first-seen staged date for skids now in -00 bins
   enableAppButtons();
 
   if (!batchMode) {
@@ -4950,6 +4961,13 @@ function showIPGManual(id){
                 <label style="font-size:11px;color:var(--text2);display:inline-flex;align-items:center;gap:5px">Vendor
                   <select id="ipm-vendor-filter" onchange="ipmSetVendorFilter(this.value)" title="Filter the SKU picker by vendor" style="font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--text)"></select>
                 </label>
+                <span style="width:1px;height:18px;background:var(--border)"></span>
+                <label style="font-size:11px;color:var(--text2);display:inline-flex;align-items:center;gap:5px;cursor:pointer" title="Auto-fill each row's Lot # as PO# + sequence (e.g. 4512584182-001). Use for products where the lot isn't scanned.">
+                  <input type="checkbox" id="ipm-gen-lot" style="margin:0;cursor:pointer"> Generate Lot #
+                </label>
+                <label style="font-size:11px;color:var(--text2);display:inline-flex;align-items:center;gap:5px;cursor:pointer" title="Set each row's LF to 0 instead of leaving it blank. Use for products where LF isn't scanned.">
+                  <input type="checkbox" id="ipm-lf-zero" style="margin:0;cursor:pointer"> LF = 0
+                </label>
                 <span id="ipm-src" style="font-size:11px;color:var(--text2)"></span>
               </div>
               <div style="overflow:auto;margin-top:12px">
@@ -5135,6 +5153,9 @@ function ipmGenerate(){
   // even split across every generated row, remainder absorbed by the last row
   const per = totalRows>0 ? Math.round((totalWt/totalRows)*10000)/10000 : 0;
   const dv=ipmGv('ipm-date'); const expDate=dv?new Date(dv+'T00:00:00'):new Date();
+  // SKU-Lines options: for products where lot/LF aren't scanned, auto-fill them instead of leaving blank.
+  const genLot = !!(document.getElementById('ipm-gen-lot')||{}).checked;   // Lot# = PO# + sequence
+  const lfZero = !!(document.getElementById('ipm-lf-zero')||{}).checked;   // LF = 0 instead of blank
   IPM.exportRows=[]; let seq=0, acc=0;
   active.forEach(ln=>{
     const qty=parseInt(ln.qty)||0;
@@ -5144,9 +5165,10 @@ function ipmGenerate(){
       // Weight only splits when a Total Weight is entered; otherwise left BLANK to scan in.
       const w = totalWt>0 ? (last ? Math.round((totalWt-acc)*10000)/10000 : per) : '';
       acc += (typeof w==='number'?w:0);
-      const lot = '';   // no auto-generated Lot# — left blank for the receiver to scan/fill
-      // LF blank unless a line LF was entered — scanned in alongside Weight.
-      const lfv = (ln.lf===''||ln.lf==null) ? '' : (parseFloat(ln.lf)||0);
+      // Lot#: generated as PO#-### when the option is on; otherwise blank for the receiver to scan.
+      const lot = genLot ? ((po?po+'-':'')+String(seq).padStart(3,'0')) : '';
+      // LF: an explicit line LF always wins; else 0 when the option is on, otherwise blank to scan.
+      const lfv = (ln.lf!==''&&ln.lf!=null) ? (parseFloat(ln.lf)||0) : (lfZero ? 0 : '');
       const prod2 = ipmProd2();   // Prod ID 2 = "IPG " + Invoice + " " + PO
       IPM.exportRows.push({
         sku:ipgBaseSku(String(ln.sku).trim()), productID:ln.desc||'', lot:lot, prodID2:prod2, po:po,
@@ -5248,6 +5270,7 @@ function ipmRenderPreview(){
 function ipmNew(){
   IPM.activeId=null; IPM.lines=[]; IPM.ckpMode=false; IPM.ckpRolls=[]; IPM.ckpUnits=0; ipmResetPreview();
   ['ipm-receiver','ipm-po','ipm-invoice','ipm-truck','ipm-loadwt'].forEach(id=>{const e=document.getElementById(id); if(e)e.value='';});
+  ['ipm-gen-lot','ipm-lf-zero'].forEach(id=>{const e=document.getElementById(id); if(e)e.checked=false;});
   const d=new Date(),p=n=>String(n).padStart(2,'0'); const de=document.getElementById('ipm-date'); if(de) de.value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
   ipmRenderLines(); ipmHdrPreview(); ipmRenderSaved(); ipmStatus('');
 }
@@ -5266,6 +5289,7 @@ function ipmSave(){
   const U=eid=>ipmGv(eid).trim().toUpperCase();
   const rec={ id:id, receiver:U('ipm-receiver'), po:U('ipm-po'), invoice:U('ipm-invoice'), truck:U('ipm-truck'),
     loadWeight:ipmGv('ipm-loadwt'), expDate:IPM.exportRows[0].expDate, totalRows:IPM.exportRows.length,
+    genLot:!!(document.getElementById('ipm-gen-lot')||{}).checked, lfZero:!!(document.getElementById('ipm-lf-zero')||{}).checked,
     lines:JSON.parse(JSON.stringify(IPM.lines)), rows:JSON.parse(JSON.stringify(IPM.exportRows)),
     createdBy:(state.currentUser&&state.currentUser.name)?state.currentUser.name:'—',
     created: existing?existing.created:Date.now() };
@@ -5301,6 +5325,8 @@ function ipmLoad(id){
   IPM.activeId=id; IPM.ckpMode=false; IPM.ckpRolls=[]; IPM.ckpUnits=0;
   const set=(eid,v)=>{const e=document.getElementById(eid); if(e)e.value=v||'';};
   set('ipm-receiver',r.receiver); set('ipm-po',r.po); set('ipm-invoice',r.invoice); set('ipm-truck',r.truck); set('ipm-loadwt',r.loadWeight||'');
+  const _gl=document.getElementById('ipm-gen-lot'); if(_gl) _gl.checked=!!r.genLot;
+  const _lz=document.getElementById('ipm-lf-zero'); if(_lz) _lz.checked=!!r.lfZero;
   const d=new Date(r.expDate),p=n=>String(n).padStart(2,'0'); set('ipm-date',d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()));
   ipmHdrPreview();
   IPM.lines=JSON.parse(JSON.stringify(r.lines||[])); ipmRenderLines();
@@ -8731,8 +8757,10 @@ function showCycleCountStart() {
   Promise.all([
     db.ref('cycleCount6021').orderByChild('createdAt').once('value'),
     db.ref('locationList6021').once('value'),
-    db.ref('cycleCountArchive6021').once('value')
-  ]).then(([sessionSnap, locSnap, archiveSnap]) => {
+    db.ref('cycleCountArchive6021').once('value'),
+    db.ref('ccAccSnap6021').once('value')
+  ]).then(([sessionSnap, locSnap, archiveSnap, accSnap]) => {
+    window._ccAccSnaps = accSnap.val() || {};               // { 'YYYY-MM': {pct,total,ghost,cc,asOf} } month-end inv-accuracy
     const data        = sessionSnap.val() || {};            // live (current-month) sessions
     const archiveData = archiveSnap.val() || {};            // { 'YYYY-MM': { id: session } }
     window._ccArchiveData = archiveData;
@@ -9250,7 +9278,150 @@ function ediSuggestSelect(loc) {
 }
 
 
-function showCCTracker() {
+// ─── STAGED INVENTORY (-00 staging bins) ───────────────────────────────────────
+// Everything sitting in a staging bin (location ends in -00) for THIS facility (23-xx-00).
+// "Date Staged" = the day a skid first appears in a -00 bin, tracked across imports.
+function _isStagedLoc(loc){ return isCCStaging(loc) && !isOtherFacilityLoc(loc); }
+function _skidKey(r){ return (r.skidId||'').toString().trim() || (r.sku+'|'+(r.lot||'')+'|'+(r.location||'')); }
+// Read-merge-write the staged-date map: a skid keeps its first-staged date, new skids get the
+// current import date, and skids no longer in a -00 bin are dropped (re-staging later = new date).
+function _syncStagedDates(){
+  if(!db) return;
+  db.ref('stagedDates6021').once('value').then(snap=>{
+    const map = snap.val() || {};
+    const nowTs = state.lastImport || Date.now();
+    const seen = {};
+    (state.inventory||[]).forEach(r=>{ if(!_isStagedLoc(r.location)) return; const k=_skidKey(r); seen[k]=1; if(!map[k]) map[k]={date:nowTs, sku:r.sku}; });
+    Object.keys(map).forEach(k=>{ if(!seen[k]) delete map[k]; });
+    window._stagedDates = map;
+    db.ref('stagedDates6021').set(map).catch(()=>{});
+  }).catch(()=>{});
+}
+// Ghost and Cycle Count stock is never real staged inventory — exclude by location name or status.
+function _stagedExcluded(r){
+  const L=(r.location||'').toUpperCase(), S=(r.status||'').toUpperCase();
+  return L.includes('GHOST')||L.includes('CYCLE')||L.includes('CYC_CNT')||L.includes('CYC-CNT')||S==='GHOST'||S==='CYCLE COUNT';
+}
+function _stagedRows(){
+  const dates = window._stagedDates || {};
+  const rows = (state.inventory||[]).filter(r=>_isStagedLoc(r.location) && !_stagedExcluded(r)).map(r=>{
+    const k=_skidKey(r); const d=dates[k] && dates[k].date;
+    return { dateStaged:d||null, customer:(r.customer||'—'), sku:r.sku||'', lot:r.lot||'', skid:(r.skidId||''), prod1:(r.productId||''), prod2:(r.prod2||''), qty:(+r.pcs||0), location:r.location||'' };
+  });
+  // Hierarchy: Customer → Location, then SKU, then lot.
+  rows.sort((a,b)=>{ if(a.customer!==b.customer) return (a.customer+'').localeCompare(b.customer+''); if(a.location!==b.location) return a.location.localeCompare(b.location); if(a.sku!==b.sku) return (a.sku+'').localeCompare(b.sku+''); return (a.lot+'').localeCompare(b.lot+''); });
+  return rows;
+}
+function showStagedInventory(){
+  state.currentView='stagedinv';
+  const panel=document.getElementById('main-panel');
+  const render=()=>{
+    const rows=_stagedRows();
+    const totQty=rows.reduce((s,r)=>s+(+r.qty||0),0);
+    const ds=d=>d?new Date(d).toLocaleDateString('en-US'):'—';
+    // Build the hierarchy: Customer → Location, each with skid counts and subtotals.
+    const byCust={}; rows.forEach(r=>{ const c=r.customer||'—'; (byCust[c]=byCust[c]||{}); (byCust[c][r.location]=byCust[c][r.location]||[]).push(r); });
+    const custKeys=Object.keys(byCust).sort((a,b)=>a.localeCompare(b));
+    const locSet=new Set(); rows.forEach(r=>locSet.add(r.location));
+    let body='';
+    custKeys.forEach(c=>{
+      const locs=byCust[c]; const locKeys=Object.keys(locs).sort((a,b)=>a.localeCompare(b));
+      const custRows=locKeys.reduce((a,l)=>a.concat(locs[l]),[]);
+      const custQty=custRows.reduce((s,r)=>s+(+r.qty||0),0);
+      body+=`<tr style="background:#3d5ce6"><td colspan="5" style="font-weight:bold;color:#fff;padding:7px 16px">👤 ${c}</td><td style="text-align:right;font-weight:bold;color:#fff;white-space:nowrap;padding:7px 16px">${custRows.length} skid${custRows.length!==1?'s':''}</td><td style="text-align:right;font-weight:bold;color:#fff;white-space:nowrap;padding:7px 16px 7px 28px">${custQty.toLocaleString()}</td></tr>`;
+      locKeys.forEach(loc=>{
+        const g=locs[loc]; const sub=g.reduce((s,r)=>s+(+r.qty||0),0);
+        body+=`<tr style="background:var(--surface2)"><td colspan="5" style="font-weight:bold;color:#1a9e7a;padding:6px 16px 6px 28px">📍 ${loc}</td><td style="text-align:right;font-weight:bold;color:var(--text2);white-space:nowrap;padding:6px 16px">${g.length} skid${g.length!==1?'s':''}</td><td style="text-align:right;font-weight:bold;color:#1a9e7a;white-space:nowrap;padding:6px 16px 6px 28px">${sub.toLocaleString()}</td></tr>`;
+        g.forEach(r=>{ body+=`<tr>
+          <td style="color:#3d5ce6">${r.sku}</td>
+          <td style="color:var(--text2)">${r.lot||'—'}</td>
+          <td style="color:var(--text2)">${r.skid||'—'}</td>
+          <td style="color:var(--text2)">${r.prod1||'—'}</td>
+          <td style="color:var(--text2)">${r.prod2||'—'}</td>
+          <td style="color:var(--text2);white-space:nowrap;padding:5px 16px">${ds(r.dateStaged)}</td>
+          <td style="text-align:right;white-space:nowrap;padding:5px 16px 5px 28px">${r.qty}</td>
+        </tr>`; });
+      });
+    });
+    const html=`
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-size:14px;font-weight:bold;letter-spacing:2px">🗂 STAGED INVENTORY</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:4px">Staging bins (locations ending in -00), grouped by customer → location · ${custKeys.length} customer${custKeys.length!==1?'s':''} · ${locSet.size} location${locSet.size!==1?'s':''} · ${rows.length} skid${rows.length!==1?'s':''} · ${totQty.toLocaleString()} total qty</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="exportStagedInventoryExcel()" style="font-size:11px;background:#3d5ce6;border-color:#3d5ce6;color:#fff">⬇ Export Excel</button>
+        </div>
+      </div>
+      <div style="flex:1;min-height:0;overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table class="sku-table" style="font-size:11px;margin:0"><thead><tr>
+        ${['SKU','LOT','SKID ID','PRODUCT ID 1','PRODUCT ID 2','DATE STAGED'].map(x=>`<th style="position:sticky;top:0;z-index:3;background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);white-space:nowrap;padding:8px 16px">${x}</th>`).join('')}
+        <th style="position:sticky;top:0;z-index:3;background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);text-align:right;white-space:nowrap;padding:8px 16px 8px 28px">QTY</th>
+      </tr></thead><tbody>`+
+      (rows.length? body : `<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No inventory is currently staged in -00 bins.</td></tr>`)+
+      `</tbody>${rows.length?`<tfoot><tr><td colspan="6" style="font-weight:bold;text-align:right">TOTAL QTY</td><td style="text-align:right;font-weight:bold;color:#1a9e7a">${totQty.toLocaleString()}</td></tr></tfoot>`:''}</table></div>`;
+    panel.innerHTML='<div class="panel-inner" style="padding:20px;height:100%;display:flex;flex-direction:column;box-sizing:border-box">'+html+'</div>';
+  };
+  if(window._stagedDates){ render(); }
+  else if(db){ panel.innerHTML='<div class="panel-inner" style="padding:20px"><div style="color:var(--text2)">Loading staged inventory...</div></div>';
+    db.ref('stagedDates6021').once('value').then(s=>{ window._stagedDates=s.val()||{}; render(); }).catch(()=>{ window._stagedDates={}; render(); });
+  } else { window._stagedDates={}; render(); }
+}
+function exportStagedInventoryExcel(){
+  const rows=_stagedRows();
+  if(!rows.length){ showAlert('No staged inventory to export.','warning'); return; }
+  const ds=d=>d?new Date(d).toLocaleDateString('en-US'):'';
+  const aoa=[['Customer','Location','SKU','Lot','Skid ID','Product ID 1','Product ID 2','Date Staged','QTY']];
+  rows.forEach(r=>aoa.push([r.customer, r.location, r.sku, r.lot, r.skid, r.prod1, r.prod2, ds(r.dateStaged), r.qty]));
+  const wb=XLSX.utils.book_new(); const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:16},{wch:12},{wch:14},{wch:16},{wch:16},{wch:24},{wch:14},{wch:12},{wch:8}];
+  XLSX.utils.book_append_sheet(wb,ws,'Staged Inventory');
+  const d=new Date(),p=n=>String(n).padStart(2,'0');
+  XLSX.writeFile(wb,`Staged_Inventory_6021_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}.xlsx`);
+}
+
+// ── Monthly inventory-accuracy snapshots ──────────────────────────────────────
+// Inventory accuracy (ghost/cycle %) is a point-in-time metric of the CURRENTLY loaded
+// inventory. To show it on an archived month, we freeze the value at month-end: every
+// import writes the current month's snapshot (overwriting, so the LAST import of the month
+// — the month-end file — is what persists). Archived months then read their stored snapshot.
+function _writeCCInvSnapshot(monthKey){
+  if(!db) return;
+  monthKey = monthKey || ccMonthKey(Date.now());
+  const s = inventoryAccuracyStats();
+  if(s.pct===null) return;
+  const rec = { pct:s.pct, total:s.total, ghost:s.ghost, cc:s.cc, asOf:Date.now() };
+  db.ref('ccAccSnap6021/'+monthKey).set(rec).catch(()=>{});
+  window._ccAccSnaps = window._ccAccSnaps || {}; window._ccAccSnaps[monthKey] = rec;
+}
+// Manual capture: freeze the CURRENTLY LOADED inventory's accuracy as the viewed month's
+// snapshot. Used to backfill a month whose snapshot predates this feature (its month-end
+// file must be the inventory currently loaded).
+function saveCCInvSnapshot(monthKey){
+  if(!db){ showAlert('Not connected to database.','warning'); return; }
+  const s = inventoryAccuracyStats();
+  if(s.pct===null){ showAlert('No inventory is loaded to snapshot.','warning'); return; }
+  _writeCCInvSnapshot(monthKey);
+  showAlert('Inventory accuracy snapshot saved for '+ccMonthLabel(monthKey)+' — '+s.pct.toFixed(1)+'%.','success');
+  showCCTracker(monthKey);
+}
+
+// Resolve the cycle-count sessions for a given month (current OR archived) for the tracker/report.
+// Prefers the in-memory cache built by showCycleCountStart (includes archived months); falls back
+// to a direct live+archive Firebase read if the cache isn't populated yet.
+function _ccTrackerSessions(monthKey, monthStart, monthEnd, cb){
+  const cache = window._ccSessionsByMonth;
+  if (cache) { cb(((cache[monthKey]||[]).slice()).sort((a,b)=>a.createdAt-b.createdAt)); return; }
+  if (!db) { cb([]); return; }
+  Promise.all([ db.ref('cycleCount6021').once('value'), db.ref('cycleCountArchive6021').once('value') ])
+    .then(([liveS, archS]) => {
+      const all = Object.values(liveS.val()||{});
+      const ad = archS.val()||{}; Object.keys(ad).forEach(mk=>Object.values(ad[mk]||{}).forEach(s=>all.push(s)));
+      cb(all.filter(s=>s.createdAt>=monthStart&&s.createdAt<=monthEnd).sort((a,b)=>a.createdAt-b.createdAt));
+    }).catch(()=>cb([]));
+}
+
+function showCCTracker(monthKey) {
   state.currentView = 'cctracker';
   const panel = document.getElementById('main-panel');
   panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div style="color:var(--text2)">Loading tracker...</div></div>';
@@ -9262,14 +9433,20 @@ function showCCTracker() {
   const allLocs     = [...locSet2].sort();
   const storageLocs = allLocs.filter(l => !isCCStaging(l) && !isOtherFacilityLoc(l) && !SKIP_LOCS.some(p=>l.toUpperCase().includes(p.toUpperCase())));
 
-  const now = new Date();
-  const year  = now.getFullYear();
-  const month = now.getMonth();
-  const monthName = now.toLocaleDateString('en-US',{month:'long',year:'numeric'});
+  // Month selection: default to the current month, but any month with history can be viewed/printed.
+  const now       = new Date();
+  const curKey    = window._ccCurMonthKey || ccMonthKey(Date.now());
+  monthKey        = monthKey || curKey;
+  const isCurrent = (monthKey === curKey);
+  const monthKeys = (function(){ const ks=new Set(Object.keys(window._ccSessionsByMonth||{})); ks.add(curKey); ks.add(monthKey); return [...ks].sort().reverse(); })();
+  const _mp   = monthKey.split('-');
+  const year  = +_mp[0];
+  const month = +_mp[1] - 1;
+  const monthName = new Date(year, month, 1).toLocaleDateString('en-US',{month:'long',year:'numeric'});
   const monthStart = new Date(year, month, 1).getTime();
   const monthEnd   = new Date(year, month+1, 0, 23,59,59).getTime();
   const lastDay    = new Date(year, month+1, 0).getDate();
-  const today      = now.getDate();
+  const today      = isCurrent ? now.getDate() : (lastDay + 1);   // archived month: every work day already passed
 
   // Working days in month & remaining
   function isWorkday(y, m, d) {
@@ -9285,11 +9462,7 @@ function showCCTracker() {
   }
   const passedWorkDays = totalWorkDays - remainWorkDays;
 
-  if (!db) { panel.innerHTML = '<div class="panel-inner" style="padding:20px"><div class="alert alert-warning">Not connected to database.</div></div>'; return; }
-
-  db.ref('cycleCount6021').orderByChild('createdAt').once('value', snap => {
-    const data = snap.val() || {};
-    const sessions = Object.values(data).filter(s=>s.createdAt>=monthStart&&s.createdAt<=monthEnd).sort((a,b)=>a.createdAt-b.createdAt);
+  _ccTrackerSessions(monthKey, monthStart, monthEnd, function(sessions){
 
     // Build per-location count map: loc → array of dates counted
     const locDates = {};
@@ -9306,8 +9479,11 @@ function showCCTracker() {
     const pct = storageLocs.length > 0 ? Math.round(countedLocs.length/storageLocs.length*100) : 0;
     const pctColor = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
     const wdColor  = remainWorkDays<=3?'var(--danger)':remainWorkDays<=7?'var(--warning)':'var(--accent2)';
-    const invAcc   = inventoryAccuracyStats().pct;
+    // Current month → live accuracy; archived month → its stored month-end snapshot (if captured).
+    const _snapRec = (window._ccAccSnaps||{})[monthKey];
+    const invAcc   = isCurrent ? inventoryAccuracyStats().pct : (_snapRec ? _snapRec.pct : null);
     const invAccColor = invAcc===null?'var(--text2)':invAcc>=98?'var(--accent2)':invAcc>=95?'var(--warning)':'var(--danger)';
+    const invAccNote = (!isCurrent && _snapRec && _snapRec.asOf) ? ('snapshot '+new Date(_snapRec.asOf).toLocaleDateString('en-US')) : (!isCurrent && !_snapRec ? 'no snapshot — use 📸 below' : '');
 
     // Build calendar day headers
     const calDays = [];
@@ -9317,10 +9493,14 @@ function showCCTracker() {
     let html = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <div>
-        <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 CYCLE COUNT TRACKER — ${monthName.toUpperCase()}</div>
-        <div style="font-size:11px;color:var(--text2);margin-top:4px">All locations must be counted at least once this month</div>
+        <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📊 CYCLE COUNT TRACKER — ${monthName.toUpperCase()}${isCurrent?'':' <span style="font-size:10px;color:var(--warning);letter-spacing:1px">(ARCHIVED)</span>'}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">${isCurrent?'All locations must be counted at least once this month':'Archived month — counted locations &amp; session accuracy are historical. Inventory accuracy reflects live inventory, so it shows only for the current month.'}</div>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select onchange="if(this.value)showCCTracker(this.value)" title="View another month" style="font-size:11px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-family:var(--font);outline:none">
+          ${monthKeys.map(k=>`<option value="${k}"${k===monthKey?' selected':''}>${ccMonthLabel(k)}${k===curKey?' (current)':''}</option>`).join('')}
+        </select>
+        <button class="btn" onclick="saveCCInvSnapshot('${monthKey}')" title="Capture the currently loaded inventory's accuracy as ${monthName}'s month-end snapshot" style="font-size:11px">📸 Save Inv Snapshot</button>
         <button class="btn" onclick="exportCCTrackerReport()" style="font-size:11px;background:var(--accent);color:#fff;border-color:var(--accent)">🖨 Print Report</button>
         <button class="btn" onclick="showCycleCountStart()" style="font-size:11px">← Back to Count</button>
       </div>
@@ -9333,7 +9513,7 @@ function showCCTracker() {
         {l:'COUNTED', v:countedLocs.length, c:'var(--accent2)'},
         {l:'REMAINING', v:uncountedLocs.length, c:uncountedLocs.length>0?'var(--danger)':'var(--accent2)'},
         {l:'% COMPLETE', v:pct+'%', c:pctColor},
-        {l:'INV ACCURACY', v:invAcc!==null?invAcc.toFixed(1)+'%':'—', c:invAccColor},
+        {l:'INV ACCURACY', v:(invAcc!==null?invAcc.toFixed(1)+'%':'—')+(invAccNote?`<div style="font-size:8px;color:var(--text2);font-weight:normal;letter-spacing:0;margin-top:3px">${invAccNote}</div>`:''), c:invAccColor},
         {l:'WORK DAYS DONE', v:passedWorkDays+'/'+totalWorkDays, c:'var(--text2)'},
         {l:'WORK DAYS LEFT', v:remainWorkDays, c:wdColor}
       ].map(x=>`
