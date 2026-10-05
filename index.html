@@ -566,7 +566,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 130;
+const APP_BUILD = 132;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -8728,7 +8728,7 @@ function renderCCMonthList(monthKey) {
         ${(!isArchived && isAdmin())?`<button onclick="confirmDeleteSession('${s.id}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:(isArchived?`<span style="font-size:9px;color:var(--text2);letter-spacing:1px">ARCHIVED</span>`:'')}
       </div>
       <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
-      <div style="color:var(--text2);font-size:11px">${locs.length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
+      <div style="color:var(--text2);font-size:11px">${locs.length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted${s.adjustedBy?' by '+s.adjustedBy:''}${s.adjustedAt?' · '+new Date(s.adjustedAt).toLocaleString():''}</span>`:''}</div>
       ${locsDisp?`<div style="color:var(--text);font-size:10px;margin-top:3px;line-height:1.5;word-break:break-word;background:var(--surface2);border-radius:4px;padding:4px 6px">📍 ${locsDisp}</div>`:''}
     </div>`;}).join('');
   filterCCMonthList();   // re-apply any active search after a month switch
@@ -9630,7 +9630,7 @@ function exportCCTrackerReport() {
     return {
       id: s.id, date: new Date(s.createdAt).toLocaleDateString('en-US'),
       by: s.counterName || s.countedBy || '', locs, binPct, countPct, net,
-      adjusted: (s.adjustments && s.adjustments.length) ? 'Yes' : '—'
+      adjusted: (s.adjustments && s.adjustments.length) ? (s.adjustedBy || 'Yes') : '—'
     };
   });
   const aggBin   = aggLines > 0 ? (aggAccurate / aggLines * 100) : 100;
@@ -9651,7 +9651,7 @@ function exportCCTrackerReport() {
         <thead><tr>
           <th>Session</th><th>Date</th><th>Counter</th>
           <th class="num">Locations</th><th class="num">Bin Acc.</th>
-          <th class="num">Count Acc.</th><th class="num">Net Var.</th><th>Adjusted</th>
+          <th class="num">Count Acc.</th><th class="num">Net Var.</th><th>Adjusted By</th>
         </tr></thead>
         <tbody>
           ${sessionRows.map(r => `<tr>
@@ -9851,7 +9851,7 @@ function loadCCHistory(inline=false) {
           ${isAdmin()?`<button onclick="confirmDeleteSession('${s.id}')" title="Delete" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:''}
         </div>
         <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
-        <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
+        <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted${s.adjustedBy?' by '+s.adjustedBy:''}${s.adjustedAt?' · '+new Date(s.adjustedAt).toLocaleString():''}</span>`:''}</div>
       </div>`).join('');
   });
 }
@@ -10254,7 +10254,7 @@ function showCCReport(session) {
     <div>
       <div style="font-size:14px;font-weight:bold;color:var(--accent);letter-spacing:1px">${session.id}</div>
       <div style="font-size:11px;color:var(--text2)">${new Date(session.createdAt).toLocaleString()} · Created by ${session.countedBy}${session.counterName?` · <span style="color:var(--accent)">Counter: ${session.counterName}</span>`:''}
-        ${hasAdj?` · <span style="color:var(--accent2)">✓ Adjustments entered</span>`:` · <span style="color:var(--warning)">Pending adjustments</span>`}
+        ${hasAdj?` · <span style="color:var(--accent2)">✓ Adjustments entered${session.adjustedBy?' by '+session.adjustedBy:''}${session.adjustedAt?' · '+new Date(session.adjustedAt).toLocaleString():''}</span>`:` · <span style="color:var(--warning)">Pending adjustments</span>`}
       </div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -10539,7 +10539,7 @@ function showCCAdjustments(sessionId) {
       <label style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent);text-transform:uppercase;white-space:nowrap">Counter Name</label>
       <input id="adj-counter-name" type="text" placeholder="Who physically counted?" value="${(session.counterName||'').replace(/"/g,'&quot;')}"
         style="flex:1;min-width:180px;padding:7px 12px;border:1.5px solid var(--accent);border-radius:7px;font-family:var(--font);font-size:13px;font-weight:700;background:var(--surface);color:var(--text);outline:none">
-      <span style="font-size:10px;color:var(--text2)">Saved with the adjustments. Created by: ${session.countedBy||'—'}</span>
+      <span style="font-size:10px;color:var(--text2)">Saved with the adjustments. Created by: ${session.countedBy||'—'}${session.adjustedBy?' · Adjusted by: '+session.adjustedBy:''}${session.adjustedAt?' · '+new Date(session.adjustedAt).toLocaleString():''}</span>
     </div>
 
     <!-- Summary bar -->
@@ -10843,15 +10843,21 @@ function saveAdjustments() {
   const counterName = ((document.getElementById('adj-counter-name')||{}).value||'').trim();
 
   const base = session._dbPath || ('cycleCount6021/'+session.id);   // archived (prior-month) sessions write back to their archive path
+  const adjBy = _who();           // the logged-in user entering the adjustments
+  const adjAt = Date.now();
   const updates = {};
   updates[base+'/adjustments'] = adjustments;
   updates[base+'/counterName'] = counterName;
+  updates[base+'/adjustedBy']  = adjBy;
+  updates[base+'/adjustedAt']  = adjAt;
 
   db.ref().update(updates)
     .then(() => {
-      showAlert('✓ Adjustments saved.','success');
+      showAlert('✓ Adjustments saved by '+adjBy+'.','success');
       session.adjustments = adjustments;
       session.counterName = counterName;
+      session.adjustedBy  = adjBy;
+      session.adjustedAt  = adjAt;
       window._ccLastSession = session;
     })
     .catch(err => showAlert('Error: '+err.message,'danger'));
