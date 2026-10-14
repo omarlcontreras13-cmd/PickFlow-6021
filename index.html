@@ -527,8 +527,7 @@ let state = {
   hbhWidthTable: {},
   domtarSku: {},
   importMode: 'inventory',
-  lastImport: null,
-  importStamps: {}
+  lastImport: null
 };
 
 let selectedUserId = null;
@@ -716,11 +715,6 @@ function listenToFirebase() {
     const ts = snap.val();
     if (ts) { state.lastImport = ts; updateImportStamp(); }
   });
-  // Per-file import stamps (date/time + user), shared across all users.
-  db.ref('6021/importStamps').on('value', snap => {
-    state.importStamps = snap.val() || {};
-    ['inventory','dir','bu'].forEach(t=>{ const el=document.getElementById('imp-stamp-'+t); if(el) el.textContent=_impStampTxt(t); });
-  });
 
   // Inventory from Firebase
   db.ref('6021/inventory').on('value', snap => {
@@ -745,6 +739,9 @@ function listenToFirebase() {
         if (db) db.ref('6021/tonSnapshots/'+todayKey).once('value', snap => {
           if (!snap.val()) setTimeout(() => saveTonSnapshot(true), 2000);
         });
+        // Start-of-day full-inventory snapshot (archive after 9 AM ET; keep 60 days)
+        setTimeout(_sodMaybeSnapshot, 3000);
+        if(!window._sodTimer) window._sodTimer=setInterval(_sodMaybeSnapshot, 15*60*1000);
       } else {
         // Subsequent silent updates — just refresh state, don't jump screens
         updateImportStamp();
@@ -819,19 +816,6 @@ function saveSettings() {
   db.ref('6021/settings').set({ userSettings, eodTime:state.eodTime, eodEnabled:state.eodEnabled }).catch(e=>console.error(e));
 }
 
-// Record who imported each file type and when, and format it for the Import dialog.
-function _stampImport(type, note){
-  if(!type) return;
-  const rec = { at: Date.now(), by: (typeof _who==='function'?_who():'Unknown'), note: note||'' };
-  state.importStamps = state.importStamps || {};
-  state.importStamps[type] = rec;
-  if (db) db.ref('6021/importStamps/'+type).set(rec).catch(()=>{});
-}
-function _impStampTxt(type){
-  const s=(state.importStamps||{})[type];
-  if(!s||!s.at) return '';
-  return 'Last import: '+new Date(s.at).toLocaleString()+(s.by?(' · '+s.by):'')+((type==='inventory'&&s.note)?(' · '+s.note):'');
-}
 function updateImportStamp() {
   const el = document.getElementById('data-status');
   if (!el || !state.inventory.length) return;
@@ -979,16 +963,16 @@ function showImport() {
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="inventory" ${invCount?'checked':''} style="margin-top:2px">
-            <div><div style="font-weight:bold">Customer Inventory File</div><div style="color:var(--text2);font-size:11px">Import one customer file at a time — replaces existing rolls for that customer</div><div id="imp-stamp-inventory" style="color:var(--accent);font-size:10px;margin-top:3px">${_impStampTxt('inventory')}</div></div>
+            <div><div style="font-weight:bold">Customer Inventory File</div><div style="color:var(--text2);font-size:11px">Import one customer file at a time — replaces existing rolls for that customer</div></div>
           </label>
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="dir" ${!invCount?'checked':''} style="margin-top:2px">
-            <div><div style="font-weight:bold">DIR Report</div><div style="color:var(--text2);font-size:11px">Import DIR file to link ZMO, expiration dates by Lot #</div><div id="imp-stamp-dir" style="color:var(--accent);font-size:10px;margin-top:3px">${_impStampTxt('dir')}</div></div>
+            <div><div style="font-weight:bold">DIR Report</div><div style="color:var(--text2);font-size:11px">Import DIR file to link ZMO, expiration dates by Lot #</div></div>
           </label>
           ${isAdmin() ? `
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="bumap" style="margin-top:2px">
-            <div><div style="font-weight:bold">BU Reference Guide</div><div style="color:var(--text2);font-size:11px">Import BU code → name mapping file (Col 1: code, Col 2: name) — Admin only</div><div id="imp-stamp-bu" style="color:var(--accent);font-size:10px;margin-top:3px">${_impStampTxt('bu')}</div></div>
+            <div><div style="font-weight:bold">BU Reference Guide</div><div style="color:var(--text2);font-size:11px">Import BU code → name mapping file (Col 1: code, Col 2: name) — Admin only</div></div>
           </label>
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="clear" style="margin-top:2px">
@@ -1061,7 +1045,6 @@ function handleFileImport(e) {
       commitInventoryFresh6021(_union);
       state.lastImport = Date.now();
       db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
-      _stampImport('inventory', [..._union].join(', '));
       updateImportStamp();
       showDashboard();
       return;
@@ -1111,7 +1094,6 @@ function importBUMap(wb) {
     db.ref('6021/buSeqMap').set(seqMap).catch(()=>{});
     db.ref('6021/buZmoMap').set(zmoMap).catch(()=>{});
   }
-  _stampImport('bu');
   showAlert('✓ BU Reference loaded — '+Object.keys(map).length+' mappings ('+Object.keys(zmoMap).length+' ZMO-based).','success');
 }
 
@@ -1238,7 +1220,6 @@ function importDIR(wb) {
   }
   state.lastDirImport = Date.now();
   const zmoCount = Object.values(state.dirData).filter(d=>d.zmo).length;
-  _stampImport('dir');
   showAlert('✓ DIR loaded — '+Object.keys(state.dirData).length+' batch records ('+zmoCount+' ZMO).','success');
   closeModal();
 }
@@ -1408,7 +1389,6 @@ function importInventory(wb, filename, batchMode=false) {
     // Single file — merge-safe save to Firebase immediately and notify
     commitInventoryFresh6021(incomingCustomers);
     db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
-    _stampImport('inventory', [...incomingCustomers].join(', '));
     updateImportStamp();
     showAlert(`✓ ${filename}: ${added} rolls imported for ${[...incomingCustomers].join(', ')}. Total: ${state.inventory.length} rolls.`,'success');
     showDashboard();
@@ -11325,6 +11305,8 @@ function showDataPreview() {
           <div id="ptabs" style="display:flex;gap:8px"></div>
           <button class="btn btn-sm" onclick="exportEodReport('NOR')" style="white-space:nowrap;background:var(--accent2);color:#fff">&#128230; NOR EOD</button>
           <button class="btn btn-sm" onclick="exportEodReport('COV')" style="white-space:nowrap;background:var(--accent2);color:#fff">&#128230; COV EOD</button>
+          <button class="btn btn-sm" onclick="exportIpgEod()" style="white-space:nowrap;background:var(--accent2);color:#fff">&#128230; IPG EOD</button>
+          <button class="btn btn-sm" onclick="showSodArchive()" style="white-space:nowrap;background:var(--accent);color:#fff">&#128197; SOD Archive</button>
         </div>
       </div>
       <div id="pcontent" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto"></div>
@@ -11745,6 +11727,164 @@ function exportEodReport(code){
   }
   XLSX.writeFile(wb, 'PickFlow_6021_'+code+'_EOD_'+new Date().toISOString().slice(0,10)+'.xlsx');
   showAlert('✓ '+wantName+' EOD exported — '+rows.length+' rolls (picked excluded).','success');
+}
+
+// IPG EOD — duplicates the Warehouse Detail Report for IPG only: Tab 1 summary (SKU →
+// Inventory / Picked / Grand Total count of Lot #), Tab 2 line-level detail (one row per roll).
+function exportIpgEod(){
+  const rows=(state.inventory||[]).filter(function(r){ return (r.customer||'').toString().toUpperCase().indexOf('IPG')>=0; });
+  if(!rows.length){ showAlert('No IPG inventory to export.','warning'); return; }
+  const custLabel=[...new Set(rows.map(function(r){return (r.customer||'').toString().trim();}).filter(Boolean))].join(', ') || 'IPG';
+  // ---- Tab 1: Summary — count of Lot # per SKU, split Inventory (pcsPending=0) vs Picked (pcsPending>0) ----
+  const agg={}, order=[];
+  rows.forEach(function(r){
+    const sku=(r.sku||'(BLANK)').toString();
+    if(!agg[sku]){ agg[sku]={pid:(r.productId||''), inv:0, pk:0}; order.push(sku); }
+    if((r.pcsPending||0)>0) agg[sku].pk++; else agg[sku].inv++;
+    if(!agg[sku].pid && r.productId) agg[sku].pid=r.productId;
+  });
+  order.sort(function(a,b){ return a.localeCompare(b); });
+  let tInv=0,tPk=0;
+  const sum=[['Customer', custLabel],[''],['Count of Lot #','','Status'],['SKU','Product ID','Inventory','Picked','Grand Total']];
+  order.forEach(function(sku){ const a=agg[sku]; tInv+=a.inv; tPk+=a.pk; sum.push([sku, a.pid, a.inv, a.pk||'', a.inv+a.pk]); });
+  sum.push(['Grand Total','', tInv, tPk, tInv+tPk]);
+  const wsS=XLSX.utils.aoa_to_sheet(sum);
+  wsS['!cols']=[{wch:16},{wch:36},{wch:11},{wch:9},{wch:12}];
+  // ---- Tab 2: Detail — one row per roll, matching the Warehouse Detail Report layout ----
+  const now=new Date(), dLabel=(now.getMonth()+1)+'/'+now.getDate()+'/'+now.getFullYear();
+  const dCell=function(d){ return d?new Date(d).toLocaleDateString('en-US'):''; };
+  const title='Inventory Detail - Piper Greensboro - '+custLabel+' - '+dLabel;
+  const dh=['','Customer','PO #','SKU','Product ID','Product ID2','Pcs','UOM','Pcs Pending','Dmg',
+    'Inventory Status ','Lot #','Expiration Date','Zone','Location','SkidID',"Date Rec'd",'Receiver',
+    'Invoice #','Truck #','Unique Weight','Gross Weight','Full Weight Lbs','Full Gross Weight Lbs','Linear Ft','Width','Inbound BOL'];
+  const det=[['',title],[''],dh];
+  rows.forEach(function(r){
+    const wt=r.grossWt||0, pcs=r.pcs||1;
+    det.push(['', r.customer||'', r.po||'', r.sku||'', r.productId||'', r.prod2||'', pcs, '', r.pcsPending||0, r.dmg||0,
+      r.status||'', r.lot||'', dCell(r.expDate), '', r.location||'', r.skidId||'', dCell(r.dateRecd), '',
+      r.invoice||'', '', wt, wt, wt*pcs, wt*pcs, '', '', r.bol||'' ]);
+  });
+  const wsD=XLSX.utils.aoa_to_sheet(det);
+  wsD['!cols']=dh.map(function(h,i){ return {wch: i===0?3:(i===4?34:16)}; });
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
+  XLSX.utils.book_append_sheet(wb, wsD, 'Detail');
+  XLSX.writeFile(wb, 'Warehouse_Detail_Report_IPG_'+now.toISOString().slice(0,10)+'.xlsx');
+  showAlert('✓ IPG EOD exported — '+rows.length+' rolls ('+tInv+' inventory, '+tPk+' picked).','success');
+}
+
+// ─── START-OF-DAY INVENTORY SNAPSHOT ───────────────────────────────────────────
+// Archives the full inventory detail (all customers) once per day after 9 AM ET.
+// No server runs these apps, so the first client open after 9 AM ET writes that day's
+// snapshot (catch-up). Keeps the latest 60 days; any day can be exported (detail only).
+function _etNow(){
+  try{
+    const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hour12:false}).formatToParts(new Date());
+    const o={}; parts.forEach(p=>o[p.type]=p.value);
+    let hr=parseInt(o.hour,10); if(hr===24) hr=0;
+    return { date:o.year+'-'+o.month+'-'+o.day, hour:hr };
+  }catch(e){ const d=new Date(); return { date:d.toISOString().slice(0,10), hour:d.getHours() }; }
+}
+function _sodCompactRolls(){
+  return (state.inventory||[]).map(function(r){ return {
+    customer:r.customer||'', po:r.po||'', sku:r.sku||'', productId:r.productId||'', prod2:r.prod2||'',
+    pcs:r.pcs||1, pcsPending:r.pcsPending||0, dmg:r.dmg||0, status:r.status||'', lot:r.lot||'',
+    expDate:r.expDate?(r.expDate.getTime?r.expDate.getTime():r.expDate):null, location:r.location||'',
+    skidId:r.skidId||'', dateRecd:r.dateRecd?(r.dateRecd.getTime?r.dateRecd.getTime():r.dateRecd):null,
+    grossWt:r.grossWt||0, bol:r.bol||'', invoice:r.invoice||''
+  }; });
+}
+function _sodMaybeSnapshot(){
+  if(!db || !state.inventory || !state.inventory.length) return;
+  const et=_etNow();
+  if(et.hour < 9) return;                         // before 9 AM ET — start of day hasn't happened
+  const key=et.date;
+  db.ref('6021/invSnapshotIndex/'+key).once('value').then(function(snap){
+    if(snap.exists()) return;                      // already archived today
+    const rolls=_sodCompactRolls(); if(!rolls.length) return;
+    const takenAt=Date.now(), takenBy=(typeof _who==='function'?_who():'');
+    db.ref('6021/invSnapshots/'+key).set({ date:key, takenAt, takenBy, count:rolls.length, rolls }).catch(function(){});
+    db.ref('6021/invSnapshotIndex/'+key).set({ takenAt, takenBy, count:rolls.length }).catch(function(){});
+    _sodPrune();
+  }).catch(function(){});
+}
+function _sodPrune(){
+  db.ref('6021/invSnapshotIndex').once('value').then(function(snap){
+    const idx=snap.val()||{}; const dates=Object.keys(idx).sort();   // ascending (oldest first)
+    const extra=dates.length-60; if(extra<=0) return;
+    const upd={}; dates.slice(0,extra).forEach(function(d){ upd['6021/invSnapshots/'+d]=null; upd['6021/invSnapshotIndex/'+d]=null; });
+    db.ref().update(upd).catch(function(){});
+  }).catch(function(){});
+}
+function showSodArchive(){
+  if(!db){ showAlert('Not connected to database.','warning'); return; }
+  db.ref('6021/invSnapshotIndex').once('value').then(function(snap){
+    const idx=snap.val()||{}; const dates=Object.keys(idx).sort().reverse();
+    let body;
+    if(!dates.length){ body='<div style="color:var(--text2);padding:20px;text-align:center;font-size:12px">No snapshots yet.<br>The first start-of-day snapshot is archived automatically after 9&nbsp;AM&nbsp;ET.</div>'; }
+    else {
+      body='<div style="max-height:52vh;overflow:auto">'+dates.map(function(d){
+        const m=idx[d]||{}; const dt=new Date(d+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+        return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 10px;border-bottom:1px solid var(--border)">'
+          +'<div><div style="font-weight:bold;font-size:12px">'+dt+'</div><div style="font-size:10px;color:var(--text2)">'+(m.count||0).toLocaleString()+' rolls'+(m.takenAt?' · archived '+new Date(m.takenAt).toLocaleString():'')+(m.takenBy?' · '+m.takenBy:'')+'</div></div>'
+          +'<button class="btn btn-sm btn-primary" data-d="'+d+'" onclick="exportSodDay(this.dataset.d)">&#8595; Export</button></div>';
+      }).join('')+'</div>';
+    }
+    document.getElementById('modal-container').innerHTML=
+      '<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal" style="width:500px">'
+      +'<h2>&#128197; Start-of-Day Inventory Archive</h2>'
+      +'<div style="font-size:11px;color:var(--text2);margin-bottom:10px">Full inventory detail is archived automatically after 9&nbsp;AM&nbsp;ET each day (last 60 days kept). Pick a day to export — you choose which customers on export.</div>'
+      +body
+      +'<div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div></div></div>';
+  }).catch(function(){ showAlert('Could not load snapshot list.','danger'); });
+}
+// Step 1 of export: load the day and let the user pick customers (all or individually).
+function exportSodDay(date){
+  db.ref('6021/invSnapshots/'+date).once('value').then(function(snap){
+    const rec=snap.val(); if(!rec||!rec.rolls||!rec.rolls.length){ showAlert('No data stored for '+date+'.','warning'); return; }
+    window._sodDayCache={ date:date, rows:rec.rolls };
+    const custs=[...new Set(rec.rolls.map(function(r){return (r.customer||'').trim();}).filter(Boolean))].sort();
+    const boxes=custs.map(function(c){ return '<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;font-size:12px;cursor:pointer"><input type="checkbox" class="sod-cust" value="'+c.replace(/"/g,'&quot;')+'" checked> '+c+'</label>'; }).join('');
+    document.getElementById('modal-container').innerHTML=
+      '<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal" style="width:440px">'
+      +'<h2>Export '+date+'</h2>'
+      +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">'+rec.rolls.length.toLocaleString()+' rolls · '+custs.length+' customer'+(custs.length===1?'':'s')+'. Choose which customers to export.</div>'
+      +'<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:12px;font-weight:bold;cursor:pointer;border-bottom:1px solid var(--border)"><input type="checkbox" id="sod-all" checked onchange="document.querySelectorAll(&quot;.sod-cust&quot;).forEach(function(c){c.checked=document.getElementById(&quot;sod-all&quot;).checked;})"> All customers</label>'
+      +'<div style="max-height:40vh;overflow:auto;margin:4px 0 8px">'+boxes+'</div>'
+      +'<div class="modal-actions"><button class="btn" onclick="showSodArchive()">&#8592; Back</button><button class="btn btn-primary" onclick="doSodExport()">&#8595; Export</button></div>'
+      +'</div></div>';
+  }).catch(function(){ showAlert('Export failed.','danger'); });
+}
+// Step 2: build the detail-only workbook for the selected customers.
+function doSodExport(){
+  const cache=window._sodDayCache; if(!cache){ showAlert('Open a day first.','warning'); return; }
+  const sel=new Set([...document.querySelectorAll('.sod-cust:checked')].map(function(c){return c.value;}));
+  if(!sel.size){ showAlert('Select at least one customer.','warning'); return; }
+  let rows=cache.rows.filter(function(r){ return sel.has((r.customer||'').trim()); });
+  if(!rows.length){ showAlert('No rolls for the selected customers.','warning'); return; }
+  const allCust=[...new Set(cache.rows.map(function(r){return (r.customer||'').trim();}).filter(Boolean))];
+  const suffix = sel.size>=allCust.length ? 'ALL' : (sel.size===1 ? [...sel][0].replace(/[^A-Za-z0-9]+/g,'_').slice(0,20) : 'CUSTOM');
+  const dCell=function(d){ return d?new Date(d).toLocaleDateString('en-US'):''; };
+  const parts=cache.date.split('-'); const dLabel=(+parts[1])+'/'+(+parts[2])+'/'+parts[0];
+  const custLabel = sel.size===1 ? [...sel][0] : (sel.size>=allCust.length ? 'All Customers' : 'Selected Customers');
+  const title='Inventory Detail - Piper Greensboro - '+custLabel+' - '+dLabel;
+  const dh=['','Customer','PO #','SKU','Product ID','Product ID2','Pcs','UOM','Pcs Pending','Dmg',
+    'Inventory Status ','Lot #','Expiration Date','Zone','Location','SkidID',"Date Rec'd",'Receiver',
+    'Invoice #','Truck #','Unique Weight','Gross Weight','Full Weight Lbs','Full Gross Weight Lbs','Linear Ft','Width','Inbound BOL'];
+  const det=[['',title],[''],dh];
+  rows.forEach(function(r){
+    const wt=r.grossWt||0, pcs=r.pcs||1;
+    det.push(['', r.customer||'', r.po||'', r.sku||'', r.productId||'', r.prod2||'', pcs, '', r.pcsPending||0, r.dmg||0,
+      r.status||'', r.lot||'', dCell(r.expDate), '', r.location||'', r.skidId||'', dCell(r.dateRecd), '',
+      r.invoice||'', '', wt, wt, wt*pcs, wt*pcs, '', '', r.bol||'' ]);
+  });
+  const ws=XLSX.utils.aoa_to_sheet(det);
+  ws['!cols']=dh.map(function(h,i){ return {wch: i===0?3:(i===4?34:16)}; });
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Detail');
+  XLSX.writeFile(wb, 'SOD_Inventory_Detail_'+cache.date+'_'+suffix+'.xlsx');
+  closeModal();
+  showAlert('✓ Exported start-of-day detail for '+cache.date+' — '+rows.length+' rolls.','success');
 }
 
 function exportDirToExcel() {
