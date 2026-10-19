@@ -527,7 +527,8 @@ let state = {
   hbhWidthTable: {},
   domtarSku: {},
   importMode: 'inventory',
-  lastImport: null
+  lastImport: null,
+  importStamps: {}
 };
 
 let selectedUserId = null;
@@ -566,7 +567,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 133;
+const APP_BUILD = 135;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -715,6 +716,7 @@ function listenToFirebase() {
     const ts = snap.val();
     if (ts) { state.lastImport = ts; updateImportStamp(); }
   });
+  db.ref('6021/importStamps').on('value', snap => { state.importStamps = snap.val() || {}; });
 
   // Inventory from Firebase
   db.ref('6021/inventory').on('value', snap => {
@@ -952,6 +954,23 @@ function userHasPerm(key){ return isAdmin() || !!(state.currentUser && state.cur
 function canUnarchive(){ return userHasPerm('unarchive'); }
 
 // ─── IMPORT ───────────────────────────────────────────────────────────────────
+// Per-file import stamps: who imported each file type and when (shown in the Import Data modal).
+function recordImportStamp(type){
+  const rec = { at: Date.now(), by: (typeof _who==='function'?_who():'') };
+  state.importStamps = state.importStamps || {};
+  state.importStamps[type] = rec;
+  if (db) db.ref('6021/importStamps/'+type).set(rec).catch(()=>{});
+}
+function ipStampHtml(type){
+  const s = (state.importStamps||{})[type];
+  return s && s.at ? '<div style="color:var(--accent);font-size:10px;margin-top:3px">Last import: '+new Date(s.at).toLocaleString()+(s.by?' \u00b7 '+s.by:'')+'</div>' : '';
+}
+function importedCustomersHtml(){
+  const inv = state.inventory||[]; if(!inv.length) return '';
+  const counts={}; inv.forEach(r=>{ const c=((r.customer||'').toString().trim())||'(blank)'; counts[c]=(counts[c]||0)+1; });
+  const names=Object.keys(counts).sort();
+  return '<div style="margin-top:5px;font-size:10px;color:var(--text2);line-height:1.5"><span style="color:var(--accent2);font-weight:bold">Loaded for:</span> '+names.map(c=>c+' ('+counts[c].toLocaleString()+')').join(' \u00b7 ')+'</div>';
+}
 function showImport() {
   const invCount = state.inventory.length;
   const dirCount = Object.keys(state.dirData).length;
@@ -963,16 +982,16 @@ function showImport() {
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="inventory" ${invCount?'checked':''} style="margin-top:2px">
-            <div><div style="font-weight:bold">Customer Inventory File</div><div style="color:var(--text2);font-size:11px">Import one customer file at a time — replaces existing rolls for that customer</div></div>
+            <div style="flex:1"><div style="font-weight:bold">Customer Inventory File</div><div style="color:var(--text2);font-size:11px">Import one customer file at a time — replaces existing rolls for that customer</div>${ipStampHtml('inventory')}${importedCustomersHtml()}</div>
           </label>
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="dir" ${!invCount?'checked':''} style="margin-top:2px">
-            <div><div style="font-weight:bold">DIR Report</div><div style="color:var(--text2);font-size:11px">Import DIR file to link ZMO, expiration dates by Lot #</div></div>
+            <div style="flex:1"><div style="font-weight:bold">DIR Report</div><div style="color:var(--text2);font-size:11px">Import DIR file to link ZMO, expiration dates by Lot #</div>${ipStampHtml('dir')}</div>
           </label>
           ${isAdmin() ? `
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="bumap" style="margin-top:2px">
-            <div><div style="font-weight:bold">BU Reference Guide</div><div style="color:var(--text2);font-size:11px">Import BU code → name mapping file (Col 1: code, Col 2: name) — Admin only</div></div>
+            <div style="flex:1"><div style="font-weight:bold">BU Reference Guide</div><div style="color:var(--text2);font-size:11px">Import BU code → name mapping file (Col 1: code, Col 2: name) — Admin only</div>${ipStampHtml('bumap')}</div>
           </label>
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
             <input type="radio" name="itype" value="clear" style="margin-top:2px">
@@ -1045,6 +1064,7 @@ function handleFileImport(e) {
       commitInventoryFresh6021(_union);
       state.lastImport = Date.now();
       db.ref('6021/lastImport').set(state.lastImport).catch(()=>{});
+      recordImportStamp('inventory');
       updateImportStamp();
       showDashboard();
       return;
@@ -1095,6 +1115,7 @@ function importBUMap(wb) {
     db.ref('6021/buZmoMap').set(zmoMap).catch(()=>{});
   }
   showAlert('✓ BU Reference loaded — '+Object.keys(map).length+' mappings ('+Object.keys(zmoMap).length+' ZMO-based).','success');
+  recordImportStamp('bumap');
 }
 
 function importDIR(wb) {
@@ -1221,6 +1242,7 @@ function importDIR(wb) {
   state.lastDirImport = Date.now();
   const zmoCount = Object.values(state.dirData).filter(d=>d.zmo).length;
   showAlert('✓ DIR loaded — '+Object.keys(state.dirData).length+' batch records ('+zmoCount+' ZMO).','success');
+  recordImportStamp('dir');
   closeModal();
 }
 
