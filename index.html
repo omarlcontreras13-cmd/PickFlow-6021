@@ -402,6 +402,16 @@ function unitNoun(ctx) {
 }
 function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperCase() + u.slice(1); }
 
+// ── IPG BUNDLE SKUs (non-DuraBubble) ─────────────────────────────────────────
+// IPG is counted in ROLLS across the board, with bundles (BUND) as the exception.
+// DuraBubble bundles are detected automatically by product family, but some other
+// products (e.g. STARFOAM PAF2504S12P12) also ship/are counted in bundles without a
+// DuraBubble signal — list those SKUs here so they resolve to BUND everywhere
+// (Inventory Details, Summary, Cycle Counts, reports) even if the IPG Materials master
+// hasn't been (re)imported. SKUs are compared case-insensitively, trimmed. Add more here.
+var IPG_BUND_SKUS = { 'PAF2504S12P12':1 };
+function _ipgIsBundSku(sku){ var s=String(sku==null?'':sku).trim().toUpperCase(); return !!(s && IPG_BUND_SKUS[s]===1); }
+
 // ── IPG per-item UOM, surfaced across Ton View, Cycle Count, Put Away & reports ──
 // A row is "IPG" if its SKU is in the imported IPG Materials master OR it carries an
 // IPG/SOM business unit (buRaw) or an "IPG " Prod ID 2. When the SKU is in the master
@@ -409,6 +419,7 @@ function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperC
 // ipgSkuUom are defined lower in the file but exist by the time these run at runtime.
 function _rowIsIPG(r){
   if(!r) return false;
+  if(_ipgIsBundSku(r.sku)) return true;   // named IPG bundle SKUs are IPG by definition
   if(typeof ipgSkuLookup==='function' && ipgSkuLookup(r.sku)) return true;
   const bu=String(r.buRaw||r.bu||'').toUpperCase();
   if(bu==='IPG'||bu==='SOM'||bu.indexOf('IPG')===0||bu.indexOf('SOM')===0) return true;
@@ -417,7 +428,9 @@ function _rowIsIPG(r){
 }
 // Authoritative UOM code for an inventory row ('' when the SKU isn't in the master).
 function uomForRow(r){
-  if(!r || typeof ipgSkuLookup!=='function') return '';
+  if(!r) return '';
+  if(_ipgIsBundSku(r.sku)) return 'BUND';   // authoritative, independent of the SKU master
+  if(typeof ipgSkuLookup!=='function') return '';
   const m=ipgSkuLookup(r.sku);
   return m ? ipgSkuUom(m) : '';
 }
@@ -567,7 +580,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 135;
+const APP_BUILD = 142;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -4715,10 +4728,10 @@ function getIpgSkuTable(){
     const recs=Array.isArray(raw)?raw:Object.values(raw);
     if(recs.length && recs[0] && recs[0].sku!==undefined){
       // list-of-records form (current)
-      recs.forEach(r=>{ if(r&&r.sku!=null&&String(r.sku).trim()) map[String(r.sku).trim()]={desc:r.desc||'',uom:r.uom||'',line:r.line||''}; });
+      recs.forEach(r=>{ if(r&&r.sku!=null&&String(r.sku).trim()){ const sk=String(r.sku).trim(); map[sk]={sku:sk,desc:r.desc||'',uom:r.uom||'',line:r.line||''}; } });
     } else {
       // legacy keyed-object form
-      for(const k in raw){ const v=raw[k]; if(v&&typeof v==='object') map[k]={desc:v.desc||'',uom:v.uom||'',line:v.line||''}; }
+      for(const k in raw){ const v=raw[k]; if(v&&typeof v==='object') map[k]={sku:k,desc:v.desc||'',uom:v.uom||'',line:v.line||''}; }
     }
   }
   return map;
@@ -4732,7 +4745,11 @@ function _ipgIsDura(rec){ const blob=((rec&&rec.line)||'')+' '+((rec&&rec.desc)|
 // IPG physical inventory is counted in ROLLS across the board; DuraBubble is the one
 // exception (bundles → BUND). Any other master UOM (e.g. SQF square-feet, an area/pricing
 // unit) is ignored for the physical count so IPG never breaks out as sq ft / cases / etc.
-function ipgSkuUom(rec){ return _ipgIsDura(rec) ? 'BUND' : 'ROLLS'; }
+function ipgSkuUom(rec){
+  if(_ipgIsDura(rec)) return 'BUND';
+  if(rec && _ipgIsBundSku(rec.sku)) return 'BUND';   // named bundle SKU (e.g. STARFOAM PAF2504S12P12)
+  return 'ROLLS';
+}
 // DuraBubble anti-static SKUs carry an "AS" prefix (ASDBL48, ASEZ8X11.5). The base SKU
 // (DBL48, EZ8X11.5) is what shows in the New Inbound picker and every generated/exported
 // row. Only strips when the item is DuraBubble AND the SKU starts with AS; idempotent.
@@ -4997,11 +5014,11 @@ function showIPGManual(id){
               </div>
               <div style="overflow:auto;margin-top:12px">
                 <table class="ipm-tbl">
-                  <thead><tr><th>SKU<span class="ipm-req">*</span></th><th>Description (auto)</th><th>UOM</th><th>Width</th><th>Qty<span class="ipm-req">*</span></th><th></th></tr></thead>
-                  <tbody id="ipm-lines"><tr><td colspan="6" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr></tbody>
+                  <thead><tr><th>SKU<span class="ipm-req">*</span></th><th>Description (auto)</th><th>UOM</th><th>Width</th><th>Qty<span class="ipm-req">*</span></th><th>Wght (lbs)</th><th></th></tr></thead>
+                  <tbody id="ipm-lines"><tr><td colspan="7" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr></tbody>
                 </table>
               </div>
-              <div class="ipm-note"><b>Manual entry:</b> type a SKU (auto-completes from the imported master) and the <b>Description</b> &amp; <b>UOM</b> auto-fill. Enter a <b>Qty</b> per SKU — each unit becomes one export row. The <b>Total Weight</b> above is split <b>evenly</b> across every generated row.</div>
+              <div class="ipm-note"><b>Manual entry:</b> type a SKU (auto-completes from the imported master) and the <b>Description</b> &amp; <b>UOM</b> auto-fill. Enter a <b>Qty</b> per SKU. <b>With multiple SKU lines</b>, also enter a <b>Wght</b> (total lbs) per line — each line's weight is divided evenly across its own units (remainder on the line's last row). <b>With a single SKU</b>, enter the load's <b>Total Weight</b> in the header and it's split evenly across every row (as before).</div>
             </div>
           </div>
 
@@ -5091,13 +5108,14 @@ function ipmSyncPO(){
 }
 function ipmUpdateTotals(){
   const totQty=IPM.lines.reduce((s,l)=>s+(parseInt(l.qty)||0),0);
+  const totWt=IPM.lines.reduce((s,l)=>s+(parseFloat(l.wt)||0),0);
   const src=document.getElementById('ipm-src');
-  if(src) src.textContent = IPM.lines.length ? (IPM.lines.length+' SKU line'+(IPM.lines.length===1?'':'s')+' · '+totQty+' unit'+(totQty===1?'':'s')+' total') : '';
+  if(src) src.textContent = IPM.lines.length ? (IPM.lines.length+' SKU line'+(IPM.lines.length===1?'':'s')+' · '+totQty+' unit'+(totQty===1?'':'s')+(totWt>0?' · '+totWt.toLocaleString()+' lbs':'')+' total') : '';
   const gb=document.getElementById('ipm-gen'); if(gb) gb.disabled = totQty<=0;
 }
 function ipmRenderLines(){
   const tb=document.getElementById('ipm-lines'); if(!tb) return; tb.innerHTML='';
-  if(!IPM.lines.length){ tb.innerHTML='<tr><td colspan="6" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr>'; ipmUpdateTotals(); return; }
+  if(!IPM.lines.length){ tb.innerHTML='<tr><td colspan="7" class="ipm-empty">No lines yet — click "Add SKU Line".</td></tr>'; ipmUpdateTotals(); return; }
   IPM.lines.forEach((ln,i)=>{
     const tr=document.createElement('tr');
     tr.innerHTML=
@@ -5106,6 +5124,7 @@ function ipmRenderLines(){
       '<td><input id="ipm-uom-'+i+'" value="'+ipmEsc(ln.uom)+'" placeholder="UOM" oninput="ipmEditLine('+i+',&quot;uom&quot;,this.value)" style="width:64px;text-transform:uppercase"></td>'+
       '<td><input id="ipm-width-'+i+'" class="ipm-nospin" type="number" min="0" step="0.01" value="'+(ln.width===''||ln.width==null?'':ln.width)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;width&quot;,this.value)" style="width:72px;text-align:right"></td>'+
       '<td><input class="ipm-nospin" type="number" min="0" step="1" value="'+(ln.qty===''||ln.qty==null?'':ln.qty)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;qty&quot;,this.value)" style="width:72px;text-align:right"></td>'+
+      '<td><input id="ipm-wt-'+i+'" class="ipm-nospin" type="number" min="0" step="0.0001" value="'+(ln.wt===''||ln.wt==null?'':ln.wt)+'" placeholder="0" oninput="ipmEditLine('+i+',&quot;wt&quot;,this.value)" style="width:90px;text-align:right" title="Total weight (lbs) for this SKU line — divided evenly across its Qty"></td>'+
       '<td><button onclick="ipmRemoveLine('+i+')" title="Remove line" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 6px">✕</button></td>';
     tb.appendChild(tr);
   });
@@ -5128,6 +5147,7 @@ function ipmEditLine(i,k,v){
   }
   else if(k==='uom'){ ln.uom=String(v).toUpperCase(); }
   else if(k==='width'){ ln.width=(v===''?'':(parseFloat(v)||0)); }
+  else if(k==='wt'){ ln.wt=(v===''?'':Math.max(0,parseFloat(v)||0)); }
   else { ln[k]=v; }
   ipmUpdateTotals(); ipmResetPreview();
 }
@@ -5148,7 +5168,7 @@ function ipmDescForSku(sku){
 function ipmSetLot(i,v){ if(IPM.exportRows[i]) IPM.exportRows[i].lot=String(v).trim(); }
 function ipmAddLine(){
   const po=ipmGv('ipm-po').trim().toUpperCase();
-  IPM.lines.push({ po:po, sku:'', desc:'', uom:'', qty:'', width:'' });
+  IPM.lines.push({ po:po, sku:'', desc:'', uom:'', qty:'', width:'', wt:'' });
   ipmRenderLines(); ipmResetPreview();
 }
 function ipmRemoveLine(i){ IPM.lines.splice(i,1); ipmRenderLines(); ipmResetPreview(); }
@@ -5174,9 +5194,15 @@ function ipmGenerate(){
   const active=IPM.lines.filter(l=>String(l.sku).trim() && (parseInt(l.qty)||0)>0);
   if(!active.length){ ipmStatus('Add at least one SKU line with a qty','var(--danger)'); return; }
   const totalRows=active.reduce((s,l)=>s+(parseInt(l.qty)||0),0);
-  const totalWt=parseFloat(ipmGv('ipm-loadwt'))||0;
-  // even split across every generated row, remainder absorbed by the last row
-  const per = totalRows>0 ? Math.round((totalWt/totalRows)*10000)/10000 : 0;
+  const headerWt=parseFloat(ipmGv('ipm-loadwt'))||0;
+  // Weight model. PER-LINE applies ONLY when there are multiple SKU lines: each line carries
+  // its own total Wght, divided evenly across that line's own Qty, remainder on the line's last
+  // row — so multiple SKUs per PO each get their correct per-unit weight. A line left blank stays
+  // blank (to scan). SINGLE SKU (or multi-SKU with no line weights): the header Total Weight is
+  // split evenly across every generated row — the original single-weight behavior, unchanged.
+  const multiSku = active.length > 1;
+  const anyLineWt = multiSku && active.some(l=>(parseFloat(l.wt)||0)>0);
+  const perAll = (!anyLineWt && totalRows>0) ? Math.round((headerWt/totalRows)*10000)/10000 : 0;
   const dv=ipmGv('ipm-date'); const expDate=dv?new Date(dv+'T00:00:00'):new Date();
   // SKU-Lines options: for products where lot/LF aren't scanned, auto-fill them instead of leaving blank.
   const genLot = !!(document.getElementById('ipm-gen-lot')||{}).checked;   // Lot# = PO# + sequence
@@ -5184,12 +5210,20 @@ function ipmGenerate(){
   IPM.exportRows=[]; let seq=0, acc=0;
   active.forEach(ln=>{
     const qty=parseInt(ln.qty)||0;
+    const lineWt=parseFloat(ln.wt)||0;
+    // per-unit weight for THIS line (per-line mode only)
+    const perLine = (anyLineWt && lineWt>0 && qty>0) ? Math.round((lineWt/qty)*10000)/10000 : 0;
+    let lacc=0;
     for(let k=0;k<qty;k++){
       seq++;
-      const last=(seq===totalRows);
-      // Weight only splits when a Total Weight is entered; otherwise left BLANK to scan in.
-      const w = totalWt>0 ? (last ? Math.round((totalWt-acc)*10000)/10000 : per) : '';
-      acc += (typeof w==='number'?w:0);
+      let w='';
+      if(anyLineWt){
+        // per-line split: last unit of the line absorbs this line's remainder; blank line → blank
+        if(lineWt>0){ const lastOfLine=(k===qty-1); w = lastOfLine ? Math.round((lineWt-lacc)*10000)/10000 : perLine; lacc += w; }
+      } else if(headerWt>0){
+        // legacy even split across the whole load
+        const last=(seq===totalRows); w = last ? Math.round((headerWt-acc)*10000)/10000 : perAll; acc += w;
+      }
       // Lot#: generated as PO#-### when the option is on; otherwise blank for the receiver to scan.
       const lot = genLot ? ((po?po+'-':'')+String(seq).padStart(3,'0')) : '';
       // LF: an explicit line LF always wins; else 0 when the option is on, otherwise blank to scan.
@@ -9327,84 +9361,296 @@ function _stagedExcluded(r){
   const L=(r.location||'').toUpperCase(), S=(r.status||'').toUpperCase();
   return L.includes('GHOST')||L.includes('CYCLE')||L.includes('CYC_CNT')||L.includes('CYC-CNT')||S==='GHOST'||S==='CYCLE COUNT';
 }
+// ─── ORDER-DETAILS CROSS-REFERENCE (BL / PO # / Invoice # / Status) ────────────
+// Drop one or MORE Order Details exports (one file per customer) onto the dock. Each
+// file's OUTBOUNDS (Shipped/Picked) lines are indexed by SKU + Weight (those rows carry
+// no Skid ID / Lot #). Files are kept PER CUSTOMER, so dropping a customer's newer file
+// updates just that customer. Staged rolls match by SKU + their weight → outbound BL
+// (load), PO #, Invoice #, Order Status. Saved to Firebase so everyone shares it.
+function _stagedOrderAllRows(byCust){
+  const all=[]; const bc=byCust||{};
+  Object.keys(bc).forEach(function(c){ ((bc[c]&&bc[c].rows)||[]).forEach(function(o){ all.push(o); }); });
+  return all;
+}
+// Index every outbound load keyed by SKU+Weight. A SKU+Weight is NOT unique — the same
+// SKU at the same rounded weight can appear on several loads (the outbound rows carry no
+// Lot #/Skid ID to join on). So we keep ALL distinct loads (deduped by BL) per key, and
+// let the match step decide: exactly one load → assign it; more than one → it's a conflict
+// (a staged roll can't belong to a Shipped AND a Picked load), flagged for manual resolution.
+function _stagedOrderIndex(byCust){
+  byCust=byCust||{};
+  const bySkuWt={}; const all=_stagedOrderAllRows(byCust);
+  all.forEach(function(o){
+    const key=((o.sku||'').toString().trim().toUpperCase())+'|'+Math.round(parseFloat(o.wt)||0);
+    const bl=(o.bl||'').toString().trim();
+    const list = bySkuWt[key] || (bySkuWt[key]=[]);
+    let ex=null; for(let i=0;i<list.length;i++){ if(list[i].bl===bl){ ex=list[i]; break; } }  // one load = one candidate
+    if(ex){ if(!ex.status&&o.status) ex.status=o.status; if(!ex.po&&o.po) ex.po=o.po; if(!ex.inv&&o.inv) ex.inv=o.inv; }
+    else list.push({ bl:bl, po:o.po||'', inv:o.inv||'', status:o.status||'' });
+  });
+  return { bySkuWt:bySkuWt, byCust:byCust, meta:{ customers:Object.keys(byCust).length, lines:all.length } };
+}
+// null = no load matches · {bl,po,inv,status} = exactly one load · {conflict:true,candidates:[…]} = >1 distinct load.
+function _stagedOrderMatch(r){
+  const idx=window._stagedOrderIdx; if(!idx||!idx.bySkuWt) return null;
+  const key=((r.sku||'').toString().trim().toUpperCase())+'|'+Math.round(parseFloat(r.wt)||0);
+  const list=idx.bySkuWt[key]; if(!list||!list.length) return null;
+  const seen={}, distinct=[]; list.forEach(function(c){ if(!seen[c.bl]){ seen[c.bl]=1; distinct.push(c); } });
+  if(distinct.length===1){ const c=distinct[0]; return { bl:c.bl, po:c.po, inv:c.inv, status:c.status }; }
+  return { conflict:true, candidates:distinct };
+}
+// One-line description of why a staged roll is flagged (multiple load matches and/or a
+// duplicated Lot #+Skid ID in staging).
+function _stagedConflictText(r){
+  const parts=[];
+  if(r.conflictReasons&&r.conflictReasons.indexOf('multi-load')>=0 && r.candidates){
+    parts.push('matches '+r.candidates.length+' loads → '+r.candidates.map(function(c){return 'BL '+c.bl+(c.status?' ('+c.status+')':'');}).join(', '));
+  }
+  if(r.conflictReasons&&r.conflictReasons.indexOf('dup-skid')>=0){ parts.push('duplicate Lot #+Skid ID in staging'); }
+  return parts.join(' · ');
+}
+function _stagedOrderLoad(cb){
+  if(window._stagedOrderIdx){ cb&&cb(); return; }
+  if(!db){ window._stagedOrderIdx=_stagedOrderIndex({}); cb&&cb(); return; }
+  db.ref('6021/stagedOrderRef').once('value').then(function(s){
+    const v=s.val()||{};
+    const byCust = v.byCust ? v.byCust : (v.rows ? { '(all)': { at:v.at, by:v.by, rows:v.rows } } : {});  // migrate old flat format
+    window._stagedOrderIdx=_stagedOrderIndex(byCust);
+    cb&&cb();
+  }).catch(function(){ window._stagedOrderIdx=_stagedOrderIndex({}); cb&&cb(); });
+}
+// Parse ONE file -> cb(null,{cust,at,by,rows:[{bl,po,inv,status,sku,wt}]}) or cb(errString).
+function _stagedOrderParseFile(file, cb){
+  const reader=new FileReader();
+  reader.onload=function(ev){
+    try{
+      const wb=XLSX.read(ev.target.result,{type:'binary',cellDates:false});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+      const norm=function(s){ return String(s==null?'':s).toLowerCase().replace(/[^a-z0-9]/g,''); };
+      let cust='';
+      for(let i=0;i<Math.min(5,rows.length) && !cust;i++){ const rr=rows[i]||[]; for(let j=0;j<rr.length;j++){ const t=String(rr[j]==null?'':rr[j]); const m=t.match(/^(.*?)\s+order\s+detail/i); if(m && m[1].trim()){ cust=m[1].trim(); break; } } }
+      if(!cust) cust=(file.name||'Order Details').replace(/\.(xlsx|xls)$/i,'');
+      let hi=-1, hdr=null;
+      for(let i=0;i<rows.length;i++){ if((rows[i]||[]).some(function(c){return norm(c)==='outbounds';})){ for(let j=i+1;j<Math.min(i+5,rows.length);j++){ const st=(rows[j]||[]).map(norm); if(st.indexOf('bl')>=0 && st.some(function(x){return x.indexOf('sku')>=0;})){ hi=j; hdr=rows[j]; break; } } break; } }
+      if(hi<0){ for(let i=0;i<rows.length;i++){ const st=(rows[i]||[]).map(norm); if(st.indexOf('bl')>=0 && st.some(function(x){return x.indexOf('sku')>=0;}) && st.some(function(x){return x.indexOf('weight')>=0;}) && !st.some(function(x){return x.indexOf('skid')>=0;})){ hi=i; hdr=rows[i]; break; } } }
+      if(hi<0){ cb('No OUTBOUNDS (Shipped/Picked) section in "'+(file.name||'file')+'"'); return; }
+      const exact=function(names){ for(const nm of names){ const idx=hdr.findIndex(function(h){return norm(h)===norm(nm);}); if(idx>=0) return idx; } return -1; };
+      const has=function(sub){ return hdr.findIndex(function(h){return norm(h).indexOf(sub)>=0;}); };
+      const blI=exact(['BL']); let stI=exact(['Order Status','Status']); if(stI<0) stI=has('status');
+      let poI=exact(['PO #','PO','PO Number']); if(poI<0) poI=has('po');
+      let invI=exact(['Invoice','Invoice #','Invoice No']); if(invI<0) invI=has('invoice');
+      let skuI=exact(['SKU','Item']); if(skuI<0) skuI=has('sku');
+      let wtI=exact(['Weight','Gross Weight']); if(wtI<0) wtI=has('weight');
+      if(blI<0||skuI<0||wtI<0){ cb('Missing BL, SKU or Weight column in "'+(file.name||'file')+'"'); return; }
+      const out=[];
+      for(let i=hi+1;i<rows.length;i++){ const r=rows[i]; if(!r) continue;
+        const status=(stI>=0?(r[stI]||''):'').toString().trim(); const su=status.toLowerCase();
+        if(su!=='shipped' && su!=='picked') continue;
+        const sku=(r[skuI]!=null?r[skuI]:'').toString().trim(); const wt=Math.round(parseFloat(r[wtI])||0);
+        if(!sku) continue;
+        out.push({ bl:(blI>=0?(r[blI]||''):'').toString().trim(), po:(poI>=0?(r[poI]||''):'').toString().trim(), inv:(invI>=0?(r[invI]||''):'').toString().trim(), status:status, sku:sku, wt:wt });
+      }
+      cb(null, { cust:cust, at:Date.now(), by:(typeof _who==='function'?_who():''), rows:out });
+    }catch(e){ cb('Could not read "'+(file.name||'file')+'": '+e.message); }
+  };
+  reader.onerror=function(){ cb('Could not read "'+(file.name||'file')+'"'); };
+  reader.readAsBinaryString(file);
+}
+// Accept one or many files: parse each, UPDATE its customer's bucket, then save + refresh.
+function handleStagedOrderFiles(files){
+  files=Array.prototype.slice.call(files||[]).filter(Boolean);
+  if(!files.length) return;
+  const byCust = (window._stagedOrderIdx && window._stagedOrderIdx.byCust) ? JSON.parse(JSON.stringify(window._stagedOrderIdx.byCust)) : {};
+  let done=0; const added=[]; const errs=[];
+  const finish=function(){
+    window._stagedOrderIdx=_stagedOrderIndex(byCust);
+    if(db) db.ref('6021/stagedOrderRef').set({ byCust:byCust, at:Date.now(), by:(typeof _who==='function'?_who():'') }).catch(function(){});
+    const totalLines=_stagedOrderAllRows(byCust).length, nCust=Object.keys(byCust).length;
+    if(added.length) showAlert('✓ Loaded '+added.join(', ')+' — '+totalLines.toLocaleString()+' Shipped/Picked lines across '+nCust+' customer'+(nCust!==1?'s':'')+'.'+(errs.length?' ('+errs.length+' skipped)':''),'success');
+    else showAlert('No usable files. '+errs.join(' | '),'danger');
+    showStagedInventory();
+  };
+  files.forEach(function(f){
+    _stagedOrderParseFile(f, function(err,res){
+      if(err){ errs.push(err); }
+      else { byCust[res.cust]={ at:res.at, by:res.by, rows:res.rows }; added.push(res.cust+' ('+res.rows.length+')'); }
+      done++; if(done===files.length) finish();
+    });
+  });
+}
+function handleStagedOrderFile(file){ handleStagedOrderFiles([file]); }
+function clearStagedOrderRef(){
+  if(!confirm('Clear ALL loaded Order Details references (every customer)?')) return;
+  window._stagedOrderIdx=_stagedOrderIndex({});
+  if(db) db.ref('6021/stagedOrderRef').remove().catch(function(){});
+  showStagedInventory();
+}
+function removeStagedOrderCust(cust){
+  const bc=(window._stagedOrderIdx&&window._stagedOrderIdx.byCust)?JSON.parse(JSON.stringify(window._stagedOrderIdx.byCust)):{};
+  if(!bc[cust]) return; if(!confirm('Remove "'+cust+'" from the Order Details reference?')) return;
+  delete bc[cust]; window._stagedOrderIdx=_stagedOrderIndex(bc);
+  if(db) db.ref('6021/stagedOrderRef').set({ byCust:bc, at:Date.now(), by:(typeof _who==='function'?_who():'') }).catch(function(){});
+  showStagedInventory();
+}
+function _onStagedDrop(ev){ ev.preventDefault(); try{ev.currentTarget.style.background='';}catch(e){} const fs=ev.dataTransfer&&ev.dataTransfer.files; if(fs&&fs.length) handleStagedOrderFiles(fs); }
+
 function _stagedRows(){
   const dates = window._stagedDates || {};
-  const rows = (state.inventory||[]).filter(r=>_isStagedLoc(r.location) && !_stagedExcluded(r)).map(r=>{
+  const rows = (state.inventory||[]).filter(function(r){return _isStagedLoc(r.location) && !_stagedExcluded(r);}).map(function(r){
     const k=_skidKey(r); const d=dates[k] && dates[k].date;
-    return { dateStaged:d||null, customer:(r.customer||'—'), sku:r.sku||'', lot:r.lot||'', skid:(r.skidId||''), prod1:(r.productId||''), prod2:(r.prod2||''), qty:(+r.pcs||0), location:r.location||'' };
+    const base={ dateStaged:d||null, customer:(r.customer||'—'), sku:r.sku||'', lot:r.lot||'', skid:(r.skidId||''), prod1:(r.productId||''), prod2:(r.prod2||''), qty:(+r.pcs||0), location:r.location||'', wt:(+r.grossWt||0) };
+    base._m=_stagedOrderMatch(base);
+    return base;
   });
-  // Hierarchy: Customer → Location, then SKU, then lot.
-  rows.sort((a,b)=>{ if(a.customer!==b.customer) return (a.customer+'').localeCompare(b.customer+''); if(a.location!==b.location) return a.location.localeCompare(b.location); if(a.sku!==b.sku) return (a.sku+'').localeCompare(b.sku+''); return (a.lot+'').localeCompare(b.lot+''); });
+  // A roll is flagged (conflict) when it can't be cleanly placed: its SKU+Weight matches
+  // more than one load, OR the same Lot #+Skid ID appears on more than one staged row.
+  const skidCount={};
+  rows.forEach(function(r){ const kk=(r.lot||'')+'|'+(r.skid||''); if(kk!=='|') skidCount[kk]=(skidCount[kk]||0)+1; });
+  rows.forEach(function(r){
+    const reasons=[]; const m=r._m;
+    if(m&&m.conflict){ reasons.push('multi-load'); r.candidates=m.candidates; }
+    else if(m){ r.bl=m.bl; r.po=m.po; r.inv=m.inv; r.status=m.status; }
+    else { r.bl=''; r.po=''; r.inv=''; r.status=''; }
+    const kk=(r.lot||'')+'|'+(r.skid||'');
+    if(kk!=='|' && skidCount[kk]>1) reasons.push('dup-skid');
+    if(reasons.length){ r.conflict=true; r.conflictReasons=reasons; r.bl=''; r.po=''; r.inv=''; r.status=''; }
+    delete r._m;
+  });
+  // Hierarchy: Staged Location → conflicts first, then BL (load), then SKU, then lot.
+  rows.sort(function(a,b){
+    if(a.location!==b.location) return a.location.localeCompare(b.location);
+    const ca=a.conflict?0:1, cb=b.conflict?0:1; if(ca!==cb) return ca-cb;
+    const ba=a.bl||'~', bb=b.bl||'~'; if(ba!==bb) return ba.localeCompare(bb);
+    if(a.sku!==b.sku) return (a.sku+'').localeCompare(b.sku+'');
+    return (a.lot+'').localeCompare(b.lot+'');
+  });
   return rows;
 }
 function showStagedInventory(){
   state.currentView='stagedinv';
   const panel=document.getElementById('main-panel');
-  const render=()=>{
+  const render=function(){
     const rows=_stagedRows();
-    const totQty=rows.reduce((s,r)=>s+(+r.qty||0),0);
-    const ds=d=>d?new Date(d).toLocaleDateString('en-US'):'—';
-    // Build the hierarchy: Customer → Location, each with skid counts and subtotals.
-    const byCust={}; rows.forEach(r=>{ const c=r.customer||'—'; (byCust[c]=byCust[c]||{}); (byCust[c][r.location]=byCust[c][r.location]||[]).push(r); });
-    const custKeys=Object.keys(byCust).sort((a,b)=>a.localeCompare(b));
-    const locSet=new Set(); rows.forEach(r=>locSet.add(r.location));
+    const totQty=rows.reduce(function(s,r){return s+(+r.qty||0);},0);
+    const ds=function(d){return d?new Date(d).toLocaleDateString('en-US'):'—';};
+    const byLoc={}; rows.forEach(function(r){ (byLoc[r.location]=byLoc[r.location]||{}); const blk=r.conflict?'__CONFLICT__':(r.bl||''); (byLoc[r.location][blk]=byLoc[r.location][blk]||[]).push(r); });
+    const locKeys=Object.keys(byLoc).sort(function(a,b){return a.localeCompare(b);});
+    const blSet=new Set(); rows.forEach(function(r){ if(!r.conflict && r.bl) blSet.add(r.bl); });
+    const conflictCount=rows.reduce(function(s,r){return s+(r.conflict?1:0);},0);
     let body='';
-    custKeys.forEach(c=>{
-      const locs=byCust[c]; const locKeys=Object.keys(locs).sort((a,b)=>a.localeCompare(b));
-      const custRows=locKeys.reduce((a,l)=>a.concat(locs[l]),[]);
-      const custQty=custRows.reduce((s,r)=>s+(+r.qty||0),0);
-      body+=`<tr style="background:#3d5ce6"><td colspan="5" style="font-weight:bold;color:#fff;padding:7px 16px">👤 ${c}</td><td style="text-align:right;font-weight:bold;color:#fff;white-space:nowrap;padding:7px 16px">${custRows.length} skid${custRows.length!==1?'s':''}</td><td style="text-align:right;font-weight:bold;color:#fff;white-space:nowrap;padding:7px 16px 7px 28px">${custQty.toLocaleString()}</td></tr>`;
-      locKeys.forEach(loc=>{
-        const g=locs[loc]; const sub=g.reduce((s,r)=>s+(+r.qty||0),0);
-        body+=`<tr style="background:var(--surface2)"><td colspan="5" style="font-weight:bold;color:#1a9e7a;padding:6px 16px 6px 28px">📍 ${loc}</td><td style="text-align:right;font-weight:bold;color:var(--text2);white-space:nowrap;padding:6px 16px">${g.length} skid${g.length!==1?'s':''}</td><td style="text-align:right;font-weight:bold;color:#1a9e7a;white-space:nowrap;padding:6px 16px 6px 28px">${sub.toLocaleString()}</td></tr>`;
-        g.forEach(r=>{ body+=`<tr>
-          <td style="color:#3d5ce6">${r.sku}</td>
-          <td style="color:var(--text2)">${r.lot||'—'}</td>
-          <td style="color:var(--text2)">${r.skid||'—'}</td>
-          <td style="color:var(--text2)">${r.prod1||'—'}</td>
-          <td style="color:var(--text2)">${r.prod2||'—'}</td>
-          <td style="color:var(--text2);white-space:nowrap;padding:5px 16px">${ds(r.dateStaged)}</td>
-          <td style="text-align:right;white-space:nowrap;padding:5px 16px 5px 28px">${r.qty}</td>
-        </tr>`; });
+    locKeys.forEach(function(loc){
+      const bls=byLoc[loc];
+      // conflicts first, then real BLs (sorted), then the "no match" bucket last.
+      const blKeys=Object.keys(bls).sort(function(a,b){ if(a==='__CONFLICT__')return -1; if(b==='__CONFLICT__')return 1; if(a==='')return 1; if(b==='')return -1; return a.localeCompare(b); });
+      const locRows=blKeys.reduce(function(a,k){return a.concat(bls[k]);},[]);
+      const locQty=locRows.reduce(function(s,r){return s+(+r.qty||0);},0);
+      body+='<tr style="background:#3d5ce6"><td colspan="10" style="font-weight:bold;color:#fff;padding:7px 16px">📍 '+loc+'</td><td style="text-align:right;font-weight:bold;color:#fff;white-space:nowrap;padding:7px 16px">'+locRows.length+' skid'+(locRows.length!==1?'s':'')+'</td><td style="text-align:right;font-weight:bold;color:#fff;white-space:nowrap;padding:7px 16px 7px 28px">'+locQty.toLocaleString()+'</td></tr>';
+      blKeys.forEach(function(blk){
+        const g=bls[blk]; const sub=g.reduce(function(s,r){return s+(+r.qty||0);},0);
+        const isConflict = blk==='__CONFLICT__';
+        if(isConflict){
+          body+='<tr style="background:rgba(214,69,69,0.12)"><td colspan="10" style="font-weight:bold;color:var(--danger);padding:6px 16px 6px 28px">⚠ CONFLICT — RESOLVE · SKU+Weight matched more than one load, or a duplicate Lot #+Skid ID is staged. Not assigned to a load.</td><td style="text-align:right;font-weight:bold;color:var(--danger);white-space:nowrap;padding:6px 16px">'+g.length+' skid'+(g.length!==1?'s':'')+'</td><td style="text-align:right;font-weight:bold;color:var(--danger);white-space:nowrap;padding:6px 16px 6px 28px">'+sub.toLocaleString()+'</td></tr>';
+          g.forEach(function(r){ body+='<tr style="background:rgba(214,69,69,0.05)">'
+            +'<td style="color:#3d5ce6">'+r.sku+'</td>'
+            +'<td style="color:var(--text2)">'+(r.lot||'—')+'</td>'
+            +'<td style="color:var(--text2)">'+(r.skid||'—')+'</td>'
+            +'<td style="color:var(--text2)">'+(r.prod1||'—')+'</td>'
+            +'<td style="color:var(--text2)">'+(r.prod2||'—')+'</td>'
+            +'<td colspan="3" style="color:var(--danger);font-weight:bold">'+_stagedConflictText(r)+'</td>'
+            +'<td style="color:var(--danger);font-weight:bold;white-space:nowrap">⚠ CONFLICT</td>'
+            +'<td style="color:var(--text2);white-space:nowrap;padding:5px 16px">'+ds(r.dateStaged)+'</td>'
+            +'<td style="text-align:right;white-space:nowrap;padding:5px 16px 5px 28px">'+r.qty+'</td></tr>'; });
+          return;
+        }
+        const po=[...new Set(g.map(function(r){return r.po;}).filter(Boolean))].join(', ');
+        const inv=[...new Set(g.map(function(r){return r.inv;}).filter(Boolean))].join(', ');
+        const sts=[...new Set(g.map(function(r){return r.status;}).filter(Boolean))].join(', ');
+        const blLabel = blk ? ('🧾 LOAD / BL '+blk+(sts?' · '+sts.toUpperCase():'')+(po?' · PO '+po:'')+(inv?' · Inv '+inv:'')) : '⚠ No Shipped/Picked load match (feed Order Details)';
+        body+='<tr style="background:var(--surface2)"><td colspan="10" style="font-weight:bold;color:'+(blk?'#1a9e7a':'var(--warning)')+';padding:6px 16px 6px 28px">'+blLabel+'</td><td style="text-align:right;font-weight:bold;color:var(--text2);white-space:nowrap;padding:6px 16px">'+g.length+' skid'+(g.length!==1?'s':'')+'</td><td style="text-align:right;font-weight:bold;color:#1a9e7a;white-space:nowrap;padding:6px 16px 6px 28px">'+sub.toLocaleString()+'</td></tr>';
+        g.forEach(function(r){ body+='<tr>'
+          +'<td style="color:#3d5ce6">'+r.sku+'</td>'
+          +'<td style="color:var(--text2)">'+(r.lot||'—')+'</td>'
+          +'<td style="color:var(--text2)">'+(r.skid||'—')+'</td>'
+          +'<td style="color:var(--text2)">'+(r.prod1||'—')+'</td>'
+          +'<td style="color:var(--text2)">'+(r.prod2||'—')+'</td>'
+          +'<td style="color:var(--text2)">'+(r.bl||'—')+'</td>'
+          +'<td style="color:var(--text2)">'+(r.po||'—')+'</td>'
+          +'<td style="color:var(--text2)">'+(r.inv||'—')+'</td>'
+          +'<td style="color:'+(r.status?'#1a9e7a':'var(--text2)')+';font-weight:'+(r.status?'bold':'normal')+'">'+(r.status||'—')+'</td>'
+          +'<td style="color:var(--text2);white-space:nowrap;padding:5px 16px">'+ds(r.dateStaged)+'</td>'
+          +'<td style="text-align:right;white-space:nowrap;padding:5px 16px 5px 28px">'+r.qty+'</td></tr>'; });
       });
     });
-    const html=`
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
-        <div>
-          <div style="font-size:14px;font-weight:bold;letter-spacing:2px">🗂 STAGED INVENTORY</div>
-          <div style="font-size:11px;color:var(--text2);margin-top:4px">Staging bins (locations ending in -00), grouped by customer → location · ${custKeys.length} customer${custKeys.length!==1?'s':''} · ${locSet.size} location${locSet.size!==1?'s':''} · ${rows.length} skid${rows.length!==1?'s':''} · ${totQty.toLocaleString()} total qty</div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" onclick="exportStagedInventoryExcel()" style="font-size:11px;background:#3d5ce6;border-color:#3d5ce6;color:#fff">⬇ Export Excel</button>
-        </div>
-      </div>
-      <div style="flex:1;min-height:0;overflow:auto;border:1px solid var(--border);border-radius:8px">
-      <table class="sku-table" style="font-size:11px;margin:0"><thead><tr>
-        ${['SKU','LOT','SKID ID','PRODUCT ID 1','PRODUCT ID 2','DATE STAGED'].map(x=>`<th style="position:sticky;top:0;z-index:3;background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);white-space:nowrap;padding:8px 16px">${x}</th>`).join('')}
-        <th style="position:sticky;top:0;z-index:3;background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);text-align:right;white-space:nowrap;padding:8px 16px 8px 28px">QTY</th>
-      </tr></thead><tbody>`+
-      (rows.length? body : `<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No inventory is currently staged in -00 bins.</td></tr>`)+
-      `</tbody>${rows.length?`<tfoot><tr><td colspan="6" style="font-weight:bold;text-align:right">TOTAL QTY</td><td style="text-align:right;font-weight:bold;color:#1a9e7a">${totQty.toLocaleString()}</td></tr></tfoot>`:''}</table></div>`;
+    const oi=window._stagedOrderIdx, meta=oi&&oi.meta, obc=(oi&&oi.byCust)||{};
+    const custKeys=Object.keys(obc).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
+    const hasRef=meta&&meta.customers>0;
+    let custList='';
+    if(hasRef){
+      custList='<div style="margin-top:7px;display:flex;flex-direction:column;gap:4px">';
+      custKeys.forEach(function(c){
+        const e=obc[c]||{}; const n=((e.rows||[]).length);
+        custList+='<div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2)">'
+          +'<span style="color:#1a9e7a">✓</span>'
+          +'<span style="font-weight:bold;color:var(--text)">'+c+'</span>'
+          +'<span>· '+n.toLocaleString()+' Shipped/Picked line'+(n!==1?'s':'')+'</span>'
+          +(e.at?'<span>· '+new Date(e.at).toLocaleString():'<span>')+(e.by?' · '+e.by:'')+'</span>'
+          +'<button class="btn btn-sm" onclick="removeStagedOrderCust('+JSON.stringify(c).replace(/"/g,'&quot;')+')" style="padding:0 7px;line-height:18px;border-color:var(--danger);color:var(--danger)" title="Remove this customer’s reference">✕</button>'
+          +'</div>';
+      });
+      custList+='</div>';
+    }
+    const dock='<div ondragover="event.preventDefault();this.style.background=&quot;rgba(61,92,230,0.08)&quot;" ondragleave="this.style.background=&quot;&quot;" ondrop="_onStagedDrop(event)" style="border:2px dashed var(--border);border-radius:8px;padding:11px 14px;margin-bottom:14px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;transition:background .15s">'
+      +'<div style="font-size:11px;color:var(--text2);flex:1 1 320px"><span style="font-weight:bold;color:var(--text)">📥 Drop one or more Order Details files here</span> (one per customer) to pull in BL / PO # / Invoice # / Status from Shipped &amp; Picked loads (matched by SKU + Weight). Dropping a file re-loads that customer only.'
+      +(hasRef?'<div style="margin-top:6px;color:#1a9e7a;font-weight:bold">✓ Reference loaded: '+meta.customers.toLocaleString()+' customer'+(meta.customers!==1?'s':'')+' · '+meta.lines.toLocaleString()+' Shipped/Picked line'+(meta.lines!==1?'s':'')+'</div>'+custList:'')
+      +'</div>'
+      +'<div style="display:flex;gap:8px">'
+      +'<button class="btn btn-sm" onclick="document.getElementById(&quot;staged-order-file&quot;).click()">Choose File(s)</button>'
+      +(hasRef?'<button class="btn btn-sm" onclick="clearStagedOrderRef()" style="border-color:var(--danger);color:var(--danger)">Clear All</button>':'')
+      +'</div>'
+      +'<input type="file" id="staged-order-file" accept=".xlsx,.xls" multiple style="display:none" onchange="if(this.files.length)handleStagedOrderFiles(this.files);this.value=&quot;&quot;;">'
+      +'</div>';
+    const html=
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">'
+      +'<div><div style="font-size:14px;font-weight:bold;letter-spacing:2px">🗂 STAGED INVENTORY</div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Staging bins (-00), grouped by location → load (BL) · '+locKeys.length+' location'+(locKeys.length!==1?'s':'')+' · '+blSet.size+' load'+(blSet.size!==1?'s':'')+' · '+rows.length+' skid'+(rows.length!==1?'s':'')+' · '+totQty.toLocaleString()+' total qty'+(conflictCount?' · <span style="color:var(--danger);font-weight:bold">⚠ '+conflictCount+' conflict'+(conflictCount!==1?'s':'')+'</span>':'')+'</div></div>'
+      +'<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="exportStagedInventoryExcel()" style="font-size:11px;background:#3d5ce6;border-color:#3d5ce6;color:#fff">⬇ Export Excel</button></div></div>'
+      +dock
+      +'<div style="flex:1;min-height:0;overflow:auto;border:1px solid var(--border);border-radius:8px"><table class="sku-table" style="font-size:11px;margin:0"><thead><tr>'
+      +['SKU','LOT','SKID ID','PRODUCT ID 1','PRODUCT ID 2','BL','PO #','INVOICE #','STATUS','DATE STAGED'].map(function(x){return '<th style="position:sticky;top:0;z-index:3;background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);white-space:nowrap;padding:8px 16px">'+x+'</th>';}).join('')
+      +'<th style="position:sticky;top:0;z-index:3;background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);text-align:right;white-space:nowrap;padding:8px 16px 8px 28px">QTY</th>'
+      +'</tr></thead><tbody>'
+      +(rows.length? body : '<tr><td colspan="11" style="text-align:center;color:var(--text2);padding:20px">No inventory is currently staged in -00 bins.</td></tr>')
+      +'</tbody>'+(rows.length?'<tfoot><tr><td colspan="10" style="font-weight:bold;text-align:right">TOTAL QTY</td><td style="text-align:right;font-weight:bold;color:#1a9e7a">'+totQty.toLocaleString()+'</td></tr></tfoot>':'')+'</table></div>';
     panel.innerHTML='<div class="panel-inner" style="padding:20px;height:100%;display:flex;flex-direction:column;box-sizing:border-box">'+html+'</div>';
   };
-  if(window._stagedDates){ render(); }
+  const afterDates=function(){ _stagedOrderLoad(render); };
+  if(window._stagedDates){ afterDates(); }
   else if(db){ panel.innerHTML='<div class="panel-inner" style="padding:20px"><div style="color:var(--text2)">Loading staged inventory...</div></div>';
-    db.ref('stagedDates6021').once('value').then(s=>{ window._stagedDates=s.val()||{}; render(); }).catch(()=>{ window._stagedDates={}; render(); });
-  } else { window._stagedDates={}; render(); }
+    db.ref('stagedDates6021').once('value').then(function(s){ window._stagedDates=s.val()||{}; afterDates(); }).catch(function(){ window._stagedDates={}; afterDates(); });
+  } else { window._stagedDates={}; afterDates(); }
 }
 function exportStagedInventoryExcel(){
   const rows=_stagedRows();
   if(!rows.length){ showAlert('No staged inventory to export.','warning'); return; }
-  const ds=d=>d?new Date(d).toLocaleDateString('en-US'):'';
-  const aoa=[['Customer','Location','SKU','Lot','Skid ID','Product ID 1','Product ID 2','Date Staged','QTY']];
-  rows.forEach(r=>aoa.push([r.customer, r.location, r.sku, r.lot, r.skid, r.prod1, r.prod2, ds(r.dateStaged), r.qty]));
+  const ds=function(d){return d?new Date(d).toLocaleDateString('en-US'):'';};
+  const aoa=[['Location','BL (Load)','PO #','Invoice #','Status','SKU','Lot','Skid ID','Product ID 1','Product ID 2','Date Staged','QTY']];
+  rows.forEach(function(r){
+    if(r.conflict){
+      const cands=(r.candidates||[]).map(function(c){return 'BL '+c.bl+(c.status?' ('+c.status+')':'');}).join(' | ');
+      const dup=(r.conflictReasons&&r.conflictReasons.indexOf('dup-skid')>=0)?'DUPLICATE LOT#+SKID':'';
+      const blCell='CONFLICT'+(cands?' — '+cands:'')+(dup?(cands?' · ':' — ')+dup:'');
+      aoa.push([r.location, blCell, '', '', 'CONFLICT', r.sku, r.lot, r.skid, r.prod1, r.prod2, ds(r.dateStaged), r.qty]);
+    } else {
+      aoa.push([r.location, r.bl, r.po, r.inv, r.status, r.sku, r.lot, r.skid, r.prod1, r.prod2, ds(r.dateStaged), r.qty]);
+    }
+  });
   const wb=XLSX.utils.book_new(); const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:16},{wch:12},{wch:14},{wch:16},{wch:16},{wch:24},{wch:14},{wch:12},{wch:8}];
+  ws['!cols']=[{wch:12},{wch:12},{wch:20},{wch:14},{wch:10},{wch:14},{wch:16},{wch:16},{wch:24},{wch:14},{wch:12},{wch:8}];
   XLSX.utils.book_append_sheet(wb,ws,'Staged Inventory');
-  const d=new Date(),p=n=>String(n).padStart(2,'0');
-  XLSX.writeFile(wb,`Staged_Inventory_6021_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}.xlsx`);
+  const d=new Date(),p=function(n){return String(n).padStart(2,'0');};
+  XLSX.writeFile(wb,'Staged_Inventory_6021_'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'.xlsx');
 }
-
 // ── Monthly inventory-accuracy snapshots ──────────────────────────────────────
 // Inventory accuracy (ghost/cycle %) is a point-in-time metric of the CURRENTLY loaded
 // inventory. To show it on an archived month, we freeze the value at month-end: every
