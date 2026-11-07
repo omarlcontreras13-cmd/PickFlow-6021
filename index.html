@@ -402,15 +402,22 @@ function unitNoun(ctx) {
 }
 function unitNounCap(ctx) { const u = unitNoun(ctx); return u.charAt(0).toUpperCase() + u.slice(1); }
 
-// ── IPG BUNDLE SKUs (non-DuraBubble) ─────────────────────────────────────────
+// ── IPG BUNDLE products (non-DuraBubble) ─────────────────────────────────────
 // IPG is counted in ROLLS across the board, with bundles (BUND) as the exception.
-// DuraBubble bundles are detected automatically by product family, but some other
-// products (e.g. STARFOAM PAF2504S12P12) also ship/are counted in bundles without a
-// DuraBubble signal — list those SKUs here so they resolve to BUND everywhere
-// (Inventory Details, Summary, Cycle Counts, reports) even if the IPG Materials master
-// hasn't been (re)imported. SKUs are compared case-insensitively, trimmed. Add more here.
-var IPG_BUND_SKUS = { 'PAF2504S12P12':1 };
+// Two product families resolve to bundles by DESCRIPTION (not a per-SKU list, so every
+// SKU in the family is covered automatically): DuraBubble and STARFOAM. The optional
+// IPG_BUND_SKUS list below is a belt-and-suspenders override for any one-off SKU whose
+// description doesn't carry the family word. SKUs are compared case-insensitively.
+var IPG_BUND_SKUS = {};   // e.g. { 'SOMESKU':1 } — most bundles are caught by description
 function _ipgIsBundSku(sku){ var s=String(sku==null?'':sku).trim().toUpperCase(); return !!(s && IPG_BUND_SKUS[s]===1); }
+// Starfoam ships/are counted in bundles. Detect from ANY description field so it works on a
+// master record (PTDESC01 / description) OR an inventory row (Product ID 1 / Prod ID 2) —
+// i.e. even when the SKU isn't in the imported IPG Materials master.
+function _ipgIsStarfoam(x){
+  if(!x) return false;
+  var blob=String(x.line||'')+' '+String(x.desc||'')+' '+String(x.productId||'')+' '+String(x.prod2||'');
+  return /STARFOAM/i.test(blob);
+}
 
 // ── IPG per-item UOM, surfaced across Ton View, Cycle Count, Put Away & reports ──
 // A row is "IPG" if its SKU is in the imported IPG Materials master OR it carries an
@@ -420,6 +427,7 @@ function _ipgIsBundSku(sku){ var s=String(sku==null?'':sku).trim().toUpperCase()
 function _rowIsIPG(r){
   if(!r) return false;
   if(_ipgIsBundSku(r.sku)) return true;   // named IPG bundle SKUs are IPG by definition
+  if(_ipgIsStarfoam(r)) return true;      // Starfoam is an IPG bundle product
   if(typeof ipgSkuLookup==='function' && ipgSkuLookup(r.sku)) return true;
   const bu=String(r.buRaw||r.bu||'').toUpperCase();
   if(bu==='IPG'||bu==='SOM'||bu.indexOf('IPG')===0||bu.indexOf('SOM')===0) return true;
@@ -430,6 +438,7 @@ function _rowIsIPG(r){
 function uomForRow(r){
   if(!r) return '';
   if(_ipgIsBundSku(r.sku)) return 'BUND';   // authoritative, independent of the SKU master
+  if(_ipgIsStarfoam(r)) return 'BUND';      // Starfoam → bundles (detected by description)
   if(typeof ipgSkuLookup!=='function') return '';
   const m=ipgSkuLookup(r.sku);
   return m ? ipgSkuUom(m) : '';
@@ -580,7 +589,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 142;
+const APP_BUILD = 144;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -4747,7 +4756,8 @@ function _ipgIsDura(rec){ const blob=((rec&&rec.line)||'')+' '+((rec&&rec.desc)|
 // unit) is ignored for the physical count so IPG never breaks out as sq ft / cases / etc.
 function ipgSkuUom(rec){
   if(_ipgIsDura(rec)) return 'BUND';
-  if(rec && _ipgIsBundSku(rec.sku)) return 'BUND';   // named bundle SKU (e.g. STARFOAM PAF2504S12P12)
+  if(_ipgIsStarfoam(rec)) return 'BUND';             // Starfoam family → bundles
+  if(rec && _ipgIsBundSku(rec.sku)) return 'BUND';   // optional one-off override list
   return 'ROLLS';
 }
 // DuraBubble anti-static SKUs carry an "AS" prefix (ASDBL48, ASEZ8X11.5). The base SKU
@@ -11631,35 +11641,94 @@ function archiveAll(silent=false, isAuto=false) {
 }
 
 // ─── EOD TIMER ────────────────────────────────────────────────────────────────
-// Fires once per Eastern day at or after the configured EOD time, on whichever
-// logged-in client is open. A per-day Firebase lock (eodLock) guarantees a single
-// archive across all open clients. Using ">= the scheduled time" (instead of an
-// exact-minute match) makes it resilient to background-tab throttling, a sleeping
-// machine, or a client that opens shortly after the EOD minute — it catches up the
-// first time any client sees the clock at/after the time that day.
+// Auto-archives PRINTED pick tickets at the configured Eastern EOD time. Runs every 20s
+// on whichever logged-in client is open. Instead of "only fire after today's EOD minute"
+// (which skipped a whole day if no client was open between EOD and midnight, and never
+// caught up the next morning because morning < EOD), it works off the MOST RECENT EOD
+// boundary that has already passed. Any printed ticket whose print/create time is on or
+// before that boundary is due and gets archived — so a day that was missed is swept up
+// the next time any client opens, while today's tickets still wait for today's EOD. A
+// Firebase lock (eodLock, keyed by the cutoff day) elects one client per batch and self-
+// heals if a holder claims it but never finishes (stale after EOD_LOCK_STALE_MS).
 let eodLastKey = null;
+const EOD_LOCK_STALE_MS = 120000;   // 2 min — a claimed-but-unfinished lock can be taken over
 function getEasternTime() { return new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'})); }
+// Eastern calendar/clock parts for an instant (no shifted-Date math — read straight from Intl).
+function _easternParts(date){
+  const ps = new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
+    .formatToParts(date).reduce((a,p)=>{ if(p.type!=='literal') a[p.type]=p.value; return a; },{});
+  return { y:+ps.year, mo:+ps.month, d:+ps.day, h:(+ps.hour)%24, mi:+ps.minute };
+}
+// Real epoch ms for an Eastern wall-clock (handles EST/EDT via the offset at that instant).
+function _easternWallToEpoch(y,mo,d,h,mi){
+  const guess = Date.UTC(y,mo-1,d,h,mi,0);
+  const ps = new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})
+    .formatToParts(new Date(guess)).reduce((a,p)=>{ if(p.type!=='literal') a[p.type]=p.value; return a; },{});
+  const asUTC = Date.UTC(+ps.year,+ps.month-1,+ps.day,(+ps.hour)%24,+ps.minute,+ps.second);
+  return guess - (asUTC - guess);   // guess - offset
+}
+// The most recent EOD boundary (Eastern h:m) that is already in the past, as epoch ms.
+function _eodCutoffMs(h,m){
+  const now = Date.now();
+  const p = _easternParts(new Date(now));
+  let cut = _easternWallToEpoch(p.y,p.mo,p.d,h,m);          // today's EOD
+  if (cut > now){                                          // today's EOD hasn't passed → yesterday's
+    const y = _easternParts(new Date(now - 24*60*60*1000));
+    cut = _easternWallToEpoch(y.y,y.mo,y.d,h,m);
+  }
+  return cut;
+}
+// The moment a ticket became eligible to archive: when it was printed, else when created.
+function _ticketArchiveBasisMs(t){
+  if (t && t.stamps && t.stamps.printed && t.stamps.printed.at) return t.stamps.printed.at;
+  if (t && t.created) return t.created;
+  return 0;   // anomalous printed ticket with no timestamps → treat as stale/due
+}
+// Archive every PRINTED ticket whose basis time is on/before the cutoff; keep the rest.
+function archiveDueTickets(cutMs){
+  const due=[], keep=[];
+  (state.tickets||[]).forEach(function(t){
+    if (ticketStageInfo(t).label==='PRINTED' && _ticketArchiveBasisMs(t) <= cutMs) due.push(t); else keep.push(t);
+  });
+  if (!due.length) return 0;
+  const who='EOD Auto';
+  due.forEach(function(t){ t.archivedAt=Date.now(); t.archivedBy=who; state.archivedTickets.push(t); });
+  state.tickets=keep;
+  if (state.activeTicket && !keep.some(function(t){return t.id===state.activeTicket;})) state.activeTicket=null;
+  // de-dupe archive by id (robust against two clients archiving the same batch) + 30-day trim
+  const seen={}, cutoff=Date.now()-(30*24*60*60*1000);
+  state.archivedTickets=state.archivedTickets.filter(function(t){
+    if (!t || (t.archivedAt||0) <= cutoff) return false;
+    if (seen[t.id]) return false; seen[t.id]=1; return true;
+  });
+  saveTickets(); saveArchive(); updateTicketList();
+  if (state.currentView==='dashboard') showDashboard();
+  return due.length;
+}
 function eodCheck() {
   if (!state.eodEnabled || !state.currentUser || !db) return;
-  const et = getEasternTime();
   const parts = (state.eodTime||'17:00').split(':').map(Number);
   const h = parts[0], m = parts[1];
   if (isNaN(h) || isNaN(m)) return;
-  const nowMin = et.getHours()*60 + et.getMinutes();
-  const schedMin = h*60 + m;
-  if (nowMin < schedMin) return;                       // not yet EOD today
-  const dateKey = et.toLocaleDateString().replace(/\//g,'-');
-  const lockKey = dateKey + '_' + (state.eodTime||'17:00').replace(':','-');
-  if (eodLastKey === lockKey) return;                  // already handled this session today
-  eodLastKey = lockKey;                                // optimistic guard before async call
-  db.ref('6021/eodLock/'+lockKey).transaction(cur => (cur===null ? true : undefined))
-    .then(r => {
-      if (r.committed && r.snapshot && r.snapshot.val()===true) {
-        const n = state.tickets.length;
-        if (n) { archiveAll(true, true); showAlert('EOD: '+n+' open tickets auto-archived.','success'); }
-      }
-    })
-    .catch(() => { eodLastKey = null; });               // allow retry after a transient error
+  const cutMs = _eodCutoffMs(h,m);
+  const due = (state.tickets||[]).filter(function(t){ return ticketStageInfo(t).label==='PRINTED' && _ticketArchiveBasisMs(t) <= cutMs; });
+  if (!due.length) return;                                 // nothing past the cutoff → done
+  const cd = _easternParts(new Date(cutMs)), p2=function(n){return String(n).padStart(2,'0');};
+  const lockKey = cd.y+'-'+p2(cd.mo)+'-'+p2(cd.d)+'_'+(state.eodTime||'17:00').replace(':','-');
+  db.ref('6021/eodLock/'+lockKey).transaction(function(cur){
+    const now=Date.now();
+    if (cur===null) return { at:now, by:(state.currentUser&&state.currentUser.name)||'EOD Auto', done:false };
+    if (cur && cur.done) return undefined;                           // already completed → abort
+    if (cur && cur.at && (now-cur.at) < EOD_LOCK_STALE_MS) return undefined;  // fresh holder working → abort
+    return { at:now, by:(state.currentUser&&state.currentUser.name)||'EOD Auto', done:false };  // stale → take over
+  }).then(function(r){
+    const v=r.committed && r.snapshot ? r.snapshot.val() : null;
+    if (v && v.done===false) {
+      const n=archiveDueTickets(cutMs);
+      db.ref('6021/eodLock/'+lockKey).update({ done:true, at:Date.now() }).catch(function(){});
+      if (n) showAlert('EOD: '+n+' printed ticket'+(n===1?'':'s')+' auto-archived.','success');
+    }
+  }).catch(function(){});
 }
 function setupEodTimer() {
   if (eodTimer) clearInterval(eodTimer);
