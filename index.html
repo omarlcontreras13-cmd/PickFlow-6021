@@ -418,6 +418,17 @@ function _ipgIsStarfoam(x){
   var blob=String(x.line||'')+' '+String(x.desc||'')+' '+String(x.productId||'')+' '+String(x.prod2||'');
   return /STARFOAM/i.test(blob);
 }
+// ── IPG PALLET SKUs ──────────────────────────────────────────────────────────
+// Specific Film SKUs that are received/counted by the PALLET (not all Film is palletized,
+// so this is an explicit per-SKU list, NOT a description family). Master unit for these is
+// LB/SQF/LF, so the list is authoritative and master-independent. Add future pallet SKUs here.
+// SKUs are compared case-insensitively, trimmed. Source: FILM_PALLETIZED_PIPER.
+var IPG_PALLET_SKUS = {
+  '9501015':1,'9506765':1,'9501025':1,'9501011':1,'9545252':1,'9506105':1,
+  '9921010':1,'9921015':1,'9511222':1,'9511225':1,'9511221':1,'9511224':1,
+  '9511226':1,'9511220':1,'9511223':1,'9511276':1,'9511585':1,'9511586':1
+};
+function _ipgIsPalletSku(sku){ var s=String(sku==null?'':sku).trim().toUpperCase(); return !!(s && IPG_PALLET_SKUS[s]===1); }
 
 // ── IPG per-item UOM, surfaced across Ton View, Cycle Count, Put Away & reports ──
 // A row is "IPG" if its SKU is in the imported IPG Materials master OR it carries an
@@ -428,6 +439,7 @@ function _rowIsIPG(r){
   if(!r) return false;
   if(_ipgIsBundSku(r.sku)) return true;   // named IPG bundle SKUs are IPG by definition
   if(_ipgIsStarfoam(r)) return true;      // Starfoam is an IPG bundle product
+  if(_ipgIsPalletSku(r.sku)) return true; // named IPG pallet (Film) SKUs are IPG by definition
   if(typeof ipgSkuLookup==='function' && ipgSkuLookup(r.sku)) return true;
   const bu=String(r.buRaw||r.bu||'').toUpperCase();
   if(bu==='IPG'||bu==='SOM'||bu.indexOf('IPG')===0||bu.indexOf('SOM')===0) return true;
@@ -437,14 +449,15 @@ function _rowIsIPG(r){
 // Authoritative UOM code for an inventory row ('' when the SKU isn't in the master).
 function uomForRow(r){
   if(!r) return '';
-  if(_ipgIsBundSku(r.sku)) return 'BUND';   // authoritative, independent of the SKU master
-  if(_ipgIsStarfoam(r)) return 'BUND';      // Starfoam → bundles (detected by description)
+  if(_ipgIsBundSku(r.sku)) return 'BUND';     // authoritative, independent of the SKU master
+  if(_ipgIsStarfoam(r)) return 'BUND';        // Starfoam → bundles (detected by description)
+  if(_ipgIsPalletSku(r.sku)) return 'PALLET'; // named Film pallet SKUs → pallets
   if(typeof ipgSkuLookup!=='function') return '';
   const m=ipgSkuLookup(r.sku);
   return m ? ipgSkuUom(m) : '';
 }
 // Plural unit word for a UOM code — used in "N bundles / cases / rolls" count labels.
-var _UOM_WORDS={BUND:'bundle',CS:'case',CA:'case',E:'each',EA:'each',RL:'roll',ROLL:'roll',ROLLS:'roll',LB:'lb',SQF:'sq ft',P:'pallet',PLT:'pallet',PAL:'pallet',BAG:'bag',BX:'box',BOX:'box',SKD:'skid',SKID:'skid'};
+var _UOM_WORDS={BUND:'bundle',CS:'case',CA:'case',E:'each',EA:'each',RL:'roll',ROLL:'roll',ROLLS:'roll',LB:'lb',SQF:'sq ft',P:'pallet',PLT:'pallet',PAL:'pallet',PALLET:'pallet',PALLETS:'pallet',BAG:'bag',BX:'box',BOX:'box',SKD:'skid',SKID:'skid'};
 function uomWord(uom,n){
   const c=String(uom||'').toUpperCase(); if(!c) return '';
   const base=_UOM_WORDS[c]||c.toLowerCase();
@@ -589,7 +602,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 144;
+const APP_BUILD = 145;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -4758,6 +4771,7 @@ function ipgSkuUom(rec){
   if(_ipgIsDura(rec)) return 'BUND';
   if(_ipgIsStarfoam(rec)) return 'BUND';             // Starfoam family → bundles
   if(rec && _ipgIsBundSku(rec.sku)) return 'BUND';   // optional one-off override list
+  if(rec && _ipgIsPalletSku(rec.sku)) return 'PALLET'; // named Film pallet SKUs → pallets
   return 'ROLLS';
 }
 // DuraBubble anti-static SKUs carry an "AS" prefix (ASDBL48, ASEZ8X11.5). The base SKU
