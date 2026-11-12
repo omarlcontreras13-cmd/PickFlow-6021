@@ -352,6 +352,15 @@ function classifyRoll(r) {
   if (loc.includes('CYC_CNT') || loc.includes('CYC-CNT') || st === 'CYCLE COUNT') return 'CYCLE COUNT';
   return 'AVAILABLE';
 }
+// True when a roll is in Ghost or Cycle Count status (by status field or location). Mirrors
+// classifyRoll's Ghost/Cycle tests but without the PICKED short-circuit, so it can be applied
+// to any roll. Used to drop Ghost/Cycle rolls from the NOR/COV/IPG EOD *summary* counts.
+function _isGhostOrCycle(r){
+  const loc=(r&&r.location||'').toString().toUpperCase(), st=(r&&r.status||'').toString().toUpperCase();
+  if(loc==='23-GHOST-00' || st==='GHOST') return true;
+  if(loc.includes('CYC_CNT') || loc.includes('CYC-CNT') || st==='CYCLE COUNT') return true;
+  return false;
+}
 // Inventory Accuracy (by roll count): (Total - Cycle Count - Ghost) / Total.
 // Outbound staging bins end in "-00" (e.g. 23-00-00, 23-02-00). These hold staged
 // outbound orders and are EXCLUDED from all Cycle Count logic (list, totals, suggested,
@@ -366,6 +375,26 @@ function isCCStaging(loc){
 const CC_FOREIGN_PREFIX = '22';
 function isOtherFacilityLoc(loc){
   return new RegExp('^'+CC_FOREIGN_PREFIX+'-').test(String(loc==null?'':loc).trim());
+}
+// A real PUT-AWAY bin: a regular numeric aisle-bay-level location (e.g. 23-11-09). Excludes
+// receiving staging locations (…RRSTG…, …TRSTG…, any non-numeric segment), the outbound
+// staging bins ending in -00, and other-facility aisles. Used by the Last Put Away view so
+// receiving/staging rolls aren't counted as put away.
+function isPutAwayLoc(loc){
+  const s = String(loc==null?'':loc).trim().toUpperCase();
+  if(!s) return false;
+  if(isCCStaging(s)) return false;         // outbound staging bins (…-00)
+  if(isOtherFacilityLoc(s)) return false;  // another facility's aisles (22-series here)
+  const p = s.split('-');
+  if(p.length < 2) return false;
+  return p.every(seg => /^[0-9]+$/.test(seg));   // every segment numeric → a real put-away bin
+}
+// A RECEIVING staging location (…RRSTG…, …TRSTG…). A roll first seen here marks its receipt
+// date; once it moves to a numeric bin that move marks its put-away date. Used by the movement
+// date tracker so Last Put Away can show both Date Rec'd and Date Put Away.
+function isReceivingLoc(loc){
+  const s = String(loc==null?'':loc).trim().toUpperCase();
+  return s.indexOf('RRSTG')>=0 || s.indexOf('TRSTG')>=0;
 }
 function inventoryAccuracyStats(excludeStaging) {
   // excludeStaging (Cycle Count screens): drop rolls in outbound staging bins ending in -00
@@ -602,7 +631,7 @@ function setSyncStatus(s) {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 145;
+const APP_BUILD = 148;
 const VERSION_PATH = '6021/appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -1440,6 +1469,7 @@ function importInventory(wb, filename, batchMode=false) {
   state.dataLoaded = true;
   _writeCCInvSnapshot();   // freeze this month's inventory-accuracy snapshot (month-end = last import of the month)
   _syncStagedDates();      // record first-seen staged date for skids now in -00 bins
+  _syncMovementDates();    // record first-seen receipt (RRSTG/TRSTG) + put-away (numeric) dates
   enableAppButtons();
 
   if (!batchMode) {
@@ -8647,14 +8677,17 @@ function paToggleAll(expand) {
 
 // ─── LAST PUT AWAY ────────────────────────────────────────────────────────────
 function showLastPutAway(filterDate='') {
-  const inv = state.inventory.filter(r=>(r.pcsPending||0)===0 && (r.status||'').toUpperCase()!=='GHOST');
-  if (!inv.length) { showAlert('No available inventory loaded.','warning'); return; }
+  // Only real put-away bins (regular numeric locations). Receiving locations (RRSTG/TRSTG)
+  // and outbound staging bins (…-00) are NOT put-away locations and are excluded here.
+  const inv = state.inventory.filter(r=>(r.pcsPending||0)===0 && (r.status||'').toUpperCase()!=='GHOST' && isPutAwayLoc(r.location));
+  if (!inv.length) { showAlert('No available inventory in put-away locations loaded.','warning'); return; }
 
   // Get unique dates for the picker
   const allDates = [...new Set(inv.map(r=>r.dateRecd?new Date(r.dateRecd).toLocaleDateString('en-US'):null).filter(Boolean))].sort((a,b)=>new Date(b)-new Date(a));
 
   // Use most recent date if no filter set
   const selectedDate = filterDate || allDates[0] || '';
+  window._lpaSelectedDate = selectedDate;   // remembered for the Export Excel button
 
   const filtered = selectedDate ? inv.filter(r=>{
     if (!r.dateRecd) return false;
@@ -8685,6 +8718,7 @@ function showLastPutAway(filterDate='') {
       </select>
       <button class="btn btn-sm" onclick="lpaToggleAll(true)">▼ Expand All</button>
       <button class="btn btn-sm" onclick="lpaToggleAll(false)">▶ Collapse All</button>
+      <button class="btn btn-sm" onclick="exportLastPutAway()" style="background:var(--accent);color:#fff;border-color:var(--accent)">⬇ Export Excel</button>
     </div>
   </div>
 
@@ -8723,6 +8757,8 @@ function showLastPutAway(filterDate='') {
           <table class="data-table" style="font-size:11px;margin:0">
             <thead><tr>
               <th style="text-align:left">LOCATION</th>
+              <th style="text-align:left">SKU</th>
+              <th style="text-align:left">PROD ID 2</th>
               <th style="text-align:left">LOT #</th>
               <th style="text-align:right">${unitNounForRows(custRolls, cust).toUpperCase()}</th>
               <th style="text-align:right">TONS</th>
@@ -8732,9 +8768,13 @@ function showLastPutAway(filterDate='') {
       Object.keys(custData).sort().forEach((loc, li) => {
         const locRolls = custData[loc];
         const lots = [...new Set(locRolls.map(r=>r.lot).filter(Boolean))];
+        const skus = [...new Set(locRolls.map(r=>r.sku).filter(Boolean))];
+        const prod2s = [...new Set(locRolls.map(r=>r.prod2).filter(Boolean))];
         const locTons = locRolls.reduce((s,r)=>s+(r.tons||0),0);
         h += `<tr style="background:${li%2!==0?'var(--surface)':''}">
           <td style="font-weight:bold;color:var(--accent)">${loc}</td>
+          <td style="font-size:10px">${skus.slice(0,3).join(', ')}${skus.length>3?' +'+(skus.length-3):''}</td>
+          <td style="font-size:10px;color:var(--text2)">${prod2s.slice(0,2).join(', ')}${prod2s.length>2?' +'+(prod2s.length-2):''}</td>
           <td style="font-size:10px;color:var(--text2)">${lots.slice(0,4).join(', ')}${lots.length>4?' +'+( lots.length-4)+' more':''}</td>
           <td style="text-align:right">${locRolls.length}</td>
           <td style="text-align:right;font-weight:bold;color:var(--warning)">${Math.round(locTons)}</td>
@@ -8742,7 +8782,7 @@ function showLastPutAway(filterDate='') {
       });
 
       h += `<tr style="background:var(--surface2);font-weight:bold">
-        <td colspan="2" style="color:var(--text2)">Customer Total</td>
+        <td colspan="4" style="color:var(--text2)">Customer Total</td>
         <td style="text-align:right;color:var(--accent2)">${custRolls.length}</td>
         <td style="text-align:right;color:var(--warning);font-size:13px">${Math.round(custTons)}</td>
       </tr>`;
@@ -8769,6 +8809,35 @@ function lpaToggleAll(expand) {
     el.style.display=expand?'block':'none';
     if(chev) chev.textContent=expand?'▼':'▶';
   });
+}
+// Export the Last Put Away view as one row per roll (location + roll details), honoring the
+// current date filter and the same put-away-location rule used on screen.
+function exportLastPutAway() {
+  const selectedDate = window._lpaSelectedDate || '';
+  const base = state.inventory.filter(r=>(r.pcsPending||0)===0 && (r.status||'').toUpperCase()!=='GHOST' && isPutAwayLoc(r.location));
+  const rows = selectedDate
+    ? base.filter(r=> r.dateRecd && new Date(r.dateRecd).toLocaleDateString('en-US')===selectedDate)
+    : base;
+  if (!rows.length) { showAlert('No put-away rolls to export.','warning'); return; }
+  rows.sort((a,b)=> (a.customer||'').localeCompare(b.customer||'')
+    || (a.location||'').localeCompare(b.location||'', undefined, {numeric:true})
+    || (a.lot||'').localeCompare(b.lot||'', undefined, {numeric:true}));
+  const aoa = [['Customer','Location','SKU','Product ID 1','Product ID 2','Lot #','Skid ID','PCS','Tons','Date Rec\'d','Date Put Away','Inbound BOL','Exp Date']];
+  const fmtD = ts => ts ? new Date(ts).toLocaleDateString('en-US') : '';
+  rows.forEach(r=>{
+    const expD = r.dirExpDate||r.expDate;
+    aoa.push([ r.customer||'', r.location||'', r.sku||'', r.productId||'', r.prod2||'', r.lot||'', r.skidId||'',
+      r.pcs||0, Math.round((r.tons||0)*100)/100,
+      fmtD(_receiptDateOf(r)), fmtD(_putAwayDateOf(r)),
+      r.bol||'', expD?new Date(expD).toLocaleDateString('en-US'):'' ]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{wch:20},{wch:14},{wch:16},{wch:18},{wch:22},{wch:16},{wch:16},{wch:6},{wch:8},{wch:12},{wch:13},{wch:16},{wch:12}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Last Put Away');
+  const tag = selectedDate ? selectedDate.replace(/\//g,'-') : 'AllDates';
+  XLSX.writeFile(wb, 'PickFlow_6021_LastPutAway_'+tag+'.xlsx');
+  showAlert('✓ Last Put Away exported — '+rows.length+' rolls.','success');
 }
 
 
@@ -9380,6 +9449,39 @@ function _syncStagedDates(){
     db.ref('stagedDates6021').set(map).catch(()=>{});
   }).catch(()=>{});
 }
+// Read-merge-write the movement-date map. Per skid we stamp the first date it is seen in a
+// RECEIVING location (RRSTG/TRSTG → receipt date) and the first date it is seen in a numeric
+// PUT-AWAY bin (→ put-away date). Unlike staged dates these are KEPT once stamped, even after
+// the roll moves on, so Last Put Away can show both dates for a roll now in its put-away bin.
+// A skid is only dropped when it leaves inventory entirely. On the very first run (node never
+// existed) existing rolls are seeded from their WMS Date Rec'd rather than today's import date,
+// so historical stock isn't all mislabeled with the launch date; going forward, real moves get
+// the import date they were observed.
+function _syncMovementDates(){
+  if(!db) return;
+  const nowTs = state.lastImport || Date.now();
+  const present = {};
+  (state.inventory||[]).forEach(r=>{ present[_skidKey(r)]=1; });
+  db.ref('movementDates6021').once('value').then(snap=>{
+    const firstInit = !snap.exists();
+    const map = snap.val() || {};
+    (state.inventory||[]).forEach(r=>{
+      const rec = isReceivingLoc(r.location), put = isPutAwayLoc(r.location);
+      if(!rec && !put) return;
+      const k=_skidKey(r); const e = map[k] || (map[k]={});
+      const stamp = firstInit ? (r.dateRecd||nowTs) : nowTs;
+      if(rec && !e.receipt) e.receipt = stamp;
+      if(put && !e.putaway) e.putaway = stamp;
+    });
+    Object.keys(map).forEach(k=>{ if(!present[k]) delete map[k]; });
+    window._movementDates = map;
+    db.ref('movementDates6021').set(map).catch(()=>{});
+  }).catch(()=>{});
+}
+// Receipt date = first seen in RRSTG/TRSTG (falls back to the WMS Date Rec'd).
+function _receiptDateOf(r){ const e=(window._movementDates||{})[_skidKey(r)]; return (e&&e.receipt) || r.dateRecd || null; }
+// Put-away date = first seen in a numeric put-away bin (falls back to the WMS Date Rec'd).
+function _putAwayDateOf(r){ const e=(window._movementDates||{})[_skidKey(r)]; return (e&&e.putaway) || r.dateRecd || null; }
 // Ghost and Cycle Count stock is never real staged inventory — exclude by location name or status.
 function _stagedExcluded(r){
   const L=(r.location||'').toUpperCase(), S=(r.status||'').toUpperCase();
@@ -12044,15 +12146,17 @@ function exportEodReport(code){
   if(!rows.length){ showAlert('No non-picked '+wantName+' inventory to export.','warning'); return; }
 
   // Summary pivot: SKU -> Count of Lot # (rolls per SKU). Group case-insensitively so a SKU
-  // that differs only by letter case is not split into two rows.
+  // that differs only by letter case is not split into two rows. Ghost / Cycle Count rolls are
+  // excluded from the summary counts (the COV detail tab below still lists every roll).
+  const sumRows=rows.filter(function(r){ return !_isGhostOrCycle(r); });
   const skuCount={};
-  rows.forEach(function(r){ const k=(r.sku||'(BLANK)').toString().toUpperCase(); skuCount[k]=(skuCount[k]||0)+1; });
-  const custs=[...new Set(rows.map(function(r){return (r.customer||'').toString().toUpperCase();}).filter(Boolean))];
+  sumRows.forEach(function(r){ const k=(r.sku||'(BLANK)').toString().toUpperCase(); skuCount[k]=(skuCount[k]||0)+1; });
+  const custs=[...new Set(sumRows.map(function(r){return (r.customer||'').toString().toUpperCase();}).filter(Boolean))];
 
   const sum=[['CUSTOMER', custs.join(', ')],['BU', wantName],['',''],['SKU','COUNT OF LOT #']];
   Object.keys(skuCount).sort().forEach(function(k){ sum.push([k, skuCount[k]]); });
   sum.push(['','']);                          // blank separator line above Grand Total
-  sum.push(['GRAND TOTAL', rows.length]);
+  sum.push(['GRAND TOTAL', sumRows.length]);
 
   const ws=XLSX.utils.aoa_to_sheet(sum);
   ws['!cols']=[{wch:22},{wch:16}];
@@ -12077,7 +12181,7 @@ function exportEodReport(code){
     XLSX.utils.book_append_sheet(wb, wsD, 'Detail');
   }
   XLSX.writeFile(wb, 'PickFlow_6021_'+code+'_EOD_'+new Date().toISOString().slice(0,10)+'.xlsx');
-  showAlert('✓ '+wantName+' EOD exported — '+rows.length+' rolls (picked excluded).','success');
+  showAlert('✓ '+wantName+' EOD exported — '+sumRows.length+' rolls in summary (picked, ghost & cycle count excluded).','success');
 }
 
 // IPG EOD — duplicates the Warehouse Detail Report for IPG only: Tab 1 summary (SKU →
@@ -12087,8 +12191,10 @@ function exportIpgEod(){
   if(!rows.length){ showAlert('No IPG inventory to export.','warning'); return; }
   const custLabel=[...new Set(rows.map(function(r){return (r.customer||'').toString().trim();}).filter(Boolean))].join(', ') || 'IPG';
   // ---- Tab 1: Summary — count of Lot # per SKU, split Inventory (pcsPending=0) vs Picked (pcsPending>0) ----
+  // Ghost / Cycle Count rolls are excluded from the summary counts (the Detail tab lists all rolls).
   const agg={}, order=[];
   rows.forEach(function(r){
+    if(_isGhostOrCycle(r)) return;
     const sku=(r.sku||'(BLANK)').toString();
     if(!agg[sku]){ agg[sku]={pid:(r.productId||''), inv:0, pk:0}; order.push(sku); }
     if((r.pcsPending||0)>0) agg[sku].pk++; else agg[sku].inv++;
